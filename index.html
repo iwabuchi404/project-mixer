@@ -25,16 +25,20 @@
     </div>
     <div id="vsplitter-2" class="vsplitter"></div>
     <div id="main-pane">
+      <div id="terminal-pane">
+        <div id="tab-bar"><button id="new-tab-btn">+ New Terminal</button></div>
+        <div id="terminal-container"></div>
+      </div>
+      <div id="splitter" class="hidden"></div>
       <div id="editor-pane" class="hidden">
         <div id="editor-tab-bar"></div>
         <div id="editor-content">
           <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
         </div>
-      </div>
-      <div id="splitter" class="hidden"></div>
-      <div id="terminal-pane">
-        <div id="tab-bar"><button id="new-tab-btn">+ New Terminal</button></div>
-        <div id="terminal-container"></div>
+        <div id="send-bar">
+          <span id="send-target">→ no terminal</span>
+          <button id="send-btn" title="Send to terminal (Ctrl+Enter)">Send</button>
+        </div>
       </div>
     </div>
   </div>

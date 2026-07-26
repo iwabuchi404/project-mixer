@@ -31,4 +31,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Folder dialog
   openFolderDialog: () => ipcRenderer.invoke('dialog:openFolder'),
+
+  // Hook-based waiting indicator
+  onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),
 });

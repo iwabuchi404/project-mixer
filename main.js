@@ -230,3 +230,13 @@ ipcMain.handle('dialog:openFolder', async () => {
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
 });
+
+// --- Hook-based waiting indicator ---
+// Receives notifications from Claude Code/Codex hook scripts via HTTP or CLI.
+// The hook script calls: electron --hook-notify <json>
+// Or sends an HTTP POST to a local endpoint.
+
+ipcMain.handle('hook:notify', async (event, { type, projectId, tabId, waiting }) => {
+  mainWindow.webContents.send('hook:notify', { type, projectId, tabId, waiting });
+  return true;
+});

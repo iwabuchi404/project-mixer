@@ -210,12 +210,12 @@ body {
 /* Editor pane */
 
 #editor-pane {
-  height: 40%;
+  height: 120px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: #1e1e1e;
-  border-bottom: 1px solid #3e3e3e;
+  border-top: 1px solid #3e3e3e;
 }
 
 #editor-pane.hidden {
@@ -300,6 +300,50 @@ body {
   flex-shrink: 0;
   background: #3e3e3e;
   cursor: ns-resize;
+}
+
+/* Send bar */
+
+#send-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  background: #252526;
+  border-top: 1px solid #3e3e3e;
+  flex-shrink: 0;
+  min-height: 28px;
+}
+
+#send-target {
+  font-size: 11px;
+  color: #888;
+  font-family: Consolas, monospace;
+}
+
+#send-btn {
+  background: #0c7bef;
+  color: #fff;
+  border: none;
+  padding: 4px 16px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+#send-btn:hover {
+  background: #1c8bff;
+}
+
+#send-btn:disabled {
+  background: #3c3c3c;
+  color: #666;
+  cursor: default;
+}
+
+.editor-tab.scratch {
+  font-style: italic;
+  color: #e2c08d;
 }
 
 #splitter.hidden {
