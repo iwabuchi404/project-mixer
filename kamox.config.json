@@ -1,0 +1,5 @@
+{
+  "mode": "electron",
+  "entryPoint": "main.js",
+  "port": 3000
+}
