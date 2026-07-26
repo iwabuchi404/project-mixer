@@ -2,26 +2,41 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Project Mixer - Spike S1/S2</title>
+  <title>Project Mixer</title>
   <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="app">
-    <div id="toolbar">
-      <select id="command-select">
-        <option value="pwsh.exe">pwsh</option>
-        <option value="powershell.exe">Windows PowerShell</option>
-        <option value="cmd.exe">cmd</option>
-        <option value="claude">claude (Claude Code)</option>
-        <option value="codex">codex</option>
-      </select>
-      <input type="text" id="cwd-input" placeholder="cwd (empty = home)">
-      <button id="spawn8-btn">Spawn 8x (S2 memory test)</button>
-      <div id="mem-display"></div>
+    <div id="sidebar">
+      <div id="sidebar-header">
+        <span>Projects</span>
+        <button id="add-project-btn" title="Add Project">+</button>
+      </div>
+      <div id="project-list"></div>
+      <div id="sidebar-footer">
+        <div id="mem-display"></div>
+      </div>
     </div>
-    <div id="tab-bar"><button id="new-tab-btn">+ New Terminal</button></div>
-    <div id="terminal-container"></div>
+    <div id="file-tree-pane">
+      <div id="file-tree-header">Files</div>
+      <div id="file-tree"></div>
+    </div>
+    <div id="main-pane">
+      <div id="tab-bar"><button id="new-tab-btn">+ New Terminal</button></div>
+      <div id="terminal-container"></div>
+    </div>
+  </div>
+  <div id="add-project-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Add Project</h3>
+      <input type="text" id="project-name-input" placeholder="Project name">
+      <input type="text" id="project-path-input" placeholder="Project path (e.g. D:\work\my-project)">
+      <div class="modal-buttons">
+        <button id="project-cancel-btn">Cancel</button>
+        <button id="project-confirm-btn">Add</button>
+      </div>
+    </div>
   </div>
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>

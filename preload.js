@@ -1,11 +1,29 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  // PTY
   ptyCreate: (opts) => ipcRenderer.invoke('pty:create', opts),
   ptyWrite: (id, data) => ipcRenderer.invoke('pty:write', { id, data }),
   ptyResize: (id, cols, rows) => ipcRenderer.invoke('pty:resize', { id, cols, rows }),
   ptyKill: (id) => ipcRenderer.invoke('pty:kill', { id }),
-  memGet: () => ipcRenderer.invoke('mem:get'),
   onPtyData: (callback) => ipcRenderer.on('pty:data', (_e, payload) => callback(payload)),
   onPtyExit: (callback) => ipcRenderer.on('pty:exit', (_e, payload) => callback(payload)),
+
+  // Memory
+  memGet: () => ipcRenderer.invoke('mem:get'),
+
+  // Projects
+  projectList: () => ipcRenderer.invoke('project:list'),
+  projectAdd: (name, projPath) => ipcRenderer.invoke('project:add', { name, path: projPath }),
+  projectRemove: (id) => ipcRenderer.invoke('project:remove', { id }),
+
+  // File tree
+  readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', { dirPath }),
+
+  // Clipboard image
+  clipboardSaveImage: (projectPath) => ipcRenderer.invoke('clipboard:saveImage', { projectPath }),
+
+  // Layout
+  layoutSave: (layout) => ipcRenderer.invoke('layout:save', { layout }),
+  layoutLoad: () => ipcRenderer.invoke('layout:load'),
 });
