@@ -43,10 +43,48 @@ const statusRight = document.getElementById('status-right');
 // PTY data/exit handlers
 // ============================================================
 
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '').replace(/\x1b[()][AB012]/g, '');
+}
+
+const WAITING_PATTERNS = [
+  /> \s*$/,                  // generic prompt ending with "> "
+  /❯\s*$/,                   // Claude Code prompt
+  /\?\s+(Yes|No|y\/n)/i,     // yes/no confirmation
+  /Do you want/i,
+  /Would you like/i,
+  /Allow/i,
+  /Proceed\?/i,
+  /Press Enter/i,
+  /\[y\/N\]/i,
+  /\(yes\)/i,
+  /\(no\)/i,
+  /Enter to continue/i,
+];
+
+function detectWaiting(command, data) {
+  const isAgent = command === 'claude' || command === 'codex';
+  if (!isAgent) return false;
+  const stripped = stripAnsi(data);
+  const lines = stripped.split(/\r?\n/);
+  const lastLine = lines[lines.length - 1].trimEnd();
+  if (!lastLine) return false;
+  for (const pattern of WAITING_PATTERNS) {
+    if (pattern.test(lastLine)) return true;
+  }
+  return false;
+}
+
 window.api.onPtyData(({ id, data }) => {
-  for (const [, t] of tabs) {
+  for (const [tabId, t] of tabs) {
     if (t.ptyId === id) {
       t.terminal.write(data);
+      const wasWaiting = t.waiting;
+      t.waiting = detectWaiting(t.command, data);
+      if (t.waiting !== wasWaiting) {
+        updateTabStatus(tabId);
+        updateProjectStatus(t.projectId);
+      }
       return;
     }
   }
@@ -58,6 +96,7 @@ window.api.onPtyExit(({ id, exitCode }) => {
       t.terminal.write(`\r\n\x1b[90m[process exited with code ${exitCode}]\x1b[0m\r\n`);
       t.waiting = false;
       updateTabStatus(tabId);
+      updateProjectStatus(t.projectId);
       return;
     }
   }
@@ -469,6 +508,14 @@ async function createTerminal(command, cwd, projectId) {
 
   terminal.onData((data) => {
     window.api.ptyWrite(ptyId, data);
+    for (const [tid, td] of tabs) {
+      if (td.ptyId === ptyId && td.waiting) {
+        td.waiting = false;
+        updateTabStatus(tid);
+        updateProjectStatus(td.projectId);
+        break;
+      }
+    }
   });
 
   const tabId = ++tabCounter;
@@ -516,11 +563,13 @@ function closeTerminal(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
 
+  const projectId = t.projectId;
   window.api.ptyKill(t.ptyId);
   t.terminal.dispose();
   t.termEl.remove();
   t.tabElement.remove();
   tabs.delete(tabId);
+  updateProjectStatus(projectId);
 
   if (activeTabId === tabId) {
     const firstId = tabs.keys().next().value;
@@ -539,6 +588,23 @@ function updateTabStatus(tabId) {
   const statusEl = t.tabElement.querySelector('.tab-status');
   if (statusEl) {
     statusEl.className = 'tab-status ' + (t.waiting ? 'waiting' : 'idle');
+  }
+}
+
+function updateProjectStatus(projectId) {
+  if (!projectId) return;
+  const anyWaiting = Array.from(tabs.values()).some(t => t.projectId === projectId && t.waiting);
+  const el = projectList.querySelector(`.project-item .project-status`);
+  const items = projectList.querySelectorAll('.project-item');
+  for (const item of items) {
+    const removeBtn = item.querySelector('.project-remove');
+    if (removeBtn && removeBtn.dataset.id === projectId) {
+      const statusEl = item.querySelector('.project-status');
+      if (statusEl) {
+        statusEl.className = 'project-status ' + (anyWaiting ? 'waiting' : 'idle');
+      }
+      return;
+    }
   }
 }
 
