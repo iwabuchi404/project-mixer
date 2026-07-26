@@ -171,6 +171,26 @@ ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
   }
 });
 
+// --- File read/write ---
+
+ipcMain.handle('fs:readFile', async (event, { filePath }) => {
+  try {
+    const content = await fsp.readFile(filePath, 'utf-8');
+    return { success: true, content };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('fs:writeFile', async (event, { filePath, content }) => {
+  try {
+    await fsp.writeFile(filePath, content, 'utf-8');
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 // --- Clipboard image ---
 
 ipcMain.handle('clipboard:saveImage', async (event, { projectPath }) => {

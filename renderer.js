@@ -28,6 +28,11 @@ const tabBar = document.getElementById('tab-bar');
 const terminalContainer = document.getElementById('terminal-container');
 const newTabBtn = document.getElementById('new-tab-btn');
 const memDisplay = document.getElementById('mem-display');
+const editorPane = document.getElementById('editor-pane');
+const editorTabBar = document.getElementById('editor-tab-bar');
+const editorTextarea = document.getElementById('editor-textarea');
+const splitter = document.getElementById('splitter');
+const contextMenu = document.getElementById('context-menu');
 
 // ============================================================
 // PTY data/exit handlers
@@ -183,8 +188,14 @@ function createTreeItem(entry, depth) {
         el.after(container);
       }
     } else {
-      insertPathToTerminal(entry.path);
+      openFileInEditor(entry.path, entry.name);
     }
+  });
+
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, entry);
   });
 
   return el;
@@ -197,6 +208,218 @@ function insertPathToTerminal(filePath) {
     window.api.ptyWrite(t.ptyId, filePath);
   }
 }
+
+function insertNameToTerminal(filePath) {
+  if (activeTabId === null) return;
+  const t = tabs.get(activeTabId);
+  if (t) {
+    const name = filePath.split(/[\\/]/).pop();
+    window.api.ptyWrite(t.ptyId, name);
+  }
+}
+
+// ============================================================
+// Context menu
+// ============================================================
+
+let contextMenuEntry = null;
+
+function showContextMenu(x, y, entry) {
+  contextMenuEntry = entry;
+  contextMenu.classList.remove('hidden');
+  contextMenu.style.left = x + 'px';
+  contextMenu.style.top = y + 'px';
+}
+
+function hideContextMenu() {
+  contextMenu.classList.add('hidden');
+  contextMenuEntry = null;
+}
+
+contextMenu.addEventListener('click', (e) => {
+  const action = e.target.dataset.action;
+  if (!action || !contextMenuEntry) return;
+
+  if (action === 'open' && !contextMenuEntry.isDirectory) {
+    openFileInEditor(contextMenuEntry.path, contextMenuEntry.name);
+  } else if (action === 'insert-path') {
+    insertPathToTerminal(contextMenuEntry.path);
+  } else if (action === 'insert-name') {
+    insertNameToTerminal(contextMenuEntry.path);
+  }
+  hideContextMenu();
+});
+
+document.addEventListener('click', () => hideContextMenu());
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('.tree-item')) hideContextMenu();
+});
+
+// ============================================================
+// Editor management
+// ============================================================
+
+const openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl }
+let activeFilePath = null;
+
+async function openFileInEditor(filePath, name) {
+  if (openFiles.has(filePath)) {
+    switchEditorTab(filePath);
+    return;
+  }
+
+  const result = await window.api.readFile(filePath);
+  if (!result.success) {
+    return;
+  }
+
+  const fileData = {
+    path: filePath,
+    name,
+    content: result.content,
+    originalContent: result.content,
+    tabEl: null,
+  };
+
+  const tabEl = document.createElement('div');
+  tabEl.className = 'editor-tab';
+  tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-dirty hidden">*</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.dataset.path = filePath;
+
+  tabEl.addEventListener('click', (e) => {
+    if (e.target.classList.contains('editor-tab-close')) {
+      closeEditorTab(filePath);
+    } else {
+      switchEditorTab(filePath);
+    }
+  });
+
+  editorTabBar.appendChild(tabEl);
+  fileData.tabEl = tabEl;
+  openFiles.set(filePath, fileData);
+
+  showEditorPane();
+  switchEditorTab(filePath);
+}
+
+function switchEditorTab(filePath) {
+  const f = openFiles.get(filePath);
+  if (!f) return;
+
+  openFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
+  f.tabEl.classList.add('active');
+
+  editorTextarea.value = f.content;
+  activeFilePath = filePath;
+  updateEditorDirty(filePath);
+  editorTextarea.focus();
+}
+
+function closeEditorTab(filePath) {
+  const f = openFiles.get(filePath);
+  if (!f) return;
+
+  f.tabEl.remove();
+  openFiles.delete(filePath);
+
+  if (activeFilePath === filePath) {
+    const nextPath = openFiles.keys().next().value;
+    if (nextPath) {
+      switchEditorTab(nextPath);
+    } else {
+      activeFilePath = null;
+      editorTextarea.value = '';
+      hideEditorPane();
+    }
+  }
+}
+
+function showEditorPane() {
+  editorPane.classList.remove('hidden');
+  splitter.classList.remove('hidden');
+}
+
+function hideEditorPane() {
+  editorPane.classList.add('hidden');
+  splitter.classList.add('hidden');
+}
+
+function updateEditorDirty(filePath) {
+  const f = openFiles.get(filePath);
+  if (!f) return;
+  const dirty = f.content !== f.originalContent;
+  const dirtyEl = f.tabEl.querySelector('.editor-tab-dirty');
+  if (dirtyEl) {
+    if (dirty) dirtyEl.classList.remove('hidden');
+    else dirtyEl.classList.add('hidden');
+  }
+}
+
+editorTextarea.addEventListener('input', () => {
+  if (!activeFilePath) return;
+  const f = openFiles.get(activeFilePath);
+  if (f) {
+    f.content = editorTextarea.value;
+    updateEditorDirty(activeFilePath);
+  }
+});
+
+editorTextarea.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    saveActiveFile();
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = editorTextarea.selectionStart;
+    const end = editorTextarea.selectionEnd;
+    editorTextarea.value = editorTextarea.value.substring(0, start) + '  ' + editorTextarea.value.substring(end);
+    editorTextarea.selectionStart = editorTextarea.selectionEnd = start + 2;
+    editorTextarea.dispatchEvent(new Event('input'));
+  }
+});
+
+async function saveActiveFile() {
+  if (!activeFilePath) return;
+  const f = openFiles.get(activeFilePath);
+  if (!f) return;
+  const result = await window.api.writeFile(f.path, f.content);
+  if (result.success) {
+    f.originalContent = f.content;
+    updateEditorDirty(activeFilePath);
+  }
+}
+
+// ============================================================
+// Splitter drag
+// ============================================================
+
+let splitterDragging = false;
+let splitterStartY = 0;
+let splitterStartHeight = 0;
+
+splitter.addEventListener('mousedown', (e) => {
+  splitterDragging = true;
+  splitterStartY = e.clientY;
+  splitterStartHeight = editorPane.offsetHeight;
+  document.body.style.cursor = 'ns-resize';
+  e.preventDefault();
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!splitterDragging) return;
+  const delta = e.clientY - splitterStartY;
+  const newHeight = Math.max(80, Math.min(splitterStartHeight + delta, window.innerHeight - 120));
+  editorPane.style.height = newHeight + 'px';
+  handleResize();
+});
+
+document.addEventListener('mouseup', () => {
+  if (splitterDragging) {
+    splitterDragging = false;
+    document.body.style.cursor = '';
+  }
+});
 
 // ============================================================
 // Terminal management

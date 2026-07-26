@@ -23,8 +23,17 @@
       <div id="file-tree"></div>
     </div>
     <div id="main-pane">
-      <div id="tab-bar"><button id="new-tab-btn">+ New Terminal</button></div>
-      <div id="terminal-container"></div>
+      <div id="editor-pane" class="hidden">
+        <div id="editor-tab-bar"></div>
+        <div id="editor-content">
+          <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
+        </div>
+      </div>
+      <div id="splitter" class="hidden"></div>
+      <div id="terminal-pane">
+        <div id="tab-bar"><button id="new-tab-btn">+ New Terminal</button></div>
+        <div id="terminal-container"></div>
+      </div>
     </div>
   </div>
   <div id="add-project-modal" class="modal hidden">
@@ -37,6 +46,11 @@
         <button id="project-confirm-btn">Add</button>
       </div>
     </div>
+  </div>
+  <div id="context-menu" class="context-menu hidden">
+    <div class="context-menu-item" data-action="open">Open in Editor</div>
+    <div class="context-menu-item" data-action="insert-path">Insert Path to Terminal</div>
+    <div class="context-menu-item" data-action="insert-name">Insert Filename to Terminal</div>
   </div>
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
