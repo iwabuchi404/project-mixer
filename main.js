@@ -220,3 +220,13 @@ ipcMain.handle('layout:save', async (event, { layout }) => {
 ipcMain.handle('layout:load', async () => {
   return loadJson(layoutFile, null);
 });
+
+// --- Folder dialog ---
+
+ipcMain.handle('dialog:openFolder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});

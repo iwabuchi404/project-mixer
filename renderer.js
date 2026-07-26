@@ -33,6 +33,11 @@ const editorTabBar = document.getElementById('editor-tab-bar');
 const editorTextarea = document.getElementById('editor-textarea');
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
+const vsplitter1 = document.getElementById('vsplitter-1');
+const vsplitter2 = document.getElementById('vsplitter-2');
+const browseFolderBtn = document.getElementById('browse-folder-btn');
+const statusLeft = document.getElementById('status-left');
+const statusRight = document.getElementById('status-right');
 
 // ============================================================
 // PTY data/exit handlers
@@ -129,6 +134,18 @@ function hideAddProjectModal() {
 
 addProjectBtn.addEventListener('click', showAddProjectModal);
 projectCancelBtn.addEventListener('click', hideAddProjectModal);
+
+browseFolderBtn.addEventListener('click', async () => {
+  const folder = await window.api.openFolderDialog();
+  if (folder) {
+    projectPathInput.value = folder;
+    if (!projectNameInput.value.trim()) {
+      const basename = folder.split(/[\\/]/).pop();
+      projectNameInput.value = basename;
+    }
+  }
+});
+
 projectConfirmBtn.addEventListener('click', async () => {
   const name = projectNameInput.value.trim();
   const projPath = projectPathInput.value.trim();
@@ -584,6 +601,7 @@ async function updateMemory() {
 }
 setInterval(updateMemory, 2000);
 updateMemory();
+setInterval(updateStatusBar, 500);
 
 // ============================================================
 // Layout save/load
@@ -612,6 +630,62 @@ async function loadLayout() {
       await createTerminal(tab.command, tab.cwd, tab.projectId);
     }
   }
+}
+
+// ============================================================
+// Vertical splitters (sidebar | file-tree | main-pane)
+// ============================================================
+
+function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight) {
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  splitterEl.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startWidth = leftEl.offsetWidth;
+    document.body.style.cursor = 'ew-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const delta = e.clientX - startX;
+    const newWidth = Math.max(minLeft, Math.min(startWidth + delta, window.innerWidth - minRight));
+    leftEl.style.width = newWidth + 'px';
+    handleResize();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (dragging) {
+      dragging = false;
+      document.body.style.cursor = '';
+    }
+  });
+}
+
+makeVSplitter(vsplitter1, document.getElementById('sidebar'), document.getElementById('file-tree-pane'), 120, 300);
+makeVSplitter(vsplitter2, document.getElementById('file-tree-pane'), document.getElementById('main-pane'), 120, 300);
+
+// ============================================================
+// Status bar
+// ============================================================
+
+function updateStatusBar() {
+  const p = projects.get(activeProjectId);
+  statusLeft.textContent = p ? p.name : 'No project selected';
+
+  const parts = [];
+  if (activeTabId !== null) {
+    const t = tabs.get(activeTabId);
+    if (t) parts.push(t.command.replace('.exe', ''));
+  }
+  if (activeFilePath) {
+    const f = openFiles.get(activeFilePath);
+    if (f) parts.push(f.name + (f.content !== f.originalContent ? ' *' : ''));
+  }
+  statusRight.textContent = parts.join('  |  ');
 }
 
 // ============================================================

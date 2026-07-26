@@ -28,4 +28,7 @@ contextBridge.exposeInMainWorld('api', {
   // Layout
   layoutSave: (layout) => ipcRenderer.invoke('layout:save', { layout }),
   layoutLoad: () => ipcRenderer.invoke('layout:load'),
+
+  // Folder dialog
+  openFolderDialog: () => ipcRenderer.invoke('dialog:openFolder'),
 });

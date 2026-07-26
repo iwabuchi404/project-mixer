@@ -11,7 +11,22 @@ body {
 
 #app {
   display: flex;
-  height: 100vh;
+  height: calc(100vh - 24px);
+}
+
+/* --- Status bar --- */
+
+#status-bar {
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: #007acc;
+  color: #fff;
+  font-size: 11px;
+  font-family: 'Segoe UI', sans-serif;
 }
 
 /* --- Sidebar (Projects) --- */
@@ -22,7 +37,7 @@ body {
   display: flex;
   flex-direction: column;
   background: #252526;
-  border-right: 1px solid #3e3e3e;
+  overflow: hidden;
 }
 
 #sidebar-header {
@@ -130,7 +145,7 @@ body {
   display: flex;
   flex-direction: column;
   background: #252526;
-  border-right: 1px solid #3e3e3e;
+  overflow: hidden;
 }
 
 #file-tree-header {
@@ -392,6 +407,19 @@ body {
   height: 100%;
 }
 
+/* --- Vertical splitter --- */
+
+.vsplitter {
+  width: 4px;
+  flex-shrink: 0;
+  background: #3e3e3e;
+  cursor: ew-resize;
+}
+
+.vsplitter:hover {
+  background: #0c7bef;
+}
+
 /* --- Modal --- */
 
 .modal {
@@ -430,6 +458,32 @@ body {
   border-radius: 3px;
   font-size: 13px;
   margin-bottom: 12px;
+}
+
+.path-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.path-input-row input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+#browse-folder-btn {
+  background: #3c3c3c;
+  color: #ccc;
+  border: 1px solid #555;
+  padding: 6px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+#browse-folder-btn:hover {
+  background: #4c4c4c;
 }
 
 .modal-buttons {

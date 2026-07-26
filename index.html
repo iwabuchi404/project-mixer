@@ -18,10 +18,12 @@
         <div id="mem-display"></div>
       </div>
     </div>
+    <div id="vsplitter-1" class="vsplitter"></div>
     <div id="file-tree-pane">
       <div id="file-tree-header">Files</div>
       <div id="file-tree"></div>
     </div>
+    <div id="vsplitter-2" class="vsplitter"></div>
     <div id="main-pane">
       <div id="editor-pane" class="hidden">
         <div id="editor-tab-bar"></div>
@@ -36,11 +38,18 @@
       </div>
     </div>
   </div>
+  <div id="status-bar">
+    <span id="status-left"></span>
+    <span id="status-right"></span>
+  </div>
   <div id="add-project-modal" class="modal hidden">
     <div class="modal-content">
       <h3>Add Project</h3>
       <input type="text" id="project-name-input" placeholder="Project name">
-      <input type="text" id="project-path-input" placeholder="Project path (e.g. D:\work\my-project)">
+      <div class="path-input-row">
+        <input type="text" id="project-path-input" placeholder="Project path (e.g. D:\work\my-project)">
+        <button id="browse-folder-btn" title="Browse...">...</button>
+      </div>
       <div class="modal-buttons">
         <button id="project-cancel-btn">Cancel</button>
         <button id="project-confirm-btn">Add</button>
