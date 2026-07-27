@@ -62,7 +62,7 @@ ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
   const shellCwd = cwd || os.homedir();
 
   let shell, shellArgs;
-  if (!command || command === 'pwsh.exe' || command === 'powershell.exe' || command === 'cmd.exe') {
+  if (!command || command === 'pwsh.exe' || command === 'powershell.exe' || command === 'cmd.exe' || command === 'wsl.exe') {
     shell = command || (os.platform() === 'win32' ? 'pwsh.exe' : 'bash');
     shellArgs = args || [];
   } else {

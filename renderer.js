@@ -11,7 +11,7 @@ let tabCounter = 0;
 const projectActiveTab = new Map(); // projectId -> last active tabId
 let draggedTerminalTab = null;
 
-const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'claude', 'codex'];
+const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
 
 // ============================================================
 // DOM refs
@@ -965,15 +965,22 @@ const TERMINAL_LABELS = {
   'pwsh.exe': 'PowerShell 7',
   'powershell.exe': 'Windows PowerShell',
   'cmd.exe': 'Command Prompt',
+  'wsl.exe': 'WSL',
   'claude': 'Claude Code',
   'codex': 'Codex',
+  'devin': 'Devin CLI',
 };
 
 newTabBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   if (newTabMenu.classList.contains('hidden')) {
     const rect = newTabBtn.getBoundingClientRect();
-    newTabMenu.style.left = rect.left + 'px';
+    const menuWidth = 140;
+    let left = rect.left;
+    if (left + menuWidth > window.innerWidth) {
+      left = window.innerWidth - menuWidth - 4;
+    }
+    newTabMenu.style.left = left + 'px';
     newTabMenu.style.top = rect.bottom + 'px';
     newTabMenu.classList.remove('hidden');
   } else {
