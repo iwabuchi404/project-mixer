@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const http = require('http');
 const pty = require('node-pty');
+const { execSync } = require('child_process');
 
 let mainWindow;
 const ptys = new Map(); // id -> { process, cwd, command }
@@ -129,6 +130,26 @@ ipcMain.handle('mem:get', async () => {
     workingSetMB: Math.round(totalKB / 1024),
     ptyCount: ptys.size,
   };
+});
+
+// --- Command availability check ---
+
+ipcMain.handle('command:check', async (event, { commands }) => {
+  const result = {};
+  for (const cmd of commands) {
+    try {
+      if (os.platform() === 'win32') {
+        // For .exe commands, check with where; for others, check with where too
+        execSync(`where ${cmd}`, { stdio: 'ignore', timeout: 5000 });
+      } else {
+        execSync(`which ${cmd}`, { stdio: 'ignore', timeout: 5000 });
+      }
+      result[cmd] = true;
+    } catch (e) {
+      result[cmd] = false;
+    }
+  }
+  return result;
 });
 
 // --- Local HTTP server for hook notifications ---

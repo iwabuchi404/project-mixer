@@ -988,20 +988,26 @@ newTabBtn.addEventListener('click', (e) => {
   }
 });
 
-// Populate menu items
-COMMANDS.forEach((cmd) => {
-  const item = document.createElement('div');
-  item.className = 'dropdown-item';
-  item.textContent = TERMINAL_LABELS[cmd] || cmd;
-  item.addEventListener('click', (e) => {
-    e.stopPropagation();
-    newTabMenu.classList.add('hidden');
-    const p = projects.get(activeProjectId);
-    const cwd = p ? p.path : undefined;
-    createTerminal(cmd, cwd, activeProjectId);
+// Populate menu items (only installed commands)
+async function buildTerminalMenu() {
+  const availability = await window.api.commandCheck(COMMANDS);
+  newTabMenu.innerHTML = '';
+  COMMANDS.forEach((cmd) => {
+    if (availability[cmd] === false) return;
+    const item = document.createElement('div');
+    item.className = 'dropdown-item';
+    item.textContent = TERMINAL_LABELS[cmd] || cmd;
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      newTabMenu.classList.add('hidden');
+      const p = projects.get(activeProjectId);
+      const cwd = p ? p.path : undefined;
+      createTerminal(cmd, cwd, activeProjectId);
+    });
+    newTabMenu.appendChild(item);
   });
-  newTabMenu.appendChild(item);
-});
+}
+buildTerminalMenu();
 
 // Close menu when clicking outside
 document.addEventListener('click', () => {
