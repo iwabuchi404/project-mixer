@@ -13,6 +13,24 @@ let draggedTerminalTab = null;
 
 const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
 
+// ツール別の送信方式（D8: bracketed paste 挙動差を吸収）
+//   'paste'    : xterm.js の paste() + \r（デフォルト。mode 有効なツール全般）
+//   'bracketed': 強制マーカー \x1b[200~ ... \x1b[201~ + \r（mode 無効だがマーカーを理解する）
+//   'raw'      : 生テキスト + \r（マーカーを嫌うツール）
+//
+// 実測（2026-07-28）:
+//   Claude Code: paste（mode 有効）
+//   Codex:       bracketed（mode 無効、マーカーで複数行OK）
+//   Devin CLI:   raw（mode 有効だがマーカーを貼り付けとして処理しない）
+//
+// 新ツール時はデフォルト paste で試し、ダメならここに1行足す。
+// layout.json の terminalSendModes でユーザー上書き可能。
+const DEFAULT_TERMINAL_SEND_MODES = {
+  codex: 'bracketed',
+  devin: 'raw',
+};
+let terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES };
+
 // ============================================================
 // DOM refs
 // ============================================================
@@ -666,18 +684,22 @@ function sendToTerminal() {
     if (!confirm(`Send ${lineCount} lines to terminal?`)) return;
   }
 
-  const useBracketedPaste = t.terminal._bracketedPasteMode;
-
-  if (useBracketedPaste) {
+  // D8: 複数行の指示を1回で送る（ツール別の bracketed paste 挙動差を吸収）
+  // 送信方式は terminalSendModes で管理。新ツールは DEFAULT_TERMINAL_SEND_MODES に1行足すか、
+  // layout.json の terminalSendModes でユーザー上書き。
+  const cmd = (t.command || '').toLowerCase();
+  const mode = terminalSendModes[cmd] || 'paste';
+  if (mode === 'bracketed') {
     window.api.ptyWrite(t.ptyId, '\x1b[200~' + text + '\x1b[201~');
+    window.api.ptyWrite(t.ptyId, '\r');
+  } else if (mode === 'raw') {
+    window.api.ptyWrite(t.ptyId, text);
+    window.api.ptyWrite(t.ptyId, '\r');
   } else {
-    const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      window.api.ptyWrite(t.ptyId, lines[i]);
-      if (i < lines.length - 1) window.api.ptyWrite(t.ptyId, '\r');
-    }
+    // 'paste'（デフォルト）: xterm.js が bracketed paste mode を判定して適切に処理
+    t.terminal.paste(text);
+    window.api.ptyWrite(t.ptyId, '\r');
   }
-  window.api.ptyWrite(t.ptyId, '\r');
 
   if (f.isScratch) {
     lastSentContent = f.content;
@@ -1074,6 +1096,7 @@ async function saveLayout() {
       cwd: t.cwd,
       projectId: t.projectId,
     })),
+    terminalSendModes,
   };
   await window.api.layoutSave(layout);
 }
@@ -1081,6 +1104,10 @@ async function saveLayout() {
 async function loadLayout() {
   const layout = await window.api.layoutLoad();
   if (!layout) return;
+  // ユーザー設定で既知のツールの送信方式を上書き（未指定はデフォルトを使う）
+  if (layout.terminalSendModes && typeof layout.terminalSendModes === 'object') {
+    terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES, ...layout.terminalSendModes };
+  }
   if (layout.activeProjectId && projects.has(layout.activeProjectId)) {
     await selectProject(layout.activeProjectId);
   }
