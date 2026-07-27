@@ -277,6 +277,16 @@ body {
   border-radius: 4px 4px 0 0;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.editor-tab.dragging {
+  opacity: 0.5;
+}
+
+.editor-tab.drag-over {
+  border-left: 2px solid #0c7bef;
 }
 
 .editor-tab.active {

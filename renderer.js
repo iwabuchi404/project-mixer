@@ -378,6 +378,41 @@ let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
 
+function makeEditorTabDraggable(tabEl, path) {
+  tabEl.draggable = true;
+  tabEl.addEventListener('dragstart', (e) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', path);
+    tabEl.classList.add('dragging');
+  });
+  tabEl.addEventListener('dragend', () => {
+    tabEl.classList.remove('dragging');
+    editorTabBar.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('drag-over'));
+  });
+  tabEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  tabEl.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    if (!tabEl.classList.contains('dragging')) {
+      tabEl.classList.add('drag-over');
+    }
+  });
+  tabEl.addEventListener('dragleave', () => {
+    tabEl.classList.remove('drag-over');
+  });
+  tabEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    tabEl.classList.remove('drag-over');
+    const draggedPath = e.dataTransfer.getData('text/plain');
+    if (draggedPath === path) return;
+    const draggedEl = editorTabBar.querySelector(`.editor-tab[data-path="${draggedPath}"]`);
+    if (!draggedEl) return;
+    editorTabBar.insertBefore(draggedEl, tabEl);
+  });
+}
+
 function initScratchTab() {
   const tabEl = document.createElement('div');
   tabEl.className = 'editor-tab scratch active';
@@ -385,6 +420,7 @@ function initScratchTab() {
   tabEl.dataset.path = SCRATCH_PATH;
 
   tabEl.addEventListener('click', () => switchEditorTab(SCRATCH_PATH));
+  makeEditorTabDraggable(tabEl, SCRATCH_PATH);
   editorTabBar.appendChild(tabEl);
 
   const scratchData = {
@@ -426,6 +462,7 @@ function createTempTab() {
     }
   });
 
+  makeEditorTabDraggable(tabEl, tempPath);
   editorTabBar.insertBefore(tabEl, newScratchTabBtn);
 
   openFiles.set(tempPath, {
@@ -482,6 +519,7 @@ async function openFileInEditor(filePath, name) {
     }
   });
 
+  makeEditorTabDraggable(tabEl, filePath);
   editorTabBar.appendChild(tabEl);
   fileData.tabEl = tabEl;
   openFiles.set(filePath, fileData);
