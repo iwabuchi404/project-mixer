@@ -139,14 +139,24 @@ ipcMain.handle('command:check', async (event, { commands }) => {
   for (const cmd of commands) {
     try {
       if (os.platform() === 'win32') {
-        // For .exe commands, check with where; for others, check with where too
         execSync(`where ${cmd}`, { stdio: 'ignore', timeout: 5000 });
       } else {
         execSync(`which ${cmd}`, { stdio: 'ignore', timeout: 5000 });
       }
       result[cmd] = true;
     } catch (e) {
-      result[cmd] = false;
+      // Fallback: try running the command with --version
+      // (handles shell functions/aliases not found by where/which)
+      try {
+        if (os.platform() === 'win32') {
+          execSync(`pwsh.exe -NoProfile -Command "${cmd} --version"`, { stdio: 'ignore', timeout: 10000 });
+        } else {
+          execSync(`${cmd} --version`, { stdio: 'ignore', timeout: 10000 });
+        }
+        result[cmd] = true;
+      } catch (e2) {
+        result[cmd] = false;
+      }
     }
   }
   return result;
