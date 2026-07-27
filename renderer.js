@@ -27,7 +27,6 @@ const projectConfirmBtn = document.getElementById('project-confirm-btn');
 const fileTree = document.getElementById('file-tree');
 const fileTreeHeader = document.getElementById('file-tree-header');
 const tabBar = document.getElementById('tab-bar');
-const newTabWrapper = document.getElementById('new-tab-wrapper');
 const terminalContainer = document.getElementById('terminal-container');
 const newTabBtn = document.getElementById('new-tab-btn');
 const memDisplay = document.getElementById('mem-display');
@@ -842,7 +841,7 @@ async function createTerminal(command, cwd, projectId) {
     tabBar.insertBefore(draggedTerminalTab, tabEl);
   });
 
-  tabBar.insertBefore(tabEl, newTabWrapper);
+  tabBar.insertBefore(tabEl, newTabBtn);
 
   tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false });
 
@@ -972,7 +971,14 @@ const TERMINAL_LABELS = {
 
 newTabBtn.addEventListener('click', (e) => {
   e.stopPropagation();
-  newTabMenu.classList.toggle('hidden');
+  if (newTabMenu.classList.contains('hidden')) {
+    const rect = newTabBtn.getBoundingClientRect();
+    newTabMenu.style.left = rect.left + 'px';
+    newTabMenu.style.top = rect.bottom + 'px';
+    newTabMenu.classList.remove('hidden');
+  } else {
+    newTabMenu.classList.add('hidden');
+  }
 });
 
 // Populate menu items

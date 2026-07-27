@@ -506,15 +506,8 @@ body {
   background: #3c3c3c;
 }
 
-#new-tab-wrapper {
-  position: relative;
-  flex-shrink: 0;
-}
-
 .dropdown-menu {
-  position: absolute;
-  top: 100%;
-  left: 0;
+  position: fixed;
   background: #2d2d2d;
   border: 1px solid #555;
   border-radius: 4px;
