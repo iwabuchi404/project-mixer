@@ -41,7 +41,10 @@ const statusLeft = document.getElementById('status-left');
 const statusRight = document.getElementById('status-right');
 const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
-const newScratchTabBtn = document.getElementById('new-scratch-tab-btn');
+const newScratchTabBtn = document.createElement('button');
+newScratchTabBtn.id = 'new-scratch-tab-btn';
+newScratchTabBtn.title = 'New scratch buffer';
+newScratchTabBtn.textContent = '+';
 
 // ============================================================
 // PTY data/exit handlers
@@ -422,6 +425,7 @@ function initScratchTab() {
   tabEl.addEventListener('click', () => switchEditorTab(SCRATCH_PATH));
   makeEditorTabDraggable(tabEl, SCRATCH_PATH);
   editorTabBar.appendChild(tabEl);
+  editorTabBar.appendChild(newScratchTabBtn);
 
   const scratchData = {
     path: SCRATCH_PATH,
@@ -520,7 +524,7 @@ async function openFileInEditor(filePath, name) {
   });
 
   makeEditorTabDraggable(tabEl, filePath);
-  editorTabBar.appendChild(tabEl);
+  editorTabBar.insertBefore(tabEl, newScratchTabBtn);
   fileData.tabEl = tabEl;
   openFiles.set(filePath, fileData);
 
