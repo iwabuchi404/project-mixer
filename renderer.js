@@ -27,6 +27,7 @@ const projectConfirmBtn = document.getElementById('project-confirm-btn');
 const fileTree = document.getElementById('file-tree');
 const fileTreeHeader = document.getElementById('file-tree-header');
 const tabBar = document.getElementById('tab-bar');
+const newTabWrapper = document.getElementById('new-tab-wrapper');
 const terminalContainer = document.getElementById('terminal-container');
 const newTabBtn = document.getElementById('new-tab-btn');
 const memDisplay = document.getElementById('mem-display');
@@ -841,7 +842,7 @@ async function createTerminal(command, cwd, projectId) {
     tabBar.insertBefore(draggedTerminalTab, tabEl);
   });
 
-  tabBar.insertBefore(tabEl, newTabBtn);
+  tabBar.insertBefore(tabEl, newTabWrapper);
 
   tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false });
 
@@ -957,16 +958,41 @@ function updateProjectStatus(projectId) {
 }
 
 // ============================================================
-// New terminal button (cycle through commands)
+// New terminal button (dropdown to select terminal type)
 // ============================================================
 
-let commandIndex = 0;
-newTabBtn.addEventListener('click', () => {
-  const p = projects.get(activeProjectId);
-  const cwd = p ? p.path : undefined;
-  const command = COMMANDS[commandIndex % COMMANDS.length];
-  commandIndex++;
-  createTerminal(command, cwd, activeProjectId);
+const newTabMenu = document.getElementById('new-tab-menu');
+const TERMINAL_LABELS = {
+  'pwsh.exe': 'PowerShell 7',
+  'powershell.exe': 'Windows PowerShell',
+  'cmd.exe': 'Command Prompt',
+  'claude': 'Claude Code',
+  'codex': 'Codex',
+};
+
+newTabBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  newTabMenu.classList.toggle('hidden');
+});
+
+// Populate menu items
+COMMANDS.forEach((cmd) => {
+  const item = document.createElement('div');
+  item.className = 'dropdown-item';
+  item.textContent = TERMINAL_LABELS[cmd] || cmd;
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    newTabMenu.classList.add('hidden');
+    const p = projects.get(activeProjectId);
+    const cwd = p ? p.path : undefined;
+    createTerminal(cmd, cwd, activeProjectId);
+  });
+  newTabMenu.appendChild(item);
+});
+
+// Close menu when clicking outside
+document.addEventListener('click', () => {
+  newTabMenu.classList.add('hidden');
 });
 
 // ============================================================
