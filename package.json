@@ -1,19 +1,57 @@
 {
   "name": "project-mixer",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "VSCode を 5〜8 枚開かなくて済むようにするデスクトップアプリ",
   "main": "main.js",
+  "author": "Project Mixer",
   "scripts": {
     "start": "electron .",
-    "rebuild": "electron-rebuild -f -w node-pty"
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable"
   },
   "dependencies": {
-    "node-pty": "^1.0.0",
+    "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "@xterm/addon-fit": "^0.10.0"
+    "node-pty": "^1.0.0"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
-    "electron": "^31.0.0"
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.projectmixer.app",
+    "productName": "Project Mixer",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }
