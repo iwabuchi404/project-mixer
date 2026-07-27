@@ -34,4 +34,5 @@ contextBridge.exposeInMainWorld('api', {
 
   // Hook-based waiting indicator
   onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),
+  hookSetup: (projectPath) => ipcRenderer.invoke('hook:setup', { projectPath }),
 });

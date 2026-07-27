@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\work\\project-mixer\\.claude\\project-mixer-hook.js\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\work\\project-mixer\\.claude\\project-mixer-hook.js\""
+          }
+        ]
+      }
+    ]
+  }
+}

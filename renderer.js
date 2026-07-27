@@ -106,26 +106,33 @@ window.api.onPtyExit(({ id, exitCode }) => {
 });
 
 // Hook-based waiting indicator (Claude Code Notification/Stop, Codex notify)
-window.api.onHookNotify(({ type, projectId, tabId, waiting }) => {
-  if (tabId !== undefined && tabs.has(tabId)) {
-    const t = tabs.get(tabId);
-    const wasWaiting = t.waiting;
-    t.waiting = waiting;
-    if (t.waiting !== wasWaiting) {
-      updateTabStatus(tabId);
-      updateProjectStatus(t.projectId);
-    }
-  } else if (projectId !== undefined) {
-    for (const [tid, t] of tabs) {
-      if (t.projectId === projectId) {
+window.api.onHookNotify(({ type, cwd, ptyId, waiting }) => {
+  // Match by ptyId (from cwd matching in main process)
+  if (ptyId !== null && ptyId !== undefined) {
+    for (const [tabId, t] of tabs) {
+      if (t.ptyId === ptyId) {
         const wasWaiting = t.waiting;
         t.waiting = waiting;
         if (t.waiting !== wasWaiting) {
-          updateTabStatus(tid);
+          updateTabStatus(tabId);
+          updateProjectStatus(t.projectId);
+        }
+        return;
+      }
+    }
+  }
+  // Fallback: match by projectId if cwd doesn't match a specific PTY
+  if (activeProjectId) {
+    for (const [tabId, t] of tabs) {
+      if (t.projectId === activeProjectId && (t.command === 'claude' || t.command === 'codex')) {
+        const wasWaiting = t.waiting;
+        t.waiting = waiting;
+        if (t.waiting !== wasWaiting) {
+          updateTabStatus(tabId);
+          updateProjectStatus(t.projectId);
         }
       }
     }
-    updateProjectStatus(projectId);
   }
 });
 
@@ -170,6 +177,7 @@ async function selectProject(projectId) {
   if (p) {
     fileTreeHeader.textContent = p.name;
     await loadFileTree(p.path);
+    window.api.hookSetup(p.path);
   }
 }
 
