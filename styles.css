@@ -231,6 +231,23 @@ body {
   border-bottom: 1px solid #3e3e3e;
   flex-shrink: 0;
   min-height: 32px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
+}
+
+#editor-tab-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+#editor-tab-bar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#editor-tab-bar::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 2px;
 }
 
 #new-scratch-tab-btn {
@@ -388,6 +405,23 @@ body {
   border-bottom: 1px solid #3e3e3e;
   flex-shrink: 0;
   min-height: 32px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
+}
+
+#tab-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+#tab-bar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#tab-bar::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 2px;
 }
 
 .tab {
@@ -401,6 +435,16 @@ body {
   border-radius: 4px 4px 0 0;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.tab.dragging {
+  opacity: 0.5;
+}
+
+.tab.drag-over {
+  border-left: 2px solid #0c7bef;
 }
 
 .tab.active {

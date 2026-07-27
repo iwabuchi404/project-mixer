@@ -419,6 +419,13 @@ function createTempTab() {
     }
   });
 
+  tabEl.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      closeEditorTab(tempPath);
+    }
+  });
+
   editorTabBar.insertBefore(tabEl, newScratchTabBtn);
 
   openFiles.set(tempPath, {
@@ -465,6 +472,13 @@ async function openFileInEditor(filePath, name) {
       closeEditorTab(filePath);
     } else {
       switchEditorTab(filePath);
+    }
+  });
+
+  tabEl.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      closeEditorTab(filePath);
     }
   });
 
@@ -742,6 +756,47 @@ async function createTerminal(command, cwd, projectId) {
     } else {
       switchTab(tabId);
     }
+  });
+
+  tabEl.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      closeTerminal(tabId);
+    }
+  });
+
+  tabEl.draggable = true;
+  tabEl.addEventListener('dragstart', (e) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(tabId));
+    tabEl.classList.add('dragging');
+  });
+  tabEl.addEventListener('dragend', () => {
+    tabEl.classList.remove('dragging');
+    tabBar.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+  });
+  tabEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+  tabEl.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    if (!tabEl.classList.contains('dragging')) {
+      tabEl.classList.add('drag-over');
+    }
+  });
+  tabEl.addEventListener('dragleave', () => {
+    tabEl.classList.remove('drag-over');
+  });
+  tabEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    tabEl.classList.remove('drag-over');
+    const draggedId = Number(e.dataTransfer.getData('text/plain'));
+    if (draggedId === tabId) return;
+    const draggedEl = tabBar.querySelector(`.tab[data-id="${draggedId}"]`);
+    if (!draggedEl) return;
+    // Insert dragged tab before this tab
+    tabBar.insertBefore(draggedEl, tabEl);
   });
 
   tabBar.insertBefore(tabEl, newTabBtn);
