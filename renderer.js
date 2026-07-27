@@ -8,6 +8,7 @@ let activeProjectId = null;
 const tabs = new Map(); // tabId -> { id, projectId, terminal, fitAddon, ptyId, termEl, tabElement, command, cwd, waiting }
 let activeTabId = null;
 let tabCounter = 0;
+const projectActiveTab = new Map(); // projectId -> last active tabId
 
 const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'claude', 'codex'];
 
@@ -179,6 +180,7 @@ async function selectProject(projectId) {
     await loadFileTree(p.path);
     window.api.hookSetup(p.path);
   }
+  showProjectTabs(projectId);
 }
 
 async function removeProject(projectId) {
@@ -187,12 +189,31 @@ async function removeProject(projectId) {
   for (const p of updated) {
     projects.set(p.id, p);
   }
+
+  // Kill all tabs belonging to the removed project
+  const tabsToKill = [];
+  for (const [tid, t] of tabs) {
+    if (t.projectId === projectId) tabsToKill.push(tid);
+  }
+  for (const tid of tabsToKill) {
+    const t = tabs.get(tid);
+    window.api.ptyKill(t.ptyId);
+    t.terminal.dispose();
+    t.termEl.remove();
+    t.tabElement.remove();
+    tabs.delete(tid);
+  }
+  projectActiveTab.delete(projectId);
+
   if (activeProjectId === projectId) {
     activeProjectId = null;
+    activeTabId = null;
     fileTreeHeader.textContent = 'Files';
     fileTree.innerHTML = '';
+    updateSendTarget();
   }
   renderProjectList();
+  saveLayout();
 }
 
 function showAddProjectModal() {
@@ -727,27 +748,60 @@ async function createTerminal(command, cwd, projectId) {
 
   tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false });
 
-  switchTab(tabId);
+  // Only switch to new tab if it belongs to the active project
+  if (projectId === activeProjectId) {
+    switchTab(tabId);
+  } else {
+    // Hide tab element since it's not in the active project
+    tabEl.style.display = 'none';
+  }
   saveLayout();
   return tabId;
 }
 
-function switchTab(tabId) {
+function showProjectTabs(projectId) {
+  // Hide all tabs and terminal elements
   tabs.forEach((t) => {
-    t.termEl.style.display = 'none';
+    const visible = t.projectId === projectId;
+    t.tabElement.style.display = visible ? '' : 'none';
+    t.termEl.style.display = 'none'; // always hide terminal, switchTab will show the active one
     t.tabElement.classList.remove('active');
   });
 
-  const t = tabs.get(tabId);
-  if (t) {
-    t.termEl.style.display = 'block';
-    t.tabElement.classList.add('active');
-    t.fitAddon.fit();
-    window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
-    t.terminal.focus();
-    activeTabId = tabId;
+  // Restore last active tab for this project, or pick first visible
+  let restoreId = projectActiveTab.get(projectId);
+  if (restoreId === undefined || !tabs.has(restoreId) || tabs.get(restoreId).projectId !== projectId) {
+    for (const [tid, t] of tabs) {
+      if (t.projectId === projectId) { restoreId = tid; break; }
+    }
+  }
+
+  if (restoreId !== undefined && tabs.has(restoreId)) {
+    switchTab(restoreId);
+  } else {
+    activeTabId = null;
     updateSendTarget();
   }
+}
+
+function switchTab(tabId) {
+  const t = tabs.get(tabId);
+  if (!t) return;
+
+  // Hide all terminal elements (across all projects)
+  tabs.forEach((td) => {
+    td.termEl.style.display = 'none';
+    td.tabElement.classList.remove('active');
+  });
+
+  t.termEl.style.display = 'block';
+  t.tabElement.classList.add('active');
+  t.fitAddon.fit();
+  window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+  t.terminal.focus();
+  activeTabId = tabId;
+  projectActiveTab.set(t.projectId, tabId);
+  updateSendTarget();
 }
 
 function closeTerminal(tabId) {
@@ -763,11 +817,16 @@ function closeTerminal(tabId) {
   updateProjectStatus(projectId);
 
   if (activeTabId === tabId) {
-    const firstId = tabs.keys().next().value;
-    if (firstId !== undefined) {
-      switchTab(firstId);
+    // Find next tab in the same project
+    let nextId = null;
+    for (const [tid, td] of tabs) {
+      if (td.projectId === projectId) { nextId = tid; break; }
+    }
+    if (nextId !== null) {
+      switchTab(nextId);
     } else {
       activeTabId = null;
+      projectActiveTab.delete(projectId);
       updateSendTarget();
     }
   }
@@ -886,6 +945,10 @@ async function loadLayout() {
   if (layout.tabs && layout.tabs.length > 0) {
     for (const tab of layout.tabs) {
       await createTerminal(tab.command, tab.cwd, tab.projectId);
+    }
+    // After restoring all tabs, show the active project's tabs
+    if (activeProjectId) {
+      showProjectTabs(activeProjectId);
     }
   }
 }
