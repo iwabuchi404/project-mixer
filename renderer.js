@@ -11,7 +11,7 @@ let tabCounter = 0;
 const projectActiveTab = new Map(); // projectId -> last active tabId
 let draggedTerminalTab = null;
 
-const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
+const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin-desktop'];
 
 // ============================================================
 // DOM refs
@@ -968,7 +968,7 @@ const TERMINAL_LABELS = {
   'wsl.exe': 'WSL',
   'claude': 'Claude Code',
   'codex': 'Codex',
-  'devin': 'Devin CLI',
+  'devin-desktop': 'Devin CLI',
 };
 
 newTabBtn.addEventListener('click', (e) => {
