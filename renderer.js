@@ -9,6 +9,7 @@ const tabs = new Map(); // tabId -> { id, projectId, terminal, fitAddon, ptyId, 
 let activeTabId = null;
 let tabCounter = 0;
 const projectActiveTab = new Map(); // projectId -> last active tabId
+let draggedTerminalTab = null;
 
 const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'claude', 'codex'];
 
@@ -381,16 +382,20 @@ let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
 
+let draggedEditorTab = null;
+
 function makeEditorTabDraggable(tabEl, path) {
   tabEl.draggable = true;
   tabEl.addEventListener('dragstart', (e) => {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', path);
+    draggedEditorTab = tabEl;
     tabEl.classList.add('dragging');
   });
   tabEl.addEventListener('dragend', () => {
     tabEl.classList.remove('dragging');
     editorTabBar.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('drag-over'));
+    draggedEditorTab = null;
   });
   tabEl.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -398,7 +403,7 @@ function makeEditorTabDraggable(tabEl, path) {
   });
   tabEl.addEventListener('dragenter', (e) => {
     e.preventDefault();
-    if (!tabEl.classList.contains('dragging')) {
+    if (draggedEditorTab && tabEl !== draggedEditorTab) {
       tabEl.classList.add('drag-over');
     }
   });
@@ -408,11 +413,8 @@ function makeEditorTabDraggable(tabEl, path) {
   tabEl.addEventListener('drop', (e) => {
     e.preventDefault();
     tabEl.classList.remove('drag-over');
-    const draggedPath = e.dataTransfer.getData('text/plain');
-    if (draggedPath === path) return;
-    const draggedEl = editorTabBar.querySelector(`.editor-tab[data-path="${draggedPath}"]`);
-    if (!draggedEl) return;
-    editorTabBar.insertBefore(draggedEl, tabEl);
+    if (!draggedEditorTab || draggedEditorTab === tabEl) return;
+    editorTabBar.insertBefore(draggedEditorTab, tabEl);
   });
 }
 
@@ -811,11 +813,13 @@ async function createTerminal(command, cwd, projectId) {
   tabEl.addEventListener('dragstart', (e) => {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', String(tabId));
+    draggedTerminalTab = tabEl;
     tabEl.classList.add('dragging');
   });
   tabEl.addEventListener('dragend', () => {
     tabEl.classList.remove('dragging');
     tabBar.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+    draggedTerminalTab = null;
   });
   tabEl.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -823,7 +827,7 @@ async function createTerminal(command, cwd, projectId) {
   });
   tabEl.addEventListener('dragenter', (e) => {
     e.preventDefault();
-    if (!tabEl.classList.contains('dragging')) {
+    if (draggedTerminalTab && tabEl !== draggedTerminalTab) {
       tabEl.classList.add('drag-over');
     }
   });
@@ -833,12 +837,8 @@ async function createTerminal(command, cwd, projectId) {
   tabEl.addEventListener('drop', (e) => {
     e.preventDefault();
     tabEl.classList.remove('drag-over');
-    const draggedId = Number(e.dataTransfer.getData('text/plain'));
-    if (draggedId === tabId) return;
-    const draggedEl = tabBar.querySelector(`.tab[data-id="${draggedId}"]`);
-    if (!draggedEl) return;
-    // Insert dragged tab before this tab
-    tabBar.insertBefore(draggedEl, tabEl);
+    if (!draggedTerminalTab || draggedTerminalTab === tabEl) return;
+    tabBar.insertBefore(draggedTerminalTab, tabEl);
   });
 
   tabBar.insertBefore(tabEl, newTabBtn);
