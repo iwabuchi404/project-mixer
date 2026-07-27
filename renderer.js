@@ -40,6 +40,7 @@ const statusLeft = document.getElementById('status-left');
 const statusRight = document.getElementById('status-right');
 const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
+const newScratchTabBtn = document.getElementById('new-scratch-tab-btn');
 
 // ============================================================
 // PTY data/exit handlers
@@ -342,9 +343,11 @@ document.addEventListener('contextmenu', (e) => {
 // ============================================================
 
 const SCRATCH_PATH = '__scratch__';
-const openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch }
+const openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch, isTemp }
 let activeFilePath = null;
 let lastSentContent = '';
+let lastSentTabPath = null;
+let tempTabCounter = 0;
 
 function initScratchTab() {
   const tabEl = document.createElement('div');
@@ -362,11 +365,48 @@ function initScratchTab() {
     originalContent: '',
     tabEl,
     isScratch: true,
+    isTemp: false,
   };
   openFiles.set(SCRATCH_PATH, scratchData);
   activeFilePath = SCRATCH_PATH;
   showEditorPane();
 }
+
+function createTempTab() {
+  tempTabCounter++;
+  const tempPath = `__temp_${tempTabCounter}__`;
+  const name = `temp-${tempTabCounter}`;
+
+  const tabEl = document.createElement('div');
+  tabEl.className = 'editor-tab scratch';
+  tabEl.innerHTML = `<span class="editor-tab-name">${name}</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.dataset.path = tempPath;
+
+  tabEl.addEventListener('click', (e) => {
+    if (e.target.classList.contains('editor-tab-close')) {
+      closeEditorTab(tempPath);
+    } else {
+      switchEditorTab(tempPath);
+    }
+  });
+
+  editorTabBar.insertBefore(tabEl, newScratchTabBtn);
+
+  openFiles.set(tempPath, {
+    path: tempPath,
+    name,
+    content: '',
+    originalContent: '',
+    tabEl,
+    isScratch: true,
+    isTemp: true,
+  });
+
+  showEditorPane();
+  switchEditorTab(tempPath);
+}
+
+newScratchTabBtn.addEventListener('click', createTempTab);
 
 async function openFileInEditor(filePath, name) {
   if (openFiles.has(filePath)) {
@@ -422,7 +462,7 @@ function switchEditorTab(filePath) {
 
 function closeEditorTab(filePath) {
   const f = openFiles.get(filePath);
-  if (!f || f.isScratch) return;
+  if (!f || (f.isScratch && !f.isTemp)) return;
 
   f.tabEl.remove();
   openFiles.delete(filePath);
@@ -454,15 +494,20 @@ function updateEditorDirty(filePath) {
 }
 
 function appendToScratch(text) {
-  const scratch = openFiles.get(SCRATCH_PATH);
-  if (!scratch) return;
-  const sep = scratch.content && !scratch.content.endsWith('\n') ? '\n' : '';
-  scratch.content += sep + text + '\n';
-  if (activeFilePath === SCRATCH_PATH) {
-    editorTextarea.value = scratch.content;
+  let targetPath = SCRATCH_PATH;
+  const active = openFiles.get(activeFilePath);
+  if (active && active.isScratch) {
+    targetPath = activeFilePath;
+  }
+  const target = openFiles.get(targetPath);
+  if (!target) return;
+  const sep = target.content && !target.content.endsWith('\n') ? '\n' : '';
+  target.content += sep + text + '\n';
+  if (activeFilePath === targetPath) {
+    editorTextarea.value = target.content;
     editorTextarea.scrollTop = editorTextarea.scrollHeight;
   }
-  switchEditorTab(SCRATCH_PATH);
+  switchEditorTab(targetPath);
 }
 
 editorTextarea.addEventListener('input', () => {
@@ -487,6 +532,10 @@ editorTextarea.addEventListener('keydown', (e) => {
     e.preventDefault();
     switchEditorTab(SCRATCH_PATH);
     editorTextarea.focus();
+  }
+  if (e.ctrlKey && e.key === 'z' && e.shiftKey) {
+    e.preventDefault();
+    undoLastSend();
   }
   if (e.key === 'Tab') {
     e.preventDefault();
@@ -545,9 +594,23 @@ function sendToTerminal() {
 
   if (f.isScratch) {
     lastSentContent = f.content;
+    lastSentTabPath = activeFilePath;
     f.content = '';
     editorTextarea.value = '';
   }
+}
+
+function undoLastSend() {
+  if (!lastSentContent) return;
+  const target = openFiles.get(lastSentTabPath || SCRATCH_PATH);
+  if (!target) return;
+  target.content = lastSentContent;
+  if (activeFilePath === (lastSentTabPath || SCRATCH_PATH)) {
+    editorTextarea.value = target.content;
+  }
+  lastSentContent = '';
+  switchEditorTab(lastSentTabPath || SCRATCH_PATH);
+  editorTextarea.focus();
 }
 
 sendBtn.addEventListener('click', sendToTerminal);
