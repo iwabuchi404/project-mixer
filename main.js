@@ -307,6 +307,13 @@ ipcMain.handle('clipboard:saveImage', async (event, { projectPath }) => {
   return filepath;
 });
 
+// --- Clipboard text (terminal copy) ---
+
+ipcMain.handle('clipboard:writeText', async (event, { text }) => {
+  clipboard.writeText(text);
+  return true;
+});
+
 // --- Layout persistence ---
 
 ipcMain.handle('layout:save', async (event, { layout }) => {

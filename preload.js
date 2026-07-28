@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('api', {
   // Clipboard image
   clipboardSaveImage: (projectPath) => ipcRenderer.invoke('clipboard:saveImage', { projectPath }),
 
+  // Clipboard text (terminal copy)
+  clipboardWriteText: (text) => ipcRenderer.invoke('clipboard:writeText', { text }),
+
   // Layout
   layoutSave: (layout) => ipcRenderer.invoke('layout:save', { layout }),
   layoutLoad: () => ipcRenderer.invoke('layout:load'),

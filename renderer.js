@@ -792,6 +792,16 @@ async function createTerminal(command, cwd, projectId) {
   terminal.open(termEl);
   fitAddon.fit();
 
+  // ターミナルの右クリックで選択範囲をコピー（Electron は標準コンテキストメニューが出ないため自前で実装）
+  termEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const selection = terminal.getSelection();
+    if (selection) {
+      window.api.clipboardWriteText(selection);
+    }
+  });
+
   const cols = terminal.cols;
   const rows = terminal.rows;
 
