@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; frame-src file: data:; object-src 'none'">
   <title>Project Mixer</title>
   <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="styles.css">
@@ -36,6 +37,7 @@
         <div id="editor-tab-bar"></div>
         <div id="editor-content">
           <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
+          <webview id="preview-webview" class="hidden" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
         </div>
         <div id="send-bar">
           <span id="send-target">→ no terminal</span>
@@ -65,11 +67,14 @@
   <div id="new-tab-menu" class="dropdown-menu hidden"></div>
   <div id="context-menu" class="context-menu hidden">
     <div class="context-menu-item" data-action="open">Open in Editor</div>
+    <div class="context-menu-item" data-action="preview">Preview</div>
     <div class="context-menu-item" data-action="insert-path">Insert Path to Terminal</div>
     <div class="context-menu-item" data-action="insert-name">Insert Filename to Terminal</div>
   </div>
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="./node_modules/marked/lib/marked.umd.js"></script>
+  <script src="./node_modules/dompurify/dist/purify.min.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

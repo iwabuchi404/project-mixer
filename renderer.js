@@ -51,6 +51,7 @@ const memDisplay = document.getElementById('mem-display');
 const editorPane = document.getElementById('editor-pane');
 const editorTabBar = document.getElementById('editor-tab-bar');
 const editorTextarea = document.getElementById('editor-textarea');
+const previewWebview = document.getElementById('preview-webview');
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
 const vsplitter1 = document.getElementById('vsplitter-1');
@@ -332,6 +333,18 @@ function createTreeItem(entry, depth) {
     showContextMenu(e.clientX, e.clientY, entry);
   });
 
+  if (!entry.isDirectory) {
+    el.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (isPreviewable(entry.name)) {
+        openFileInPreview(entry.path, entry.name);
+      } else {
+        openFileInEditor(entry.path, entry.name);
+      }
+    });
+  }
+
   return el;
 }
 
@@ -376,6 +389,12 @@ contextMenu.addEventListener('click', (e) => {
 
   if (action === 'open' && !contextMenuEntry.isDirectory) {
     openFileInEditor(contextMenuEntry.path, contextMenuEntry.name);
+  } else if (action === 'preview' && !contextMenuEntry.isDirectory) {
+    if (isPreviewable(contextMenuEntry.name)) {
+      openFileInPreview(contextMenuEntry.path, contextMenuEntry.name);
+    } else {
+      openFileInEditor(contextMenuEntry.path, contextMenuEntry.name);
+    }
   } else if (action === 'insert-path') {
     insertPathToTerminal(contextMenuEntry.path);
   } else if (action === 'insert-name') {
@@ -505,6 +524,125 @@ function createTempTab() {
 
 newScratchTabBtn.addEventListener('click', createTempTab);
 
+// ============================================================
+// File preview (image / html / markdown)
+// ============================================================
+
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'];
+const HTML_EXTS  = ['.html', '.htm'];
+const MD_EXTS    = ['.md', '.markdown'];
+
+function getExt(name) {
+  const i = name.lastIndexOf('.');
+  return i >= 0 ? name.slice(i).toLowerCase() : '';
+}
+function isImage(name)    { return IMAGE_EXTS.includes(getExt(name)); }
+function isHtml(name)     { return HTML_EXTS.includes(getExt(name)); }
+function isMarkdown(name) { return MD_EXTS.includes(getExt(name)); }
+function isPreviewable(name) {
+  return isImage(name) || isHtml(name) || isMarkdown(name);
+}
+
+function toFileUrl(p) {
+  // Windows: D:\path -> file:///D:/path
+  let normalized = p.replace(/\\/g, '/');
+  if (!normalized.startsWith('/')) normalized = '/' + normalized;
+  return 'file://' + normalized;
+}
+
+function pathDirname(p) {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return i >= 0 ? p.slice(0, i) : '';
+}
+
+const MD_CSS = `
+body { margin:0; padding:24px; color:#c9d1d9; background:#0d1117; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; font-size:14px; line-height:1.6; }
+a { color:#58a6ff; }
+h1,h2,h3,h4,h5,h6 { color:#f0f6fc; margin-top:24px; margin-bottom:16px; line-height:1.25; }
+h1 { font-size:2em; border-bottom:1px solid #21262d; padding-bottom:.3em; }
+h2 { font-size:1.5em; border-bottom:1px solid #21262d; padding-bottom:.3em; }
+code { background:#161b22; padding:.2em .4em; border-radius:6px; font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:85%; }
+pre { background:#161b22; padding:16px; border-radius:6px; overflow:auto; }
+pre code { background:transparent; padding:0; font-size:100%; }
+blockquote { border-left:4px solid #30363d; color:#8b949e; margin:0; padding:0 16px; }
+table { border-collapse:collapse; }
+th,td { border:1px solid #30363d; padding:6px 13px; }
+img { max-width:100%; }
+hr { border:0; border-top:1px solid #21262d; }
+`;
+
+async function openFileInPreview(filePath, name) {
+  const previewPath = `preview:${filePath}`;
+  if (openFiles.has(previewPath)) {
+    switchEditorTab(previewPath);
+    return;
+  }
+
+  const fileData = {
+    path: filePath,
+    name,
+    content: '',
+    originalContent: '',
+    tabEl: null,
+    isScratch: false,
+    isPreview: true,
+    previewPath,
+  };
+
+  const tabEl = document.createElement('div');
+  tabEl.className = 'editor-tab preview-tab';
+  tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.dataset.path = previewPath;
+
+  tabEl.addEventListener('click', (e) => {
+    if (e.target.classList.contains('editor-tab-close')) {
+      closeEditorTab(previewPath);
+    } else {
+      switchEditorTab(previewPath);
+    }
+  });
+
+  tabEl.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      closeEditorTab(previewPath);
+    }
+  });
+
+  makeEditorTabDraggable(tabEl, previewPath);
+  editorTabBar.insertBefore(tabEl, newScratchTabBtn);
+  fileData.tabEl = tabEl;
+  openFiles.set(previewPath, fileData);
+
+  showEditorPane();
+  switchEditorTab(previewPath);
+}
+
+function loadPreviewHtml(html) {
+  const dataUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
+  // Assigning src is safe before the webview's initial dom-ready event.
+  // loadURL() would reject until the guest WebContents has been created.
+  previewWebview.src = dataUrl;
+}
+
+async function loadPreviewContent(f) {
+  if (isImage(f.name)) {
+    // A data: document cannot reliably load an absolute file: image because
+    // Chromium treats it as a local-resource access from an opaque origin.
+    // Navigating the sandboxed webview directly to the image avoids that.
+    previewWebview.src = toFileUrl(f.path);
+  } else if (isHtml(f.name)) {
+    previewWebview.src = toFileUrl(f.path);
+  } else if (isMarkdown(f.name)) {
+    const result = await window.api.readFile(f.path);
+    if (!result.success) return;
+    if (activeFilePath !== f.previewPath) return;
+    const html = DOMPurify.sanitize(marked.parse(result.content));
+    const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
+    loadPreviewHtml(`<!DOCTYPE html><html><head><meta charset="UTF-8"><base href="${baseUrl}"><style>${MD_CSS}</style></head><body class="markdown-body">${html}</body></html>`);
+  }
+}
+
 async function openFileInEditor(filePath, name) {
   if (openFiles.has(filePath)) {
     switchEditorTab(filePath);
@@ -558,11 +696,20 @@ function switchEditorTab(filePath) {
 
   openFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
   f.tabEl.classList.add('active');
-
-  editorTextarea.value = f.content;
   activeFilePath = filePath;
-  if (!f.isScratch) updateEditorDirty(filePath);
-  editorTextarea.focus();
+
+  if (f.isPreview) {
+    editorTextarea.classList.add('hidden');
+    previewWebview.classList.remove('hidden');
+    loadPreviewContent(f);
+  } else {
+    previewWebview.classList.add('hidden');
+    previewWebview.src = 'about:blank';
+    editorTextarea.classList.remove('hidden');
+    editorTextarea.value = f.content;
+    if (!f.isScratch) updateEditorDirty(filePath);
+    editorTextarea.focus();
+  }
 }
 
 function closeEditorTab(filePath) {
@@ -580,6 +727,9 @@ function closeEditorTab(filePath) {
 function showEditorPane() {
   editorPane.classList.remove('hidden');
   splitter.classList.remove('hidden');
+  if (!editorPane.style.height) {
+    editorPane.style.height = Math.max(200, Math.floor(window.innerHeight * 0.4)) + 'px';
+  }
 }
 
 function hideEditorPane() {
