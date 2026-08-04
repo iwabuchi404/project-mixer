@@ -35,6 +35,17 @@ contextBridge.exposeInMainWorld('api', {
   // Folder dialog
   openFolderDialog: () => ipcRenderer.invoke('dialog:openFolder'),
 
+  // Save dialog
+  saveFileDialog: (defaultPath, defaultName) => ipcRenderer.invoke('dialog:saveFile', { defaultPath, defaultName }),
+
+  // Open file in OS default app
+  openInOs: (filePath) => ipcRenderer.invoke('shell:openPath', { filePath }),
+
+  // File operations
+  deleteFile: (filePath) => ipcRenderer.invoke('fs:deleteFile', { filePath }),
+  createFile: (filePath) => ipcRenderer.invoke('fs:createFile', { filePath }),
+  createDir: (dirPath) => ipcRenderer.invoke('fs:createDir', { dirPath }),
+
   // Hook-based waiting indicator
   onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),
   hookSetup: (projectPath) => ipcRenderer.invoke('hook:setup', { projectPath }),

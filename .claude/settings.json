@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"D:\\work\\project-mixer\\.claude\\project-mixer-hook.js\""
+            "command": "node \"D:\\\\work\\\\project-mixer\\\\.claude\\\\project-mixer-hook.js\""
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"D:\\work\\project-mixer\\.claude\\project-mixer-hook.js\""
+            "command": "node \"D:\\\\work\\\\project-mixer\\\\.claude\\\\project-mixer-hook.js\""
           }
         ]
       }

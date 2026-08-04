@@ -11,7 +11,32 @@ let tabCounter = 0;
 const projectActiveTab = new Map(); // projectId -> last active tabId
 let draggedTerminalTab = null;
 
-const COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
+const IS_WIN = navigator.userAgent.includes('Windows');
+const IS_MAC = /Macintosh|MacIntel|MacPPC|Mac68K/.test(navigator.userAgent);
+const PLATFORM = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
+
+const WIN_COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
+const UNIX_COMMANDS = ['bash', 'zsh', 'sh', 'claude', 'codex', 'devin'];
+const COMMANDS = IS_WIN ? WIN_COMMANDS : UNIX_COMMANDS;
+
+const TERMINAL_LABELS = {
+  'pwsh.exe': 'PowerShell 7',
+  'powershell.exe': 'Windows PowerShell',
+  'cmd.exe': 'Command Prompt',
+  'wsl.exe': 'WSL',
+  'bash': 'Bash',
+  'zsh': 'Zsh',
+  'sh': 'Sh',
+  'claude': 'Claude Code',
+  'codex': 'Codex',
+  'devin': 'Devin CLI',
+};
+
+function defaultShell() {
+  if (IS_WIN) return 'pwsh.exe';
+  if (IS_MAC) return 'zsh';
+  return 'bash';
+}
 
 // ツール別の送信方式（D8: bracketed paste 挙動差を吸収）
 //   'paste'    : xterm.js の paste() + \r（デフォルト。mode 有効なツール全般）
@@ -44,6 +69,7 @@ const projectCancelBtn = document.getElementById('project-cancel-btn');
 const projectConfirmBtn = document.getElementById('project-confirm-btn');
 const fileTree = document.getElementById('file-tree');
 const fileTreeHeader = document.getElementById('file-tree-header');
+const fileTreeTitle = document.getElementById('file-tree-title');
 const tabBar = document.getElementById('tab-bar');
 const terminalContainer = document.getElementById('terminal-container');
 const newTabBtn = document.getElementById('new-tab-btn');
@@ -54,6 +80,19 @@ const editorTextarea = document.getElementById('editor-textarea');
 const previewWebview = document.getElementById('preview-webview');
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
+const deleteConfirmModal = document.getElementById('delete-confirm-modal');
+const deleteConfirmMessage = document.getElementById('delete-confirm-message');
+const deleteCancelBtn = document.getElementById('delete-cancel-btn');
+const deleteConfirmBtn = document.getElementById('delete-confirm-btn');
+const promptModal = document.getElementById('prompt-modal');
+const promptTitle = document.getElementById('prompt-title');
+const promptLabel = document.getElementById('prompt-label');
+const promptInput = document.getElementById('prompt-input');
+const promptCancelBtn = document.getElementById('prompt-cancel-btn');
+const promptConfirmBtn = document.getElementById('prompt-confirm-btn');
+const treeReloadBtn = document.getElementById('tree-reload-btn');
+const treeNewFileBtn = document.getElementById('tree-new-file-btn');
+const treeNewFolderBtn = document.getElementById('tree-new-folder-btn');
 const vsplitter1 = document.getElementById('vsplitter-1');
 const vsplitter2 = document.getElementById('vsplitter-2');
 const browseFolderBtn = document.getElementById('browse-folder-btn');
@@ -195,11 +234,12 @@ function renderProjectList() {
 }
 
 async function selectProject(projectId) {
+  switchProjectEditor(projectId);
   activeProjectId = projectId;
   renderProjectList();
   const p = projects.get(projectId);
   if (p) {
-    fileTreeHeader.textContent = p.name;
+    fileTreeTitle.textContent = p.name;
     await loadFileTree(p.path);
     window.api.hookSetup(p.path);
   }
@@ -227,11 +267,12 @@ async function removeProject(projectId) {
     tabs.delete(tid);
   }
   projectActiveTab.delete(projectId);
+  removeProjectEditorState(projectId);
 
   if (activeProjectId === projectId) {
     activeProjectId = null;
     activeTabId = null;
-    fileTreeHeader.textContent = 'Files';
+    fileTreeTitle.textContent = 'Files';
     fileTree.innerHTML = '';
     updateSendTarget();
   }
@@ -298,6 +339,44 @@ async function loadFileTree(dirPath) {
     fileTree.appendChild(createTreeItem(entry, 0));
   }
 }
+
+// ============================================================
+// File tree header actions
+// ============================================================
+
+treeReloadBtn.addEventListener('click', async () => {
+  const project = projects.get(activeProjectId);
+  if (project) await loadFileTree(project.path);
+});
+
+treeNewFileBtn.addEventListener('click', async () => {
+  const project = projects.get(activeProjectId);
+  if (!project) return;
+  const name = await showPrompt('New File', `Create in: ${project.path}`, '');
+  if (!name) return;
+  const filePath = joinPath(project.path, name);
+  const result = await window.api.createFile(filePath);
+  if (!result.success) {
+    alert('Create file failed: ' + result.error);
+    return;
+  }
+  await loadFileTree(project.path);
+  openFileInEditor(filePath, name.split(/[\\/]/).pop());
+});
+
+treeNewFolderBtn.addEventListener('click', async () => {
+  const project = projects.get(activeProjectId);
+  if (!project) return;
+  const name = await showPrompt('New Folder', `Create in: ${project.path}`, '');
+  if (!name) return;
+  const dirPath = joinPath(project.path, name);
+  const result = await window.api.createDir(dirPath);
+  if (!result.success) {
+    alert('Create folder failed: ' + result.error);
+    return;
+  }
+  await loadFileTree(project.path);
+});
 
 function createTreeItem(entry, depth) {
   const el = document.createElement('div');
@@ -395,10 +474,16 @@ contextMenu.addEventListener('click', (e) => {
     } else {
       openFileInEditor(contextMenuEntry.path, contextMenuEntry.name);
     }
+  } else if (action === 'open-os') {
+    window.api.openInOs(contextMenuEntry.path);
+  } else if (action === 'copy-path') {
+    window.api.clipboardWriteText(contextMenuEntry.path);
   } else if (action === 'insert-path') {
     insertPathToTerminal(contextMenuEntry.path);
   } else if (action === 'insert-name') {
     insertNameToTerminal(contextMenuEntry.path);
+  } else if (action === 'delete') {
+    showDeleteConfirm(contextMenuEntry);
   }
   hideContextMenu();
 });
@@ -409,17 +494,156 @@ document.addEventListener('contextmenu', (e) => {
 });
 
 // ============================================================
+// Delete confirmation modal
+// ============================================================
+
+let pendingDeleteEntry = null;
+
+function showDeleteConfirm(entry) {
+  pendingDeleteEntry = entry;
+  const typeStr = entry.isDirectory ? 'folder' : 'file';
+  deleteConfirmMessage.textContent = `Are you sure you want to delete this ${typeStr}?`;
+  deleteConfirmMessage.innerHTML += `<br><br><code style="background:#1e1e1e;padding:4px 8px;border-radius:3px;font-size:11px;word-break:break-all;">${escapeHtml(entry.path)}</code>`;
+  deleteConfirmModal.classList.remove('hidden');
+}
+
+function hideDeleteConfirm() {
+  deleteConfirmModal.classList.add('hidden');
+  pendingDeleteEntry = null;
+}
+
+deleteCancelBtn.addEventListener('click', hideDeleteConfirm);
+
+deleteConfirmBtn.addEventListener('click', async () => {
+  if (!pendingDeleteEntry) return;
+  const entry = pendingDeleteEntry;
+  hideDeleteConfirm();
+  const result = await window.api.deleteFile(entry.path);
+  if (!result.success) {
+    alert('Delete failed: ' + result.error);
+    return;
+  }
+  // Close editor tab if the deleted file was open
+  if (openFiles.has(entry.path)) {
+    closeEditorTab(entry.path);
+  }
+  // Refresh file tree
+  const project = projects.get(activeProjectId);
+  if (project) await loadFileTree(project.path);
+});
+
+// ============================================================
+// Prompt modal (for new file/folder naming)
+// ============================================================
+
+let promptResolve = null;
+
+function showPrompt(title, label, defaultValue) {
+  return new Promise((resolve) => {
+    promptTitle.textContent = title;
+    promptLabel.textContent = label;
+    promptInput.value = defaultValue || '';
+    promptResolve = resolve;
+    promptModal.classList.remove('hidden');
+    setTimeout(() => promptInput.focus(), 0);
+  });
+}
+
+function hidePrompt(value) {
+  promptModal.classList.add('hidden');
+  const r = promptResolve;
+  promptResolve = null;
+  if (r) r(value);
+}
+
+promptCancelBtn.addEventListener('click', () => hidePrompt(null));
+promptConfirmBtn.addEventListener('click', () => hidePrompt(promptInput.value.trim()));
+promptInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    hidePrompt(promptInput.value.trim());
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    hidePrompt(null);
+  }
+});
+
+// ============================================================
 // Editor management (D8: tabs below terminal, scratch = Composer)
 // ============================================================
 
 const SCRATCH_PATH = '__scratch__';
-const openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch, isTemp }
+let openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch, isTemp }
 let activeFilePath = null;
 let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
+const projectEditorStates = new Map();
+let activeEditorProjectId = null;
+let editorStateInitialized = false;
 
 let draggedEditorTab = null;
+
+function saveCurrentEditorState() {
+  if (!editorStateInitialized) return;
+  projectEditorStates.set(activeEditorProjectId, {
+    openFiles,
+    activeFilePath,
+    lastSentContent,
+    lastSentTabPath,
+    tempTabCounter,
+  });
+}
+
+function switchProjectEditor(projectId) {
+  if (editorStateInitialized && activeEditorProjectId === projectId) return;
+
+  saveCurrentEditorState();
+  openFiles.forEach((f) => { f.tabEl.style.display = 'none'; });
+
+  activeEditorProjectId = projectId;
+  const state = projectEditorStates.get(projectId);
+  if (state) {
+    openFiles = state.openFiles;
+    activeFilePath = state.activeFilePath;
+    lastSentContent = state.lastSentContent;
+    lastSentTabPath = state.lastSentTabPath;
+    tempTabCounter = state.tempTabCounter;
+    openFiles.forEach((f) => { f.tabEl.style.display = ''; });
+  } else {
+    openFiles = new Map();
+    activeFilePath = null;
+    lastSentContent = '';
+    lastSentTabPath = null;
+    tempTabCounter = 0;
+    editorStateInitialized = true;
+    initScratchTab();
+    saveCurrentEditorState();
+  }
+
+  editorStateInitialized = true;
+  editorTabBar.appendChild(newScratchTabBtn);
+  switchEditorTab(activeFilePath || SCRATCH_PATH);
+}
+
+function removeProjectEditorState(projectId) {
+  const state = projectEditorStates.get(projectId);
+  if (state) {
+    state.openFiles.forEach((f) => f.tabEl.remove());
+    projectEditorStates.delete(projectId);
+  }
+  if (activeEditorProjectId === projectId) {
+    editorStateInitialized = false;
+    activeEditorProjectId = null;
+    openFiles = new Map();
+    activeFilePath = null;
+    lastSentContent = '';
+    lastSentTabPath = null;
+    tempTabCounter = 0;
+    switchProjectEditor(null);
+  }
+}
 
 function makeEditorTabDraggable(tabEl, path) {
   tabEl.draggable = true;
@@ -555,6 +779,14 @@ function pathDirname(p) {
   return i >= 0 ? p.slice(0, i) : '';
 }
 
+function joinPath(base, sub) {
+  // Normalize separators and join. Handles Windows backslash paths.
+  const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
+  const trimmedBase = base.replace(/[\\/]+$/, '');
+  const trimmedSub = sub.replace(/^[\\/]+/, '');
+  return trimmedBase + sep + trimmedSub.replace(/\//g, sep);
+}
+
 const MD_CSS = `
 body { margin:0; padding:24px; color:#c9d1d9; background:#0d1117; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; font-size:14px; line-height:1.6; }
 a { color:#58a6ff; }
@@ -572,6 +804,7 @@ hr { border:0; border-top:1px solid #21262d; }
 `;
 
 async function openFileInPreview(filePath, name) {
+  const projectId = activeEditorProjectId;
   const previewPath = `preview:${filePath}`;
   if (openFiles.has(previewPath)) {
     switchEditorTab(previewPath);
@@ -587,6 +820,7 @@ async function openFileInPreview(filePath, name) {
     isScratch: false,
     isPreview: true,
     previewPath,
+    projectId,
   };
 
   const tabEl = document.createElement('div');
@@ -636,7 +870,7 @@ async function loadPreviewContent(f) {
   } else if (isMarkdown(f.name)) {
     const result = await window.api.readFile(f.path);
     if (!result.success) return;
-    if (activeFilePath !== f.previewPath) return;
+    if (activeEditorProjectId !== f.projectId || activeFilePath !== f.previewPath) return;
     const html = DOMPurify.sanitize(marked.parse(result.content));
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
     loadPreviewHtml(`<!DOCTYPE html><html><head><meta charset="UTF-8"><base href="${baseUrl}"><style>${MD_CSS}</style></head><body class="markdown-body">${html}</body></html>`);
@@ -644,6 +878,7 @@ async function loadPreviewContent(f) {
 }
 
 async function openFileInEditor(filePath, name) {
+  const projectId = activeEditorProjectId;
   if (openFiles.has(filePath)) {
     switchEditorTab(filePath);
     return;
@@ -651,6 +886,7 @@ async function openFileInEditor(filePath, name) {
 
   const result = await window.api.readFile(filePath);
   if (!result.success) return;
+  if (activeEditorProjectId !== projectId) return;
 
   const fileData = {
     path: filePath,
@@ -659,6 +895,7 @@ async function openFileInEditor(filePath, name) {
     originalContent: result.content,
     tabEl: null,
     isScratch: false,
+    projectId,
   };
 
   const tabEl = document.createElement('div');
@@ -704,7 +941,7 @@ function switchEditorTab(filePath) {
     loadPreviewContent(f);
   } else {
     previewWebview.classList.add('hidden');
-    previewWebview.src = 'about:blank';
+    previewWebview.srcdoc = '';
     editorTextarea.classList.remove('hidden');
     editorTextarea.value = f.content;
     if (!f.isScratch) updateEditorDirty(filePath);
@@ -805,11 +1042,55 @@ editorTextarea.addEventListener('keydown', (e) => {
 async function saveActiveFile() {
   if (!activeFilePath) return;
   const f = openFiles.get(activeFilePath);
-  if (!f || f.isScratch) return;
-  const result = await window.api.writeFile(f.path, f.content);
-  if (result.success) {
+  if (!f || f.isScratch && !f.isTemp) return;
+
+  if (f.isTemp) {
+    // Show save dialog for temp tabs
+    const project = projects.get(activeEditorProjectId);
+    const defaultPath = project ? project.path : undefined;
+    const savePath = await window.api.saveFileDialog(defaultPath, f.name || 'untitled.txt');
+    if (!savePath) return;
+
+    const result = await window.api.writeFile(savePath, f.content);
+    if (!result.success) return;
+
+    // Convert temp tab into a regular file tab
+    const oldPath = activeFilePath;
+    const newName = savePath.split(/[\\/]/).pop();
+    openFiles.delete(oldPath);
+    f.path = savePath;
+    f.name = newName;
+    f.isScratch = false;
+    f.isTemp = false;
     f.originalContent = f.content;
-    updateEditorDirty(activeFilePath);
+    f.tabEl.classList.remove('scratch');
+    f.tabEl.querySelector('.editor-tab-name').textContent = newName;
+    f.tabEl.dataset.path = savePath;
+    // Re-bind click handlers to new path
+    f.tabEl.onclick = (e) => {
+      if (e.target.classList.contains('editor-tab-close')) {
+        closeEditorTab(savePath);
+      } else {
+        switchEditorTab(savePath);
+      }
+    };
+    // Add dirty indicator
+    const dirtyEl = document.createElement('span');
+    dirtyEl.className = 'editor-tab-dirty hidden';
+    dirtyEl.textContent = '*';
+    const closeEl = f.tabEl.querySelector('.editor-tab-close');
+    f.tabEl.insertBefore(dirtyEl, closeEl);
+    openFiles.set(savePath, f);
+    activeFilePath = savePath;
+    updateEditorDirty(savePath);
+    // Refresh file tree to show the new file
+    if (project) await loadFileTree(project.path);
+  } else {
+    const result = await window.api.writeFile(f.path, f.content);
+    if (result.success) {
+      f.originalContent = f.content;
+      updateEditorDirty(activeFilePath);
+    }
   }
 }
 
@@ -942,13 +1223,25 @@ async function createTerminal(command, cwd, projectId) {
   terminal.open(termEl);
   fitAddon.fit();
 
-  // ターミナルの右クリックで選択範囲をコピー（Electron は標準コンテキストメニューが出ないため自前で実装）
-  termEl.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
+  // ターミナルのコピー機能（Electron は標準コンテキストメニューが出ないため自前で実装）
+  // - 右クリック: 選択範囲をコピー → 選択解除（Windows Terminal / PuTTY と同じ挙動）
+  // - Ctrl+Shift+C: 同上（VSCode / GNOME Terminal と同じ挙動）
+  function copyTerminalSelection() {
     const selection = terminal.getSelection();
     if (selection) {
       window.api.clipboardWriteText(selection);
+      terminal.clearSelection();
+    }
+  }
+  termEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    copyTerminalSelection();
+  });
+  termEl.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+      e.preventDefault();
+      copyTerminalSelection();
     }
   });
 
@@ -1143,15 +1436,6 @@ function updateProjectStatus(projectId) {
 // ============================================================
 
 const newTabMenu = document.getElementById('new-tab-menu');
-const TERMINAL_LABELS = {
-  'pwsh.exe': 'PowerShell 7',
-  'powershell.exe': 'Windows PowerShell',
-  'cmd.exe': 'Command Prompt',
-  'wsl.exe': 'WSL',
-  'claude': 'Claude Code',
-  'codex': 'Codex',
-  'devin': 'Devin CLI',
-};
 
 newTabBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -1224,6 +1508,7 @@ function handleResize() {
       if (t) {
         t.fitAddon.fit();
         window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+        t.terminal.scrollToBottom();
       }
     }
   }, 50);
@@ -1349,12 +1634,12 @@ function escapeHtml(text) {
 }
 
 (async () => {
-  initScratchTab();
   await loadProjects();
   await loadLayout();
   if (tabs.size === 0 && projects.size > 0) {
     const p = projects.values().next().value;
     await selectProject(p.id);
-    await createTerminal('pwsh.exe', p.path, p.id);
+    await createTerminal(defaultShell(), p.path, p.id);
   }
+  if (!editorStateInitialized) switchProjectEditor(activeProjectId);
 })();

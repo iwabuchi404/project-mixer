@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -63,13 +63,23 @@ ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
   const id = ++ptyCounter;
   const shellCwd = cwd || os.homedir();
 
+  const isWin = os.platform() === 'win32';
+  const winShells = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe'];
+  const unixShells = ['bash', 'zsh', 'sh'];
+
   let shell, shellArgs;
-  if (!command || command === 'pwsh.exe' || command === 'powershell.exe' || command === 'cmd.exe' || command === 'wsl.exe') {
-    shell = command || (os.platform() === 'win32' ? 'pwsh.exe' : 'bash');
+  if (!command) {
+    shell = isWin ? 'pwsh.exe' : 'bash';
+    shellArgs = args || [];
+  } else if (isWin && winShells.includes(command)) {
+    shell = command;
+    shellArgs = args || [];
+  } else if (!isWin && unixShells.includes(command)) {
+    shell = command;
     shellArgs = args || [];
   } else {
     // claude, codex, etc. — wrap in pwsh -NoExit -Command on Windows
-    if (os.platform() === 'win32') {
+    if (isWin) {
       shell = 'pwsh.exe';
       shellArgs = ['-NoExit', '-Command', command];
     } else {
@@ -252,7 +262,7 @@ ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
     const entries = await fsp.readdir(dirPath, { withFileTypes: true });
     const result = [];
     for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
       result.push({
         name: entry.name,
         path: path.join(dirPath, entry.name),
@@ -336,6 +346,64 @@ ipcMain.handle('dialog:openFolder', async () => {
   return result.filePaths[0];
 });
 
+// --- Save dialog (for temp tab save) ---
+
+ipcMain.handle('dialog:saveFile', async (event, { defaultPath, defaultName }) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: defaultPath ? path.join(defaultPath, defaultName || 'untitled.txt') : defaultName,
+    filters: [{ name: 'All Files', extensions: ['*'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  return result.filePath;
+});
+
+// --- Open file in OS default app ---
+
+ipcMain.handle('shell:openPath', async (event, { filePath }) => {
+  const errorMsg = await shell.openPath(filePath);
+  return { success: !errorMsg, error: errorMsg || null };
+});
+
+// --- Delete file ---
+
+ipcMain.handle('fs:deleteFile', async (event, { filePath }) => {
+  try {
+    const stat = await fsp.stat(filePath);
+    if (stat.isDirectory()) {
+      await fsp.rm(filePath, { recursive: true });
+    } else {
+      await fsp.unlink(filePath);
+    }
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// --- Create file ---
+
+ipcMain.handle('fs:createFile', async (event, { filePath }) => {
+  try {
+    if (fs.existsSync(filePath)) return { success: false, error: 'File already exists' };
+    await fsp.writeFile(filePath, '', 'utf-8');
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// --- Create directory ---
+
+ipcMain.handle('fs:createDir', async (event, { dirPath }) => {
+  try {
+    if (fs.existsSync(dirPath)) return { success: false, error: 'Directory already exists' };
+    await fsp.mkdir(dirPath);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 // --- Hook-based waiting indicator ---
 // Receives notifications from Claude Code/Codex hook scripts via HTTP or CLI.
 // The hook script calls: electron --hook-notify <json>
@@ -392,7 +460,11 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
 
     // Add hooks for Notification and Stop
     if (!settings.hooks) settings.hooks = {};
-    const hookCmd = `node "${hookScriptPath.replace(/\\\\/g, '\\\\\\\\')}"`;
+    // Escape backslashes for Windows paths; Unix paths need no escaping
+    const escapedPath = os.platform() === 'win32'
+      ? hookScriptPath.replace(/\\/g, '\\\\')
+      : hookScriptPath;
+    const hookCmd = `node "${escapedPath}"`;
     settings.hooks.Notification = [{ matcher: '', hooks: [{ type: 'command', command: hookCmd }] }];
     settings.hooks.Stop = [{ matcher: '', hooks: [{ type: 'command', command: hookCmd }] }];
 

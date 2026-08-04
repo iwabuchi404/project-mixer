@@ -21,7 +21,14 @@
     </div>
     <div id="vsplitter-1" class="vsplitter"></div>
     <div id="file-tree-pane">
-      <div id="file-tree-header">Files</div>
+      <div id="file-tree-header">
+        <span id="file-tree-title">Files</span>
+        <div id="file-tree-actions">
+          <button id="tree-reload-btn" title="Reload">&#x21BB;</button>
+          <button id="tree-new-file-btn" title="New File">+F</button>
+          <button id="tree-new-folder-btn" title="New Folder">+D</button>
+        </div>
+      </div>
       <div id="file-tree"></div>
     </div>
     <div id="vsplitter-2" class="vsplitter"></div>
@@ -68,8 +75,32 @@
   <div id="context-menu" class="context-menu hidden">
     <div class="context-menu-item" data-action="open">Open in Editor</div>
     <div class="context-menu-item" data-action="preview">Preview</div>
+    <div class="context-menu-item" data-action="open-os">Open in OS</div>
+    <div class="context-menu-item" data-action="copy-path">Copy Path</div>
     <div class="context-menu-item" data-action="insert-path">Insert Path to Terminal</div>
     <div class="context-menu-item" data-action="insert-name">Insert Filename to Terminal</div>
+    <div class="context-menu-item context-menu-danger" data-action="delete">Delete</div>
+  </div>
+  <div id="delete-confirm-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Delete File</h3>
+      <p id="delete-confirm-message"></p>
+      <div class="modal-buttons">
+        <button id="delete-cancel-btn">Cancel</button>
+        <button id="delete-confirm-btn" class="danger-btn">Delete</button>
+      </div>
+    </div>
+  </div>
+  <div id="prompt-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3 id="prompt-title">New File</h3>
+      <p id="prompt-label" style="font-size:12px;color:#888;margin-bottom:8px;"></p>
+      <input type="text" id="prompt-input" placeholder="name">
+      <div class="modal-buttons">
+        <button id="prompt-cancel-btn">Cancel</button>
+        <button id="prompt-confirm-btn">OK</button>
+      </div>
+    </div>
   </div>
   <script src="./node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="./node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
