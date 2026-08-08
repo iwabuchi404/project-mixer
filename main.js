@@ -444,7 +444,7 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   // Claude Code: .claude/settings.json
   const claudeDir = path.join(projectPath, '.claude');
   const claudeSettings = path.join(claudeDir, 'settings.json');
-  const hookScriptPath = path.join(claudeDir, 'project-mixer-hook.js');
+  const hookScriptPath = path.join(claudeDir, 'project-mixer-hook.cjs');
 
   try {
     if (!fs.existsSync(claudeDir)) fs.mkdirSync(claudeDir, { recursive: true });
