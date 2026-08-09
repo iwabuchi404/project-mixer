@@ -89,6 +89,9 @@ const editorPane = document.getElementById('editor-pane');
 const editorTabBar = document.getElementById('editor-tab-bar');
 const editorTextarea = document.getElementById('editor-textarea');
 const previewWebview = document.getElementById('preview-webview');
+const previewPane = document.getElementById('preview-pane');
+const previewTabBar = document.getElementById('preview-tab-bar');
+const vsplitter3 = document.getElementById('vsplitter-3');
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
 const deleteConfirmModal = document.getElementById('delete-confirm-modal');
@@ -249,15 +252,19 @@ async function selectProject(projectId) {
   activeProjectId = projectId;
   setState({ activeProjectId });
   // Update editor state in store after switching project editor
-  const activeFile = openFiles.get(activeFilePath);
-  if (activeFile) {
-    setState({
-      activeFilePath: activeFilePath,
-      isPreview: !!activeFile.isPreview,
-      scratchContent: getProjectScratchContent(openFiles, activeFilePath, SCRATCH_PATH),
-    });
+  if (activePreviewPath && previewFiles.has(activePreviewPath)) {
+    setState({ activeFilePath: activePreviewPath, isPreview: true, cursorLine: null, selection: null });
   } else {
-    setState({ activeFilePath: null, isPreview: false, scratchContent: '' });
+    const activeFile = openFiles.get(activeFilePath);
+    if (activeFile) {
+      setState({
+        activeFilePath: activeFilePath,
+        isPreview: false,
+        scratchContent: getProjectScratchContent(openFiles, activeFilePath, SCRATCH_PATH),
+      });
+    } else {
+      setState({ activeFilePath: null, isPreview: false, scratchContent: '' });
+    }
   }
   renderProjectList();
   const p = projects.get(projectId);
@@ -599,7 +606,9 @@ promptInput.addEventListener('keydown', (e) => {
 
 const SCRATCH_PATH = '__scratch__';
 let openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch, isTemp }
+let previewFiles = new Map(); // previewPath -> { path, name, tabEl, isPreview, previewPath, projectId }
 let activeFilePath = null;
+let activePreviewPath = null;
 let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
@@ -625,6 +634,8 @@ function switchProjectEditor(projectId) {
 
   saveCurrentEditorState();
   openFiles.forEach((f) => { f.tabEl.style.display = 'none'; });
+  // Hide all preview tabs, will show matching ones below
+  previewFiles.forEach((f) => { f.tabEl.style.display = 'none'; });
 
   activeEditorProjectId = projectId;
   const state = projectEditorStates.get(projectId);
@@ -646,9 +657,23 @@ function switchProjectEditor(projectId) {
     saveCurrentEditorState();
   }
 
+  // Show preview tabs for this project
+  let hasVisiblePreview = false;
+  previewFiles.forEach((f) => {
+    if (f.projectId === projectId) {
+      f.tabEl.style.display = '';
+      hasVisiblePreview = true;
+    }
+  });
+
   editorStateInitialized = true;
   editorTabBar.appendChild(newScratchTabBtn);
-  switchEditorTab(activeFilePath || SCRATCH_PATH);
+  // If there's a visible preview tab and no active editor file, show preview
+  if (hasVisiblePreview && activePreviewPath && previewFiles.has(activePreviewPath) && previewFiles.get(activePreviewPath).projectId === projectId) {
+    switchPreviewTab(activePreviewPath);
+  } else {
+    switchEditorTab(activeFilePath || SCRATCH_PATH);
+  }
 }
 
 function removeProjectEditorState(projectId) {
@@ -657,6 +682,15 @@ function removeProjectEditorState(projectId) {
     state.openFiles.forEach((f) => f.tabEl.remove());
     projectEditorStates.delete(projectId);
   }
+  // Remove preview tabs for this project
+  const previewToRemove = [];
+  previewFiles.forEach((f, path) => {
+    if (f.projectId === projectId) {
+      f.tabEl.remove();
+      previewToRemove.push(path);
+    }
+  });
+  previewToRemove.forEach((p) => previewFiles.delete(p));
   if (activeEditorProjectId === projectId) {
     editorStateInitialized = false;
     activeEditorProjectId = null;
@@ -830,25 +864,22 @@ hr { border:0; border-top:1px solid #21262d; }
 async function openFileInPreview(filePath, name) {
   const projectId = activeEditorProjectId;
   const previewPath = `preview:${filePath}`;
-  if (openFiles.has(previewPath)) {
-    switchEditorTab(previewPath);
+  if (previewFiles.has(previewPath)) {
+    switchPreviewTab(previewPath);
     return;
   }
 
   const fileData = {
     path: filePath,
     name,
-    content: '',
-    originalContent: '',
     tabEl: null,
-    isScratch: false,
     isPreview: true,
     previewPath,
     projectId,
   };
 
   const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab preview-tab';
+  tabEl.className = 'preview-tab';
   tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-close">\u00d7</span>`;
   tabEl.dataset.path = previewPath;
 
@@ -867,13 +898,12 @@ async function openFileInPreview(filePath, name) {
     }
   });
 
-  makeEditorTabDraggable(tabEl, previewPath);
-  editorTabBar.insertBefore(tabEl, newScratchTabBtn);
+  previewTabBar.appendChild(tabEl);
   fileData.tabEl = tabEl;
-  openFiles.set(previewPath, fileData);
+  previewFiles.set(previewPath, fileData);
 
-  showEditorPane();
-  switchEditorTab(previewPath);
+  showPreviewPane();
+  switchPreviewTab(previewPath);
 }
 
 function loadPreviewHtml(html) {
@@ -885,19 +915,67 @@ function loadPreviewHtml(html) {
 
 async function loadPreviewContent(f) {
   if (isImage(f.name)) {
-    // A data: document cannot reliably load an absolute file: image because
-    // Chromium treats it as a local-resource access from an opaque origin.
-    // Navigating the sandboxed webview directly to the image avoids that.
     previewWebview.src = toFileUrl(f.path);
   } else if (isHtml(f.name)) {
     previewWebview.src = toFileUrl(f.path);
   } else if (isMarkdown(f.name)) {
     const result = await window.api.readFile(f.path);
     if (!result.success) return;
-    if (activeEditorProjectId !== f.projectId || activeFilePath !== f.previewPath) return;
+    if (activePreviewPath !== f.previewPath) return;
     const html = DOMPurify.sanitize(marked.parse(result.content));
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
     loadPreviewHtml(`<!DOCTYPE html><html><head><meta charset="UTF-8"><base href="${baseUrl}"><style>${MD_CSS}</style></head><body class="markdown-body">${html}</body></html>`);
+  }
+}
+
+function showPreviewPane() {
+  previewPane.classList.remove('hidden');
+  vsplitter3.classList.remove('hidden');
+}
+
+function hidePreviewPane() {
+  previewPane.classList.add('hidden');
+  vsplitter3.classList.add('hidden');
+}
+
+function switchPreviewTab(previewPath) {
+  const f = previewFiles.get(previewPath);
+  if (!f) return;
+
+  previewFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
+  f.tabEl.classList.add('active');
+  activePreviewPath = previewPath;
+  setState({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
+  loadPreviewContent(f);
+}
+
+function closePreviewTab(previewPath) {
+  const f = previewFiles.get(previewPath);
+  if (!f) return;
+
+  f.tabEl.remove();
+  previewFiles.delete(previewPath);
+
+  if (activePreviewPath === previewPath) {
+    // Switch to next preview tab, or hide pane
+    let nextPath = null;
+    for (const [path] of previewFiles) {
+      nextPath = path;
+      break;
+    }
+    if (nextPath) {
+      switchPreviewTab(nextPath);
+    } else {
+      activePreviewPath = null;
+      hidePreviewPane();
+      // Restore editor state in store
+      const activeFile = openFiles.get(activeFilePath);
+      if (activeFile) {
+        setState({ isPreview: false, activeFilePath: activeFilePath });
+      } else {
+        setState({ isPreview: false, activeFilePath: null });
+      }
+    }
   }
 }
 
@@ -952,35 +1030,36 @@ async function openFileInEditor(filePath, name) {
 }
 
 function switchEditorTab(filePath) {
+  // Preview tabs are handled by switchPreviewTab
+  if (filePath && filePath.startsWith('preview:')) {
+    switchPreviewTab(filePath);
+    return;
+  }
   const f = openFiles.get(filePath);
   if (!f) return;
 
   openFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
   f.tabEl.classList.add('active');
   activeFilePath = filePath;
-  setState({ activeFilePath: filePath, isPreview: !!f.isPreview });
+  setState({ activeFilePath: filePath, isPreview: false });
 
-  if (f.isPreview) {
-    editorTextarea.classList.add('hidden');
-    previewWebview.classList.remove('hidden');
-    loadPreviewContent(f);
-    setState({ cursorLine: null, selection: null });
-  } else {
-    previewWebview.classList.add('hidden');
-    previewWebview.srcdoc = '';
-    editorTextarea.classList.remove('hidden');
-    editorTextarea.value = f.content;
-    if (f.isScratch) {
-      setState({ scratchContent: f.content });
-    }
-    if (!f.isScratch) updateEditorDirty(filePath);
-    editorTextarea.focus();
-    // Recalculate cursor/selection for the newly focused file
-    updateEditorCursorState();
+  editorTextarea.classList.remove('hidden');
+  editorTextarea.value = f.content;
+  if (f.isScratch) {
+    setState({ scratchContent: f.content });
   }
+  if (!f.isScratch) updateEditorDirty(filePath);
+  editorTextarea.focus();
+  // Recalculate cursor/selection for the newly focused file
+  updateEditorCursorState();
 }
 
 function closeEditorTab(filePath) {
+  // Preview tabs are handled by closePreviewTab
+  if (filePath && filePath.startsWith('preview:')) {
+    closePreviewTab(filePath);
+    return;
+  }
   const f = openFiles.get(filePath);
   if (!f || (f.isScratch && !f.isTemp)) return;
 
@@ -1684,6 +1763,7 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight) {
 
 makeVSplitter(vsplitter1, document.getElementById('sidebar'), document.getElementById('file-tree-pane'), 120, 300);
 makeVSplitter(vsplitter2, document.getElementById('file-tree-pane'), document.getElementById('main-pane'), 120, 300);
+makeVSplitter(vsplitter3, document.getElementById('main-pane'), document.getElementById('preview-pane'), 200, 150);
 
 // ============================================================
 // Status bar
@@ -1794,6 +1874,14 @@ register('get_focus', () => {
       focus.terminal.command = t.command;
     }
   }
+  // For preview tabs, resolve the actual file path
+  if (focus.editor && focus.editor.isPreview && focus.editor.filePath && focus.editor.filePath.startsWith('preview:')) {
+    const pf = previewFiles.get(focus.editor.filePath);
+    if (pf) {
+      focus.editor.filePath = pf.path;
+      focus.editor.activeTab = pf.name;
+    }
+  }
   return focus;
 });
 
@@ -1801,6 +1889,38 @@ register('get_focus', () => {
 // Returns a JSON-serializable focus state
 window.__pmDispatch = (name, args = {}) => {
   return dispatch(name, args);
+};
+
+// ============================================================
+// Layout rectangles (Phase 2.4 — for Phase 3 WebContentsView overlay)
+// Returns the screen-space bounding rect of a named pane.
+// main process uses this to position absolute-coordinate overlays.
+// ============================================================
+
+window.__pmGetPaneRect = (paneName) => {
+  const map = {
+    terminal: 'terminal-container',
+    editor: 'editor-content',
+    preview: 'preview-content',
+    fileTree: 'file-tree',
+    sidebar: 'sidebar',
+  };
+  const id = map[paneName];
+  if (!id) return null;
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: r.x, y: r.y, width: r.width, height: r.height };
+};
+
+window.__pmGetAllPaneRects = () => {
+  const panes = ['sidebar', 'fileTree', 'terminal', 'editor', 'preview'];
+  const result = {};
+  for (const p of panes) {
+    const r = window.__pmGetPaneRect(p);
+    if (r) result[p] = r;
+  }
+  return result;
 };
 
 // ============================================================

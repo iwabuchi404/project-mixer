@@ -44,12 +44,18 @@
         <div id="editor-tab-bar"></div>
         <div id="editor-content">
           <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
-          <webview id="preview-webview" class="hidden" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
         </div>
         <div id="send-bar">
           <span id="send-target">→ no terminal</span>
           <button id="send-btn" title="Send to terminal (Ctrl+Enter)">Send</button>
         </div>
+      </div>
+    </div>
+    <div id="vsplitter-3" class="vsplitter hidden"></div>
+    <div id="preview-pane" class="hidden">
+      <div id="preview-tab-bar"></div>
+      <div id="preview-content">
+        <webview id="preview-webview" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
       </div>
     </div>
   </div>
