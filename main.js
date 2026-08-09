@@ -48,18 +48,26 @@ function saveJson(file, data) {
 }
 
 // --- Port discovery (Phase 0.2) ---
-// Find an available port starting from basePort
-function findAvailablePort(basePort) {
-  return new Promise((resolve) => {
-    const tester = http.createServer();
-    tester.listen(basePort, '127.0.0.1');
-    tester.on('listening', () => {
-      const port = tester.address().port;
-      tester.close(() => resolve(port));
-    });
-    tester.on('error', () => {
-      resolve(findAvailablePort(basePort + 1));
-    });
+// The actual hook server retries binding; port.json is written only after
+// successful listen, eliminating the race between test-bind and real-bind.
+function startHookServerWithRetry(server, port, maxRetries, onReady) {
+  server.listen(port, '127.0.0.1');
+  server.on('error', function onError(e) {
+    if (e.code === 'EADDRINUSE' && port - BASE_PORT < maxRetries) {
+      port++;
+      server.listen(port, '127.0.0.1');
+    } else if (e.code === 'EADDRINUSE') {
+      console.error(`[Project Mixer] Hook server: no available port after ${maxRetries} retries from ${BASE_PORT}.`);
+    } else {
+      console.error('Hook server error:', e);
+    }
+  });
+  server.on('listening', () => {
+    HOOK_PORT = server.address().port;
+    ensureConfigDir();
+    saveJson(portFile, { port: HOOK_PORT, profile: PROFILE, pid: process.pid });
+    console.log(`[Project Mixer] Profile: ${PROFILE}, Hook port: ${HOOK_PORT}`);
+    if (onReady) onReady();
   });
 }
 
@@ -79,13 +87,7 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 }
 
-app.whenReady().then(async () => {
-  // Resolve port and write to file for hook script discovery
-  HOOK_PORT = await findAvailablePort(BASE_PORT);
-  ensureConfigDir();
-  saveJson(portFile, { port: HOOK_PORT, profile: PROFILE, pid: process.pid });
-  console.log(`[Project Mixer] Profile: ${PROFILE}, Hook port: ${HOOK_PORT}`);
-
+app.whenReady().then(() => {
   createWindow();
   startHookServer();
 });
@@ -130,7 +132,11 @@ ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
     cols: cols || 80,
     rows: rows || 30,
     cwd: shellCwd,
-    env: { ...process.env, TERM: 'xterm-256color' },
+    env: {
+      ...process.env,
+      TERM: 'xterm-256color',
+      PROJECT_MIXER_PORT_FILE: portFile,
+    },
   });
 
   ptyProcess.onData((data) => {
@@ -233,14 +239,7 @@ function startHookServer() {
       }
     });
   });
-  server.listen(HOOK_PORT, '127.0.0.1');
-  server.on('error', (e) => {
-    if (e.code === 'EADDRINUSE') {
-      console.error(`[Project Mixer] Hook server port ${HOOK_PORT} already in use. Another instance may be running.`);
-    } else {
-      console.error('Hook server error:', e);
-    }
-  });
+  startHookServerWithRetry(server, BASE_PORT, 20);
 }
 
 function handleHookNotification(data) {
@@ -453,21 +452,45 @@ ipcMain.handle('hook:notify', async (event, { type, projectId, tabId, waiting })
 
 // --- Hook config auto-generation ---
 
-// Hook script reads the port from PM's port file, so it stays correct
-// even if PM restarts on a different port.
-function buildHookScript(portFilePath) {
-  const escapedPath = JSON.stringify(portFilePath);
-  return `#!/usr/bin/env node
+// Hook script reads the port from PROJECT_MIXER_PORT_FILE env var (inherited
+// from the PTY that Claude Code runs in), falling back to scanning port.json
+// files in known userData directories. This ensures each PM instance receives
+// hooks only from PTYs it spawned, even when multiple profiles share a project.
+const HOOK_SCRIPT = `#!/usr/bin/env node
 // Project Mixer hook - sends notification to local HTTP server
-// Reads port from PM's port file for dynamic port discovery.
+// Port is discovered via PROJECT_MIXER_PORT_FILE env var (set by PM's PTY).
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
-let port = ${BASE_PORT}; // fallback
-try {
-  const data = JSON.parse(fs.readFileSync(${escapedPath}, 'utf-8'));
-  port = data.port || port;
-} catch (e) {}
+let port = null;
+
+// 1. Try env var (most reliable — set by the PM instance that spawned this PTY)
+const portFile = process.env.PROJECT_MIXER_PORT_FILE;
+if (portFile) {
+  try {
+    const data = JSON.parse(fs.readFileSync(portFile, 'utf-8'));
+    port = data.port;
+  } catch (e) {}
+}
+
+// 2. Fallback: scan userData directories for port.json
+if (!port) {
+  const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  const dirs = [
+    path.join(appData, 'Project Mixer', 'project-mixer'),
+    path.join(appData, 'Project Mixer Dev', 'project-mixer'),
+  ];
+  for (const dir of dirs) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(dir, 'port.json'), 'utf-8'));
+      if (data.port) { port = data.port; break; }
+    } catch (e) {}
+  }
+}
+
+if (!port) { process.exit(0); }
 
 const payload = JSON.stringify({
   hook_event_type: process.argv[2] || 'Notification',
@@ -485,7 +508,6 @@ req.on('error', () => { process.exit(0); });
 req.write(payload);
 req.end();
 `;
-}
 
 ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   const results = [];
@@ -498,9 +520,9 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   try {
     if (!fs.existsSync(claudeDir)) fs.mkdirSync(claudeDir, { recursive: true });
 
-    // Write hook script (with port file path embedded for dynamic discovery)
-    const hookScript = buildHookScript(portFile);
-    fs.writeFileSync(hookScriptPath, hookScript, 'utf-8');
+    // Write hook script (content is the same regardless of profile — port is
+    // resolved at runtime via env var, so both profiles can share this file)
+    fs.writeFileSync(hookScriptPath, HOOK_SCRIPT, 'utf-8');
 
     // Read existing settings.local.json or create new
     let settings = {};
@@ -508,8 +530,8 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
       try { settings = JSON.parse(fs.readFileSync(claudeSettings, 'utf-8')); } catch (e) {}
     }
 
-    // Add hooks for Notification and Stop (merge with existing, don't overwrite other hooks)
     if (!settings.hooks) settings.hooks = {};
+
     // Escape backslashes for Windows paths; Unix paths need no escaping
     const escapedScriptPath = os.platform() === 'win32'
       ? hookScriptPath.replace(/\\/g, '\\\\')
@@ -517,22 +539,19 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
     const hookCmd = `node "${escapedScriptPath}"`;
     const pmHookEntry = { type: 'command', command: hookCmd };
 
-    // Merge: append PM's hook to existing arrays instead of overwriting
-    if (!settings.hooks.Notification) {
-      settings.hooks.Notification = [{ matcher: '', hooks: [pmHookEntry] }];
-    } else {
-      // Remove any existing PM hook entries (by checking command path) and add fresh one
-      for (const entry of settings.hooks.Notification) {
-        entry.hooks = (entry.hooks || []).filter(h => !h.command || !h.command.includes('project-mixer-hook'));
-        entry.hooks.push(pmHookEntry);
-      }
-    }
-    if (!settings.hooks.Stop) {
-      settings.hooks.Stop = [{ matcher: '', hooks: [pmHookEntry] }];
-    } else {
-      for (const entry of settings.hooks.Stop) {
-        entry.hooks = (entry.hooks || []).filter(h => !h.command || !h.command.includes('project-mixer-hook'));
-        entry.hooks.push(pmHookEntry);
+    // Add PM's hook as a single independent entry (matcher: '')
+    // Don't modify existing entries — just remove any previous PM entry and
+    // add a fresh one, so re-setup doesn't accumulate duplicates.
+    for (const key of ['Notification', 'Stop']) {
+      if (!settings.hooks[key]) {
+        settings.hooks[key] = [{ matcher: '', hooks: [pmHookEntry] }];
+      } else {
+        // Remove existing PM entries (identified by 'project-mixer-hook' in command)
+        settings.hooks[key] = settings.hooks[key].filter(
+          (entry) => !(entry.hooks || []).some(h => h.command && h.command.includes('project-mixer-hook'))
+        );
+        // Add PM's independent entry
+        settings.hooks[key].push({ matcher: '', hooks: [pmHookEntry] });
       }
     }
 

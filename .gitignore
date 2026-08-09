@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 .kamox/
+.claude/project-mixer-hook.cjs
+.claude/settings.local.json
