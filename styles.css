@@ -40,6 +40,10 @@ body {
   overflow: hidden;
 }
 
+#sidebar.collapsed {
+  display: none;
+}
+
 #sidebar-header {
   display: flex;
   align-items: center;
@@ -50,6 +54,30 @@ body {
   letter-spacing: 1px;
   color: #888;
   border-bottom: 1px solid #3e3e3e;
+}
+
+.header-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.header-actions button,
+#sidebar-collapse-btn,
+#tree-collapse-btn {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+#sidebar-collapse-btn:hover,
+#tree-collapse-btn:hover {
+  color: #ccc;
+  background: #3c3c3c;
 }
 
 #add-project-btn {
@@ -146,6 +174,10 @@ body {
   flex-direction: column;
   background: #252526;
   overflow: hidden;
+}
+
+#file-tree-pane.collapsed {
+  display: none;
 }
 
 #file-tree-header {
@@ -704,6 +736,42 @@ body {
 
 .vsplitter:hover {
   background: #0c7bef;
+}
+
+/* --- Restore bars (L4: collapsed column restoration) --- */
+
+.restore-bar {
+  width: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #252526;
+  border-right: 1px solid #3e3e3e;
+}
+
+.restore-bar.hidden {
+  display: none;
+}
+
+.restore-bar button {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 2px;
+  border-radius: 3px;
+}
+
+.restore-bar button:hover {
+  color: #ccc;
+  background: #3c3c3c;
+}
+
+/* vsplitter hidden when adjacent pane is collapsed */
+.vsplitter.hidden {
+  display: none;
 }
 
 /* --- Modal --- */

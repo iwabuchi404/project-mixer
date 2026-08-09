@@ -9,10 +9,16 @@
 </head>
 <body>
   <div id="app">
+    <div id="sidebar-restore-bar" class="restore-bar hidden">
+      <button id="sidebar-restore-btn" title="Restore Projects (Ctrl+B)">&#x25B6;</button>
+    </div>
     <div id="sidebar">
       <div id="sidebar-header">
         <span>Projects</span>
-        <button id="add-project-btn" title="Add Project">+</button>
+        <div class="header-actions">
+          <button id="sidebar-collapse-btn" title="Collapse Projects">&#x25C0;</button>
+          <button id="add-project-btn" title="Add Project">+</button>
+        </div>
       </div>
       <div id="project-list"></div>
       <div id="sidebar-footer">
@@ -24,12 +30,16 @@
       <div id="file-tree-header">
         <span id="file-tree-title">Files</span>
         <div id="file-tree-actions">
+          <button id="tree-collapse-btn" title="Collapse Files">&#x25C0;</button>
           <button id="tree-reload-btn" title="Reload">&#x21BB;</button>
           <button id="tree-new-file-btn" title="New File">+F</button>
           <button id="tree-new-folder-btn" title="New Folder">+D</button>
         </div>
       </div>
       <div id="file-tree"></div>
+    </div>
+    <div id="file-tree-restore-bar" class="restore-bar hidden">
+      <button id="file-tree-restore-btn" title="Restore Files (Ctrl+B)">&#x25B6;</button>
     </div>
     <div id="vsplitter-2" class="vsplitter"></div>
     <div id="main-pane">
@@ -79,8 +89,8 @@
   </div>
   <div id="new-tab-menu" class="dropdown-menu hidden"></div>
   <div id="context-menu" class="context-menu hidden">
-    <div class="context-menu-item" data-action="open">Open in Editor</div>
-    <div class="context-menu-item" data-action="preview">Preview</div>
+    <div class="context-menu-item" data-action="preview">Open in Preview</div>
+    <div class="context-menu-item" data-action="edit">Edit in Editor</div>
     <div class="context-menu-item" data-action="open-os">Open in OS</div>
     <div class="context-menu-item" data-action="copy-path">Copy Path</div>
     <div class="context-menu-item" data-action="insert-path">Insert Path to Terminal</div>

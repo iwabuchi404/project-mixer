@@ -112,6 +112,13 @@ const treeNewFolderBtn = document.getElementById('tree-new-folder-btn');
 const vsplitter1 = document.getElementById('vsplitter-1');
 const vsplitter2 = document.getElementById('vsplitter-2');
 const browseFolderBtn = document.getElementById('browse-folder-btn');
+// L4: collapse/restore buttons
+const sidebarCollapseBtn = document.getElementById('sidebar-collapse-btn');
+const treeCollapseBtn = document.getElementById('tree-collapse-btn');
+const sidebarRestoreBar = document.getElementById('sidebar-restore-bar');
+const fileTreeRestoreBar = document.getElementById('file-tree-restore-bar');
+const sidebarRestoreBtn = document.getElementById('sidebar-restore-btn');
+const fileTreeRestoreBtn = document.getElementById('file-tree-restore-btn');
 const statusLeft = document.getElementById('status-left');
 const statusRight = document.getElementById('status-right');
 const sendBtn = document.getElementById('send-btn');
@@ -161,6 +168,10 @@ window.api.onPtyData(({ id, data }) => {
   for (const [tabId, t] of tabs) {
     if (t.ptyId === id) {
       t.terminal.write(data);
+      // A2: only auto-scroll if user was already at the bottom
+      if (t.pinnedToBottom) {
+        t.terminal.scrollToBottom();
+      }
       const wasWaiting = t.waiting;
       t.waiting = detectWaiting(t.command, data);
       if (t.waiting !== wasWaiting) {
@@ -450,11 +461,8 @@ function createTreeItem(entry, depth) {
     el.addEventListener('dblclick', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if (isPreviewable(entry.name)) {
-        dispatch('open_preview', { path: entry.path, name: entry.name });
-      } else {
-        dispatch('open_file', { path: entry.path, name: entry.name });
-      }
+      // A4: double-click always opens in preview (read-only)
+      dispatch('open_preview', { path: entry.path, name: entry.name });
     });
   }
 
@@ -500,14 +508,12 @@ contextMenu.addEventListener('click', (e) => {
   const action = e.target.dataset.action;
   if (!action || !contextMenuEntry) return;
 
-  if (action === 'open' && !contextMenuEntry.isDirectory) {
+  if (action === 'preview' && !contextMenuEntry.isDirectory) {
+    // A4: always open in preview (read-only)
+    dispatch('open_preview', { path: contextMenuEntry.path, name: contextMenuEntry.name });
+  } else if (action === 'edit' && !contextMenuEntry.isDirectory) {
+    // A4: edit in central main area
     dispatch('open_file', { path: contextMenuEntry.path, name: contextMenuEntry.name });
-  } else if (action === 'preview' && !contextMenuEntry.isDirectory) {
-    if (isPreviewable(contextMenuEntry.name)) {
-      dispatch('open_preview', { path: contextMenuEntry.path, name: contextMenuEntry.name });
-    } else {
-      dispatch('open_file', { path: contextMenuEntry.path, name: contextMenuEntry.name });
-    }
   } else if (action === 'open-os') {
     window.api.openInOs(contextMenuEntry.path);
   } else if (action === 'copy-path') {
@@ -975,6 +981,17 @@ async function loadPreviewContent(f) {
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
     const markdownHtml = `<body class="markdown-body">${marked.parse(result.content)}</body>`;
     loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS));
+  } else {
+    // A4: show text/code files as read-only preview with syntax highlighting
+    const result = await window.api.readFile(f.path);
+    if (!result.success || !isActivePreview(f)) return;
+    const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
+    const escaped = result.content
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const codeHtml = `<body class="markdown-body"><pre><code>${escaped}</code></pre></body>`;
+    loadPreviewHtml(buildSafePreviewDocument(codeHtml, baseUrl, MD_CSS));
   }
 }
 
@@ -1529,7 +1546,17 @@ async function createTerminal(command, cwd, projectId) {
 
   tabBar.insertBefore(tabEl, newTabBtn);
 
-  tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false });
+  tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false, pinnedToBottom: true });
+
+  // A2: Track scroll position to implement pinned-to-bottom behavior
+  // xterm.js doesn't expose a direct "is at bottom" API, so we use
+  // the viewport's scrollTop vs scrollHeight - clientHeight
+  termEl.addEventListener('scroll', () => {
+    const viewport = termEl.querySelector('.xterm-viewport');
+    if (!viewport) return;
+    const isAtBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
+    tabs.get(tabId).pinnedToBottom = isAtBottom;
+  }, { passive: true });
 
   // Only switch to new tab if it belongs to the active project
   if (projectId === activeProjectId) {
@@ -1580,9 +1607,21 @@ function switchTab(tabId) {
 
   t.termEl.style.display = 'block';
   t.tabElement.classList.add('active');
-  t.fitAddon.fit();
-  window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+  // Guard against 0-dimension fits
+  const rect = t.termEl.getBoundingClientRect();
+  if (rect.width > 0 && rect.height > 0) {
+    const oldCols = t.terminal.cols;
+    const oldRows = t.terminal.rows;
+    t.fitAddon.fit();
+    if (t.terminal.cols !== oldCols || t.terminal.rows !== oldRows) {
+      window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+    }
+  }
   t.terminal.focus();
+  // A2: restore scroll position based on pinnedToBottom state
+  if (t.pinnedToBottom) {
+    t.terminal.scrollToBottom();
+  }
   activeTabId = tabId;
   projectActiveTab.set(t.projectId, tabId);
   setState({ activeTerminalTabId: tabId });
@@ -1719,10 +1758,21 @@ function handleResize() {
   resizeTimeout = setTimeout(() => {
     if (activeTabId !== null) {
       const t = tabs.get(activeTabId);
-      if (t) {
+      if (t && t.termEl.style.display !== 'none') {
+        // Guard against 0-dimension fits (container not yet laid out)
+        const rect = t.termEl.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const oldCols = t.terminal.cols;
+        const oldRows = t.terminal.rows;
         t.fitAddon.fit();
-        window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
-        t.terminal.scrollToBottom();
+        // Only send resize if dimensions actually changed
+        if (t.terminal.cols !== oldCols || t.terminal.rows !== oldRows) {
+          window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+        }
+        // A2: only scroll to bottom if user was already at the bottom
+        if (t.pinnedToBottom) {
+          t.terminal.scrollToBottom();
+        }
       }
     }
   }, 50);
@@ -1742,6 +1792,197 @@ async function updateMemory() {
 setInterval(updateMemory, 2000);
 updateMemory();
 setInterval(updateStatusBar, 500);
+
+// ============================================================
+// L4: Sidebar / File Tree collapse & restore
+// ============================================================
+
+const sidebar = document.getElementById('sidebar');
+const fileTreePane = document.getElementById('file-tree-pane');
+
+let sidebarCollapsed = false;
+let fileTreeCollapsed = false;
+let savedSidebarWidth = 200;
+let savedFileTreeWidth = 240;
+
+function applyCollapseState() {
+  if (sidebarCollapsed) {
+    sidebar.classList.add('collapsed');
+    vsplitter1.classList.add('hidden');
+    sidebarRestoreBar.classList.remove('hidden');
+    savedSidebarWidth = sidebar.offsetWidth || savedSidebarWidth;
+  } else {
+    sidebar.classList.remove('collapsed');
+    vsplitter1.classList.remove('hidden');
+    sidebarRestoreBar.classList.add('hidden');
+    if (sidebar.style.width === '0px') sidebar.style.width = savedSidebarWidth + 'px';
+  }
+
+  if (fileTreeCollapsed) {
+    fileTreePane.classList.add('collapsed');
+    vsplitter2.classList.add('hidden');
+    fileTreeRestoreBar.classList.remove('hidden');
+    savedFileTreeWidth = fileTreePane.offsetWidth || savedFileTreeWidth;
+  } else {
+    fileTreePane.classList.remove('collapsed');
+    vsplitter2.classList.remove('hidden');
+    fileTreeRestoreBar.classList.add('hidden');
+    if (fileTreePane.style.width === '0px') fileTreePane.style.width = savedFileTreeWidth + 'px';
+  }
+  handleResize();
+  saveCollapseState();
+}
+
+function saveCollapseState() {
+  try {
+    localStorage.setItem('pm-collapse', JSON.stringify({
+      sidebarCollapsed, fileTreeCollapsed,
+      sidebarWidth: savedSidebarWidth, fileTreeWidth: savedFileTreeWidth,
+    }));
+  } catch {}
+}
+
+function loadCollapseState() {
+  try {
+    const data = JSON.parse(localStorage.getItem('pm-collapse') || '{}');
+    if (data.sidebarCollapsed !== undefined) sidebarCollapsed = data.sidebarCollapsed;
+    if (data.fileTreeCollapsed !== undefined) fileTreeCollapsed = data.fileTreeCollapsed;
+    if (data.sidebarWidth) { savedSidebarWidth = data.sidebarWidth; sidebar.style.width = data.sidebarWidth + 'px'; }
+    if (data.fileTreeWidth) { savedFileTreeWidth = data.fileTreeWidth; fileTreePane.style.width = data.fileTreeWidth + 'px'; }
+  } catch {}
+  applyCollapseState();
+}
+
+sidebarCollapseBtn.addEventListener('click', () => {
+  sidebarCollapsed = true;
+  applyCollapseState();
+});
+
+treeCollapseBtn.addEventListener('click', () => {
+  fileTreeCollapsed = true;
+  applyCollapseState();
+});
+
+sidebarRestoreBtn.addEventListener('click', () => {
+  sidebarCollapsed = false;
+  applyCollapseState();
+});
+
+fileTreeRestoreBtn.addEventListener('click', () => {
+  fileTreeCollapsed = false;
+  applyCollapseState();
+});
+
+// Ctrl+B: toggle both columns
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'b') {
+    e.preventDefault();
+    const bothCollapsed = sidebarCollapsed && fileTreeCollapsed;
+    if (bothCollapsed) {
+      sidebarCollapsed = false;
+      fileTreeCollapsed = false;
+    } else {
+      sidebarCollapsed = true;
+      fileTreeCollapsed = true;
+    }
+    applyCollapseState();
+  }
+});
+
+loadCollapseState();
+
+// ============================================================
+// A3: Drag & Drop (from OS Explorer and app-internal)
+// ============================================================
+
+// Drop targets: preview pane, main pane (editor), scratch, terminal
+// Rules:
+//   preview / main-pane → open file read-only in preview
+//   scratch (editor-textarea) → append absolute path
+//   terminal → insert path (no Enter)
+//   file-tree → nothing
+
+function getDroppedFilePaths(e) {
+  const files = [];
+  if (e.dataTransfer && e.dataTransfer.files) {
+    for (const file of e.dataTransfer.files) {
+      try {
+        const path = window.api.getPathForFile(file);
+        if (path) files.push(path);
+      } catch {}
+    }
+  }
+  return files;
+}
+
+// Preview pane: open file in preview
+previewPane.addEventListener('dragover', (e) => {
+  if (e.dataTransfer.types.includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+previewPane.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const paths = getDroppedFilePaths(e);
+  for (const p of paths) {
+    const name = p.split(/[\\/]/).pop();
+    dispatch('open_preview', { path: p, name });
+  }
+});
+
+// Main pane: open file in preview (same as preview for now)
+const mainPane = document.getElementById('main-pane');
+mainPane.addEventListener('dragover', (e) => {
+  if (e.dataTransfer.types.includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+mainPane.addEventListener('drop', (e) => {
+  // Don't intercept if dropping on textarea or terminal (they have their own handlers)
+  if (e.target === editorTextarea || e.target.closest('#terminal-container')) return;
+  e.preventDefault();
+  const paths = getDroppedFilePaths(e);
+  for (const p of paths) {
+    const name = p.split(/[\\/]/).pop();
+    dispatch('open_preview', { path: p, name });
+  }
+});
+
+// Scratch (editor textarea): append path
+editorTextarea.addEventListener('dragover', (e) => {
+  if (e.dataTransfer.types.includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+editorTextarea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const paths = getDroppedFilePaths(e);
+  if (paths.length > 0) {
+    const text = paths.join('\n') + '\n';
+    dispatch('append_to_scratch', { text });
+  }
+});
+
+// Terminal container: insert path (no Enter)
+terminalContainer.addEventListener('dragover', (e) => {
+  if (e.dataTransfer.types.includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }
+});
+terminalContainer.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const paths = getDroppedFilePaths(e);
+  if (paths.length > 0 && activeTabId !== null) {
+    const t = tabs.get(activeTabId);
+    if (t) {
+      t.terminal.paste(paths.join(' '));
+    }
+  }
+});
 
 // ============================================================
 // Layout save/load

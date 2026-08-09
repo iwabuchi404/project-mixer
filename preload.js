@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   // PTY
@@ -52,4 +52,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Command availability check
   commandCheck: (commands) => ipcRenderer.invoke('command:check', { commands }),
+
+  // A3: Drag & drop file path resolution (Electron 31+ replacement for File.path)
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 });
