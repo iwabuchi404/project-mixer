@@ -1,4 +1,13 @@
 // ============================================================
+// Imports (bundled by esbuild)
+// ============================================================
+
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+
+// ============================================================
 // State
 // ============================================================
 
@@ -1211,7 +1220,7 @@ async function createTerminal(command, cwd, projectId) {
     cursorBlink: true,
   });
 
-  const fitAddon = new FitAddon.FitAddon();
+  const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
 
   const termEl = document.createElement('div');

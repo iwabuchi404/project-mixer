@@ -6,7 +6,11 @@
   "author": "Project Mixer",
   "scripts": {
     "start": "electron .",
+    "start:dev": "electron . --dev",
     "rebuild": "electron-rebuild -f -w node-pty",
+    "build:renderer": "node build.cjs",
+    "build:renderer:watch": "node build.cjs --watch",
+    "dev:v2": "node build.cjs --watch & electron . --dev",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:win:portable": "electron-builder --win portable",
@@ -23,7 +27,8 @@
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
     "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.28.2"
   },
   "build": {
     "appId": "com.projectmixer.app",
@@ -34,9 +39,11 @@
     "files": [
       "main.js",
       "preload.js",
-      "renderer.js",
       "index.html",
       "styles.css",
+      "dist/renderer.bundle.js",
+      "dist/renderer.bundle.js.map",
+      "dist/xterm.css",
       "node_modules/**/*"
     ],
     "asarUnpack": [

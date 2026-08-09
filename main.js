@@ -7,14 +7,29 @@ const http = require('http');
 const pty = require('node-pty');
 const { execSync } = require('child_process');
 
+// --- Profile separation (Phase 0.1) ---
+// --dev flag or PM_PROFILE env var selects a separate userData directory
+const IS_DEV = process.argv.includes('--dev') || process.env.PM_PROFILE === 'dev';
+const PROFILE = IS_DEV ? 'dev' : 'default';
+
+if (IS_DEV) {
+  const defaultUserData = app.getPath('userData');
+  app.setPath('userData', path.join(path.dirname(defaultUserData), 'Project Mixer Dev'));
+}
+
 let mainWindow;
 const ptys = new Map(); // id -> { process, cwd, command }
 let ptyCounter = 0;
-const HOOK_PORT = 47832;
+
+// --- Port separation (Phase 0.2) ---
+// Base port differs by profile; actual port is auto-selected and written to a file
+const BASE_PORT = IS_DEV ? 47842 : 47832;
+let HOOK_PORT = BASE_PORT; // resolved at startup
 
 const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
 const layoutFile = path.join(configDir, 'layout.json');
+const portFile = path.join(configDir, 'port.json');
 
 function ensureConfigDir() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
@@ -30,6 +45,22 @@ function loadJson(file, fallback) {
 function saveJson(file, data) {
   ensureConfigDir();
   fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+// --- Port discovery (Phase 0.2) ---
+// Find an available port starting from basePort
+function findAvailablePort(basePort) {
+  return new Promise((resolve) => {
+    const tester = http.createServer();
+    tester.listen(basePort, '127.0.0.1');
+    tester.on('listening', () => {
+      const port = tester.address().port;
+      tester.close(() => resolve(port));
+    });
+    tester.on('error', () => {
+      resolve(findAvailablePort(basePort + 1));
+    });
+  });
 }
 
 function createWindow() {
@@ -48,7 +79,13 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Resolve port and write to file for hook script discovery
+  HOOK_PORT = await findAvailablePort(BASE_PORT);
+  ensureConfigDir();
+  saveJson(portFile, { port: HOOK_PORT, profile: PROFILE, pid: process.pid });
+  console.log(`[Project Mixer] Profile: ${PROFILE}, Hook port: ${HOOK_PORT}`);
+
   createWindow();
   startHookServer();
 });
@@ -199,7 +236,7 @@ function startHookServer() {
   server.listen(HOOK_PORT, '127.0.0.1');
   server.on('error', (e) => {
     if (e.code === 'EADDRINUSE') {
-      console.log(`Hook server port ${HOOK_PORT} already in use`);
+      console.error(`[Project Mixer] Hook server port ${HOOK_PORT} already in use. Another instance may be running.`);
     } else {
       console.error('Hook server error:', e);
     }
@@ -416,10 +453,21 @@ ipcMain.handle('hook:notify', async (event, { type, projectId, tabId, waiting })
 
 // --- Hook config auto-generation ---
 
-const HOOK_SCRIPT = `#!/usr/bin/env node
+// Hook script reads the port from PM's port file, so it stays correct
+// even if PM restarts on a different port.
+function buildHookScript(portFilePath) {
+  const escapedPath = JSON.stringify(portFilePath);
+  return `#!/usr/bin/env node
 // Project Mixer hook - sends notification to local HTTP server
+// Reads port from PM's port file for dynamic port discovery.
 const http = require('http');
-const path = require('path');
+const fs = require('fs');
+
+let port = ${BASE_PORT}; // fallback
+try {
+  const data = JSON.parse(fs.readFileSync(${escapedPath}, 'utf-8'));
+  port = data.port || port;
+} catch (e) {}
 
 const payload = JSON.stringify({
   hook_event_type: process.argv[2] || 'Notification',
@@ -428,7 +476,7 @@ const payload = JSON.stringify({
 
 const req = http.request({
   hostname: '127.0.0.1',
-  port: ${HOOK_PORT},
+  port: port,
   path: '/hook',
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
@@ -437,36 +485,56 @@ req.on('error', () => { process.exit(0); });
 req.write(payload);
 req.end();
 `;
+}
 
 ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   const results = [];
 
-  // Claude Code: .claude/settings.json
+  // Claude Code: .claude/settings.local.json (gitignore target, won't conflict with shared settings.json)
   const claudeDir = path.join(projectPath, '.claude');
-  const claudeSettings = path.join(claudeDir, 'settings.json');
+  const claudeSettings = path.join(claudeDir, 'settings.local.json');
   const hookScriptPath = path.join(claudeDir, 'project-mixer-hook.cjs');
 
   try {
     if (!fs.existsSync(claudeDir)) fs.mkdirSync(claudeDir, { recursive: true });
 
-    // Write hook script
-    fs.writeFileSync(hookScriptPath, HOOK_SCRIPT, 'utf-8');
+    // Write hook script (with port file path embedded for dynamic discovery)
+    const hookScript = buildHookScript(portFile);
+    fs.writeFileSync(hookScriptPath, hookScript, 'utf-8');
 
-    // Read existing settings or create new
+    // Read existing settings.local.json or create new
     let settings = {};
     if (fs.existsSync(claudeSettings)) {
       try { settings = JSON.parse(fs.readFileSync(claudeSettings, 'utf-8')); } catch (e) {}
     }
 
-    // Add hooks for Notification and Stop
+    // Add hooks for Notification and Stop (merge with existing, don't overwrite other hooks)
     if (!settings.hooks) settings.hooks = {};
     // Escape backslashes for Windows paths; Unix paths need no escaping
-    const escapedPath = os.platform() === 'win32'
+    const escapedScriptPath = os.platform() === 'win32'
       ? hookScriptPath.replace(/\\/g, '\\\\')
       : hookScriptPath;
-    const hookCmd = `node "${escapedPath}"`;
-    settings.hooks.Notification = [{ matcher: '', hooks: [{ type: 'command', command: hookCmd }] }];
-    settings.hooks.Stop = [{ matcher: '', hooks: [{ type: 'command', command: hookCmd }] }];
+    const hookCmd = `node "${escapedScriptPath}"`;
+    const pmHookEntry = { type: 'command', command: hookCmd };
+
+    // Merge: append PM's hook to existing arrays instead of overwriting
+    if (!settings.hooks.Notification) {
+      settings.hooks.Notification = [{ matcher: '', hooks: [pmHookEntry] }];
+    } else {
+      // Remove any existing PM hook entries (by checking command path) and add fresh one
+      for (const entry of settings.hooks.Notification) {
+        entry.hooks = (entry.hooks || []).filter(h => !h.command || !h.command.includes('project-mixer-hook'));
+        entry.hooks.push(pmHookEntry);
+      }
+    }
+    if (!settings.hooks.Stop) {
+      settings.hooks.Stop = [{ matcher: '', hooks: [pmHookEntry] }];
+    } else {
+      for (const entry of settings.hooks.Stop) {
+        entry.hooks = (entry.hooks || []).filter(h => !h.command || !h.command.includes('project-mixer-hook'));
+        entry.hooks.push(pmHookEntry);
+      }
+    }
 
     fs.writeFileSync(claudeSettings, JSON.stringify(settings, null, 2), 'utf-8');
     results.push({ tool: 'claude', success: true, path: claudeSettings });
