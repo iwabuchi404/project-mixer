@@ -7,6 +7,10 @@ export const COMMAND_TYPES = {
     args: { projectId: 'string' },
     returns: 'void',
   },
+  remove_project: {
+    args: { projectId: 'string' },
+    returns: 'void',
+  },
   open_file: {
     args: { path: 'string', name: 'string' },
     returns: 'void',
@@ -23,12 +27,44 @@ export const COMMAND_TYPES = {
     args: { filePath: 'string' },
     returns: 'void',
   },
+  create_scratch_tab: {
+    args: {},
+    returns: 'void',
+  },
+  append_to_scratch: {
+    args: { text: 'string' },
+    returns: 'void',
+  },
+  update_editor_content: {
+    args: { content: 'string' },
+    returns: 'void',
+  },
+  update_editor_selection: {
+    args: {},
+    returns: 'void',
+  },
+  save_active_file: {
+    args: {},
+    returns: 'void',
+  },
+  undo_last_send: {
+    args: {},
+    returns: 'void',
+  },
   focus_terminal: {
-    args: { tabId: 'string' },
+    args: { tabId: 'number' },
+    returns: 'void',
+  },
+  create_terminal: {
+    args: { command: 'string', cwd: 'string?', projectId: 'string?' },
+    returns: 'number',
+  },
+  close_terminal: {
+    args: { tabId: 'number' },
     returns: 'void',
   },
   send_to_terminal: {
-    args: { text: 'string', tabId: 'string?' },
+    args: { text: 'string?', tabId: 'number?' },
     returns: 'void',
   },
   get_focus: {

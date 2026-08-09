@@ -8,6 +8,7 @@ const pty = require('node-pty');
 const { execSync } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
+const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -27,8 +28,8 @@ let ptyCounter = 0;
 // Base port differs by profile; actual port is auto-selected and written to a file
 const BASE_PORT = IS_DEV ? 47842 : 47832;
 const MCP_BASE_PORT = IS_DEV ? 47852 : 47822;
-let HOOK_PORT = BASE_PORT; // resolved at startup
-let MCP_PORT = MCP_BASE_PORT; // resolved at startup
+let HOOK_PORT = null; // set only after the hook server is listening
+let MCP_PORT = null; // set only after the MCP server is listening
 
 const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
@@ -68,9 +69,8 @@ function startHookServerWithRetry(server, port, maxRetries, onReady) {
   });
   server.on('listening', () => {
     HOOK_PORT = server.address().port;
-    ensureConfigDir();
-    saveJson(portFile, { port: HOOK_PORT, profile: PROFILE, pid: process.pid });
     console.log(`[Project Mixer] Profile: ${PROFILE}, Hook port: ${HOOK_PORT}`);
+    savePortJson();
     if (onReady) onReady();
   });
 }
@@ -105,12 +105,24 @@ app.whenReady().then(() => {
     );
   }, (port) => {
     MCP_PORT = port;
-    ensureConfigDir();
-    const existing = loadJson(portFile, {});
-    saveJson(portFile, { ...existing, mcpPort: MCP_PORT, mcpPid: process.pid });
     console.log(`[Project Mixer] MCP port: ${MCP_PORT}`);
+    savePortJson();
   });
 });
+
+// --- Atomic port.json writer ---
+// Both hook server and MCP server call this when they become ready.
+// It publishes only ports that are currently listening, then atomically
+// replaces the discovery file so readers never see a partial JSON document.
+function savePortJson() {
+  ensureConfigDir();
+  writeJsonAtomic(portFile, buildPortRecord({
+    hookPort: HOOK_PORT,
+    mcpPort: MCP_PORT,
+    profile: PROFILE,
+    pid: process.pid,
+  }));
+}
 
 app.on('window-all-closed', () => {
   ptys.forEach((p) => p.process.kill());

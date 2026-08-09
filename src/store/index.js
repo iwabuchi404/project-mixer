@@ -49,6 +49,14 @@ export function subscribe(fn) {
   return () => subscribers.delete(fn);
 }
 
+export function getProjectScratchContent(openFiles, activeFilePath, scratchPath) {
+  const activeFile = openFiles.get(activeFilePath);
+  const scratchFile = activeFile?.isScratch
+    ? activeFile
+    : openFiles.get(scratchPath);
+  return scratchFile?.content || '';
+}
+
 // Build the get_focus response from current state + project lookup
 export function buildFocusState(projectLookup) {
   const project = projectLookup(state.activeProjectId);

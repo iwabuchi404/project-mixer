@@ -7,7 +7,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { register, dispatch } from './src/commands/registry.js';
-import { getState, setState, buildFocusState } from './src/store/index.js';
+import { getState, setState, buildFocusState, getProjectScratchContent } from './src/store/index.js';
 
 // ============================================================
 // State
@@ -235,9 +235,9 @@ function renderProjectList() {
     `;
     el.addEventListener('click', (e) => {
       if (e.target.classList.contains('project-remove')) {
-        removeProject(id);
+        dispatch('remove_project', { projectId: id });
       } else {
-        selectProject(id);
+        dispatch('select_project', { projectId: id });
       }
     });
     projectList.appendChild(el);
@@ -248,6 +248,17 @@ async function selectProject(projectId) {
   switchProjectEditor(projectId);
   activeProjectId = projectId;
   setState({ activeProjectId });
+  // Update editor state in store after switching project editor
+  const activeFile = openFiles.get(activeFilePath);
+  if (activeFile) {
+    setState({
+      activeFilePath: activeFilePath,
+      isPreview: !!activeFile.isPreview,
+      scratchContent: getProjectScratchContent(openFiles, activeFilePath, SCRATCH_PATH),
+    });
+  } else {
+    setState({ activeFilePath: null, isPreview: false, scratchContent: '' });
+  }
   renderProjectList();
   const p = projects.get(projectId);
   if (p) {
@@ -284,6 +295,7 @@ async function removeProject(projectId) {
   if (activeProjectId === projectId) {
     activeProjectId = null;
     activeTabId = null;
+    setState({ activeProjectId: null, activeTerminalTabId: null });
     fileTreeTitle.textContent = 'Files';
     fileTree.innerHTML = '';
     updateSendTarget();
@@ -328,7 +340,7 @@ projectConfirmBtn.addEventListener('click', async () => {
   }
   renderProjectList();
   hideAddProjectModal();
-  selectProject(projects.keys().next().value);
+  await dispatch('select_project', { projectId: projects.keys().next().value });
 });
 
 projectNameInput.addEventListener('keydown', (e) => {
@@ -414,7 +426,7 @@ function createTreeItem(entry, depth) {
         el.after(container);
       }
     } else {
-      appendToScratch(entry.path);
+      dispatch('append_to_scratch', { text: entry.path });
     }
   });
 
@@ -429,9 +441,9 @@ function createTreeItem(entry, depth) {
       e.preventDefault();
       e.stopPropagation();
       if (isPreviewable(entry.name)) {
-        openFileInPreview(entry.path, entry.name);
+        dispatch('open_preview', { path: entry.path, name: entry.name });
       } else {
-        openFileInEditor(entry.path, entry.name);
+        dispatch('open_file', { path: entry.path, name: entry.name });
       }
     });
   }
@@ -479,12 +491,12 @@ contextMenu.addEventListener('click', (e) => {
   if (!action || !contextMenuEntry) return;
 
   if (action === 'open' && !contextMenuEntry.isDirectory) {
-    openFileInEditor(contextMenuEntry.path, contextMenuEntry.name);
+    dispatch('open_file', { path: contextMenuEntry.path, name: contextMenuEntry.name });
   } else if (action === 'preview' && !contextMenuEntry.isDirectory) {
     if (isPreviewable(contextMenuEntry.name)) {
-      openFileInPreview(contextMenuEntry.path, contextMenuEntry.name);
+      dispatch('open_preview', { path: contextMenuEntry.path, name: contextMenuEntry.name });
     } else {
-      openFileInEditor(contextMenuEntry.path, contextMenuEntry.name);
+      dispatch('open_file', { path: contextMenuEntry.path, name: contextMenuEntry.name });
     }
   } else if (action === 'open-os') {
     window.api.openInOs(contextMenuEntry.path);
@@ -697,7 +709,7 @@ function initScratchTab() {
   tabEl.innerHTML = `<span class="editor-tab-name">scratch</span>`;
   tabEl.dataset.path = SCRATCH_PATH;
 
-  tabEl.addEventListener('click', () => switchEditorTab(SCRATCH_PATH));
+  tabEl.addEventListener('click', () => dispatch('switch_tab', { filePath: SCRATCH_PATH }));
   makeEditorTabDraggable(tabEl, SCRATCH_PATH);
   editorTabBar.appendChild(tabEl);
   editorTabBar.appendChild(newScratchTabBtn);
@@ -728,16 +740,16 @@ function createTempTab() {
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
-      closeEditorTab(tempPath);
+      dispatch('close_tab', { filePath: tempPath });
     } else {
-      switchEditorTab(tempPath);
+      dispatch('switch_tab', { filePath: tempPath });
     }
   });
 
   tabEl.addEventListener('auxclick', (e) => {
     if (e.button === 1) {
       e.preventDefault();
-      closeEditorTab(tempPath);
+      dispatch('close_tab', { filePath: tempPath });
     }
   });
 
@@ -758,7 +770,7 @@ function createTempTab() {
   switchEditorTab(tempPath);
 }
 
-newScratchTabBtn.addEventListener('click', createTempTab);
+newScratchTabBtn.addEventListener('click', () => dispatch('create_scratch_tab'));
 
 // ============================================================
 // File preview (image / html / markdown)
@@ -842,16 +854,16 @@ async function openFileInPreview(filePath, name) {
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
-      closeEditorTab(previewPath);
+      dispatch('close_tab', { filePath: previewPath });
     } else {
-      switchEditorTab(previewPath);
+      dispatch('switch_tab', { filePath: previewPath });
     }
   });
 
   tabEl.addEventListener('auxclick', (e) => {
     if (e.button === 1) {
       e.preventDefault();
-      closeEditorTab(previewPath);
+      dispatch('close_tab', { filePath: previewPath });
     }
   });
 
@@ -917,16 +929,16 @@ async function openFileInEditor(filePath, name) {
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
-      closeEditorTab(filePath);
+      dispatch('close_tab', { filePath });
     } else {
-      switchEditorTab(filePath);
+      dispatch('switch_tab', { filePath });
     }
   });
 
   tabEl.addEventListener('auxclick', (e) => {
     if (e.button === 1) {
       e.preventDefault();
-      closeEditorTab(filePath);
+      dispatch('close_tab', { filePath });
     }
   });
 
@@ -952,13 +964,19 @@ function switchEditorTab(filePath) {
     editorTextarea.classList.add('hidden');
     previewWebview.classList.remove('hidden');
     loadPreviewContent(f);
+    setState({ cursorLine: null, selection: null });
   } else {
     previewWebview.classList.add('hidden');
     previewWebview.srcdoc = '';
     editorTextarea.classList.remove('hidden');
     editorTextarea.value = f.content;
+    if (f.isScratch) {
+      setState({ scratchContent: f.content });
+    }
     if (!f.isScratch) updateEditorDirty(filePath);
     editorTextarea.focus();
+    // Recalculate cursor/selection for the newly focused file
+    updateEditorCursorState();
   }
 }
 
@@ -1008,6 +1026,9 @@ function appendToScratch(text) {
   if (!target) return;
   const sep = target.content && !target.content.endsWith('\n') ? '\n' : '';
   target.content += sep + text + '\n';
+  if (target.isScratch) {
+    setState({ scratchContent: target.content });
+  }
   if (activeFilePath === targetPath) {
     editorTextarea.value = target.content;
     editorTextarea.scrollTop = editorTextarea.scrollHeight;
@@ -1015,17 +1036,22 @@ function appendToScratch(text) {
   switchEditorTab(targetPath);
 }
 
-editorTextarea.addEventListener('input', () => {
+function updateActiveEditorContent(content) {
   if (!activeFilePath) return;
   const f = openFiles.get(activeFilePath);
   if (f) {
-    f.content = editorTextarea.value;
+    f.content = content;
     if (f.isScratch) {
       setState({ scratchContent: f.content });
     } else if (!f.isScratch) {
       updateEditorDirty(activeFilePath);
     }
+    updateEditorCursorState();
   }
+}
+
+editorTextarea.addEventListener('input', () => {
+  dispatch('update_editor_content', { content: editorTextarea.value });
 });
 
 // Update cursor/selection state for get_focus
@@ -1049,26 +1075,27 @@ function updateEditorCursorState() {
   setState({ cursorLine: line, selection });
 }
 
-editorTextarea.addEventListener('keyup', updateEditorCursorState);
-editorTextarea.addEventListener('click', updateEditorCursorState);
+editorTextarea.addEventListener('keyup', () => dispatch('update_editor_selection'));
+editorTextarea.addEventListener('click', () => dispatch('update_editor_selection'));
+editorTextarea.addEventListener('select', () => dispatch('update_editor_selection'));
 
 editorTextarea.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 's') {
     e.preventDefault();
-    saveActiveFile();
+    dispatch('save_active_file');
   }
   if (e.ctrlKey && e.key === 'Enter') {
     e.preventDefault();
-    sendToTerminal();
+    dispatch('send_to_terminal', {});
   }
   if (e.ctrlKey && e.key === 'i') {
     e.preventDefault();
-    switchEditorTab(SCRATCH_PATH);
+    dispatch('switch_tab', { filePath: SCRATCH_PATH });
     editorTextarea.focus();
   }
   if (e.ctrlKey && e.key === 'z' && e.shiftKey) {
     e.preventDefault();
-    undoLastSend();
+    dispatch('undo_last_send');
   }
   if (e.key === 'Tab') {
     e.preventDefault();
@@ -1110,9 +1137,9 @@ async function saveActiveFile() {
     // Re-bind click handlers to new path
     f.tabEl.onclick = (e) => {
       if (e.target.classList.contains('editor-tab-close')) {
-        closeEditorTab(savePath);
+        dispatch('close_tab', { filePath: savePath });
       } else {
-        switchEditorTab(savePath);
+        dispatch('switch_tab', { filePath: savePath });
       }
     };
     // Add dirty indicator
@@ -1123,6 +1150,7 @@ async function saveActiveFile() {
     f.tabEl.insertBefore(dirtyEl, closeEl);
     openFiles.set(savePath, f);
     activeFilePath = savePath;
+    setState({ activeFilePath: savePath, isPreview: false, scratchContent: getState().scratchContent });
     updateEditorDirty(savePath);
     // Refresh file tree to show the new file
     if (project) await loadFileTree(project.path);
@@ -1139,19 +1167,25 @@ async function saveActiveFile() {
 // Send to terminal (D8: bracketed paste)
 // ============================================================
 
-function sendToTerminal() {
+function sendToTerminal(text, tabId) {
+  if (tabId !== undefined) {
+    switchTab(tabId);
+  }
   if (activeTabId === null) return;
   const t = tabs.get(activeTabId);
   if (!t) return;
 
+  const hasExplicitText = typeof text === 'string';
   const f = openFiles.get(activeFilePath);
-  if (!f) return;
+  if (!f && !hasExplicitText) return;
 
-  const selectedText = editorTextarea.value.substring(editorTextarea.selectionStart, editorTextarea.selectionEnd);
-  const text = selectedText || f.content;
-  if (!text) return;
+  const selectedText = f
+    ? editorTextarea.value.substring(editorTextarea.selectionStart, editorTextarea.selectionEnd)
+    : '';
+  const contentToSend = hasExplicitText ? text : (selectedText || f.content);
+  if (!contentToSend) return;
 
-  const lineCount = text.split('\n').length;
+  const lineCount = contentToSend.split('\n').length;
   if (lineCount > 50) {
     if (!confirm(`Send ${lineCount} lines to terminal?`)) return;
   }
@@ -1162,22 +1196,23 @@ function sendToTerminal() {
   const cmd = (t.command || '').toLowerCase();
   const mode = terminalSendModes[cmd] || 'paste';
   if (mode === 'bracketed') {
-    window.api.ptyWrite(t.ptyId, '\x1b[200~' + text + '\x1b[201~');
+    window.api.ptyWrite(t.ptyId, '\x1b[200~' + contentToSend + '\x1b[201~');
     window.api.ptyWrite(t.ptyId, '\r');
   } else if (mode === 'raw') {
-    window.api.ptyWrite(t.ptyId, text);
+    window.api.ptyWrite(t.ptyId, contentToSend);
     window.api.ptyWrite(t.ptyId, '\r');
   } else {
     // 'paste'（デフォルト）: xterm.js が bracketed paste mode を判定して適切に処理
-    t.terminal.paste(text);
+    t.terminal.paste(contentToSend);
     window.api.ptyWrite(t.ptyId, '\r');
   }
 
-  if (f.isScratch) {
+  if (f?.isScratch && !hasExplicitText) {
     lastSentContent = f.content;
     lastSentTabPath = activeFilePath;
     f.content = '';
     editorTextarea.value = '';
+    setState({ scratchContent: '', cursorLine: null, selection: null });
   }
 }
 
@@ -1186,6 +1221,9 @@ function undoLastSend() {
   const target = openFiles.get(lastSentTabPath || SCRATCH_PATH);
   if (!target) return;
   target.content = lastSentContent;
+  if (target.isScratch) {
+    setState({ scratchContent: target.content });
+  }
   if (activeFilePath === (lastSentTabPath || SCRATCH_PATH)) {
     editorTextarea.value = target.content;
   }
@@ -1194,7 +1232,7 @@ function undoLastSend() {
   editorTextarea.focus();
 }
 
-sendBtn.addEventListener('click', sendToTerminal);
+sendBtn.addEventListener('click', () => dispatch('send_to_terminal', {}));
 
 function updateSendTarget() {
   if (activeTabId === null) {
@@ -1312,16 +1350,16 @@ async function createTerminal(command, cwd, projectId) {
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('tab-close')) {
-      closeTerminal(tabId);
+      dispatch('close_terminal', { tabId });
     } else {
-      switchTab(tabId);
+      dispatch('focus_terminal', { tabId });
     }
   });
 
   tabEl.addEventListener('auxclick', (e) => {
     if (e.button === 1) {
       e.preventDefault();
-      closeTerminal(tabId);
+      dispatch('close_terminal', { tabId });
     }
   });
 
@@ -1393,6 +1431,7 @@ function showProjectTabs(projectId) {
     switchTab(restoreId);
   } else {
     activeTabId = null;
+    setState({ activeTerminalTabId: null });
     updateSendTarget();
   }
 }
@@ -1511,7 +1550,7 @@ async function buildTerminalMenu() {
       newTabMenu.classList.add('hidden');
       const p = projects.get(activeProjectId);
       const cwd = p ? p.path : undefined;
-      createTerminal(cmd, cwd, activeProjectId);
+      dispatch('create_terminal', { command: cmd, cwd, projectId: activeProjectId });
     });
     newTabMenu.appendChild(item);
   });
@@ -1533,7 +1572,7 @@ document.addEventListener('keydown', async (e) => {
     if (!p) return;
     const filepath = await window.api.clipboardSaveImage(p.path);
     if (filepath) {
-      appendToScratch(filepath);
+      dispatch('append_to_scratch', { text: filepath });
     }
   }
 });
@@ -1597,11 +1636,11 @@ async function loadLayout() {
     terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES, ...layout.terminalSendModes };
   }
   if (layout.activeProjectId && projects.has(layout.activeProjectId)) {
-    await selectProject(layout.activeProjectId);
+    await dispatch('select_project', { projectId: layout.activeProjectId });
   }
   if (layout.tabs && layout.tabs.length > 0) {
     for (const tab of layout.tabs) {
-      await createTerminal(tab.command, tab.cwd, tab.projectId);
+      await dispatch('create_terminal', tab);
     }
     // After restoring all tabs, show the active project's tabs
     if (activeProjectId) {
@@ -1670,6 +1709,81 @@ function updateStatusBar() {
 // Command handlers (Phase 1)
 // ============================================================
 
+// State-affecting UI operations enter through these handlers. The handlers
+// delegate to the existing domain functions, which keep the focus store in
+// sync for get_focus.
+
+// select_project: switch active project
+register('select_project', ({ projectId }) => {
+  return selectProject(projectId);
+});
+
+register('remove_project', ({ projectId }) => {
+  return removeProject(projectId);
+});
+
+// open_file: open a file in the editor
+register('open_file', ({ path, name }) => {
+  return openFileInEditor(path, name);
+});
+
+// open_preview: open a file in preview mode
+register('open_preview', ({ path, name }) => {
+  return openFileInPreview(path, name);
+});
+
+// close_tab: close an editor tab
+register('close_tab', ({ filePath }) => {
+  closeEditorTab(filePath);
+});
+
+// switch_tab: switch to an editor tab
+register('switch_tab', ({ filePath }) => {
+  switchEditorTab(filePath);
+});
+
+register('create_scratch_tab', () => {
+  createTempTab();
+});
+
+register('append_to_scratch', ({ text }) => {
+  appendToScratch(text);
+});
+
+register('update_editor_content', ({ content }) => {
+  updateActiveEditorContent(content);
+});
+
+register('update_editor_selection', () => {
+  updateEditorCursorState();
+});
+
+register('save_active_file', () => {
+  return saveActiveFile();
+});
+
+register('undo_last_send', () => {
+  undoLastSend();
+});
+
+// focus_terminal: switch to a terminal tab
+register('focus_terminal', ({ tabId }) => {
+  switchTab(tabId);
+});
+
+register('create_terminal', ({ command, cwd, projectId }) => {
+  return createTerminal(command, cwd, projectId);
+});
+
+register('close_terminal', ({ tabId }) => {
+  closeTerminal(tabId);
+});
+
+// send_to_terminal: send text to terminal
+register('send_to_terminal', ({ text, tabId }) => {
+  sendToTerminal(text, tabId);
+});
+
 // get_focus: build the human's attention state from the store + live data
 register('get_focus', () => {
   const focus = buildFocusState((id) => projects.get(id) || null);
@@ -1678,7 +1792,6 @@ register('get_focus', () => {
     const t = tabs.get(focus.terminal.activeTabId);
     if (t) {
       focus.terminal.command = t.command;
-      focus.terminal.cwd = t.cwd;
     }
   }
   return focus;
@@ -1686,8 +1799,8 @@ register('get_focus', () => {
 
 // Expose dispatch to main process via executeJavaScript (for MCP get_focus)
 // Returns a JSON-serializable focus state
-window.__pmDispatch = (name) => {
-  return dispatch(name);
+window.__pmDispatch = (name, args = {}) => {
+  return dispatch(name, args);
 };
 
 // ============================================================
@@ -1705,8 +1818,8 @@ function escapeHtml(text) {
   await loadLayout();
   if (tabs.size === 0 && projects.size > 0) {
     const p = projects.values().next().value;
-    await selectProject(p.id);
-    await createTerminal(defaultShell(), p.path, p.id);
+    await dispatch('select_project', { projectId: p.id });
+    await dispatch('create_terminal', { command: defaultShell(), cwd: p.path, projectId: p.id });
   }
   if (!editorStateInitialized) switchProjectEditor(activeProjectId);
 })();

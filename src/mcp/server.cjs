@@ -7,13 +7,7 @@ const http = require('http');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
 
-/**
- * Start the MCP server with SSE transport.
- * @param {number} basePort - Base port to try
- * @param {function} getFocus - Returns the focus state from the renderer
- * @param {function} onReady - Called with (port) when listening
- */
-function startMcpServer(basePort, getFocus, onReady) {
+function createMcpServer(getFocus) {
   const mcpServer = new McpServer({
     name: 'project-mixer',
     version: '0.1.0',
@@ -37,6 +31,17 @@ function startMcpServer(basePort, getFocus, onReady) {
     }
   );
 
+  return mcpServer;
+}
+
+/**
+ * Start the MCP server with SSE transport.
+ * @param {number} basePort - Base port to try
+ * @param {function} getFocus - Returns the focus state from the renderer
+ * @param {function} onReady - Called with (port) when listening
+ */
+function startMcpServer(basePort, getFocus, onReady) {
+
   // SSE transport: one transport per connection, stored by session ID
   const transports = new Map();
 
@@ -46,15 +51,37 @@ function startMcpServer(basePort, getFocus, onReady) {
 
   function tryListen(port) {
     const httpServer = http.createServer(async (req, res) => {
-      // CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
-
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204);
+      // --- Security: Origin / Host validation (MCP spec requirement) ---
+      // Prevent DNS rebinding and cross-origin access from arbitrary web pages.
+      // Only allow requests targeting localhost (the MCP client runs locally).
+      const reqHost = req.headers['host'] || '';
+      const allowedHosts = new Set([
+        `127.0.0.1:${port}`,
+        `localhost:${port}`,
+      ]);
+      if (!allowedHosts.has(reqHost)) {
+        res.writeHead(403);
         res.end();
         return;
+      }
+
+      // Reject requests with an Origin header from a browser page
+      // (MCP clients don't send Origin; browsers do).
+      const origin = req.headers['origin'];
+      if (origin) {
+        try {
+          const u = new URL(origin);
+          // Only allow localhost origins
+          if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
+            res.writeHead(403);
+            res.end();
+            return;
+          }
+        } catch {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
       }
 
       // Health check
@@ -67,10 +94,21 @@ function startMcpServer(basePort, getFocus, onReady) {
       // SSE endpoint: GET /sse — opens the event stream
       if (req.method === 'GET' && req.url.split('?')[0] === '/sse') {
         const transport = new SSEServerTransport('/messages', res);
+        const mcpServer = createMcpServer(getFocus);
         const sessionId = transport.sessionId;
-        transports.set(sessionId, transport);
+        transports.set(sessionId, { transport, mcpServer });
 
-        await mcpServer.connect(transport);
+        try {
+          await mcpServer.connect(transport);
+        } catch (error) {
+          transports.delete(sessionId);
+          console.error('[MCP] Failed to open SSE session:', error);
+          if (!res.headersSent) {
+            res.writeHead(500);
+          }
+          res.end();
+          return;
+        }
 
         res.on('close', () => {
           transports.delete(sessionId);
@@ -82,13 +120,23 @@ function startMcpServer(basePort, getFocus, onReady) {
       if (req.method === 'POST' && req.url.split('?')[0] === '/messages') {
         const url = new URL(req.url, 'http://127.0.0.1');
         const sessionId = url.searchParams.get('sessionId');
-        const transport = transports.get(sessionId);
-        if (!transport) {
+        const session = transports.get(sessionId);
+        if (!session) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'No transport found for sessionId' }));
           return;
         }
-        await transport.handlePostMessage(req, res);
+        try {
+          await session.transport.handlePostMessage(req, res);
+        } catch (error) {
+          console.error('[MCP] Failed to handle message:', error);
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to handle MCP message' }));
+          } else {
+            res.end();
+          }
+        }
         return;
       }
 
@@ -118,4 +166,4 @@ function startMcpServer(basePort, getFocus, onReady) {
   tryListen(basePort);
 }
 
-module.exports = { startMcpServer };
+module.exports = { createMcpServer, startMcpServer };
