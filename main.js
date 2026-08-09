@@ -7,6 +7,7 @@ const http = require('http');
 const pty = require('node-pty');
 const { execSync } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
+const { startMcpServer } = require('./src/mcp/server.cjs');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -25,7 +26,9 @@ let ptyCounter = 0;
 // --- Port separation (Phase 0.2) ---
 // Base port differs by profile; actual port is auto-selected and written to a file
 const BASE_PORT = IS_DEV ? 47842 : 47832;
+const MCP_BASE_PORT = IS_DEV ? 47852 : 47822;
 let HOOK_PORT = BASE_PORT; // resolved at startup
+let MCP_PORT = MCP_BASE_PORT; // resolved at startup
 
 const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
@@ -91,6 +94,22 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
   startHookServer();
+  // Start MCP server (Phase 1.3) — port written to port.json for discovery
+  startMcpServer(MCP_BASE_PORT, async () => {
+    // get_focus: call the renderer's command dispatch directly
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { error: 'no window' };
+    }
+    return await mainWindow.webContents.executeJavaScript(
+      'window.__pmDispatch && window.__pmDispatch("get_focus")'
+    );
+  }, (port) => {
+    MCP_PORT = port;
+    ensureConfigDir();
+    const existing = loadJson(portFile, {});
+    saveJson(portFile, { ...existing, mcpPort: MCP_PORT, mcpPid: process.pid });
+    console.log(`[Project Mixer] MCP port: ${MCP_PORT}`);
+  });
 });
 
 app.on('window-all-closed', () => {

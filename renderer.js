@@ -6,6 +6,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { register, dispatch } from './src/commands/registry.js';
+import { getState, setState, buildFocusState } from './src/store/index.js';
 
 // ============================================================
 // State
@@ -245,6 +247,7 @@ function renderProjectList() {
 async function selectProject(projectId) {
   switchProjectEditor(projectId);
   activeProjectId = projectId;
+  setState({ activeProjectId });
   renderProjectList();
   const p = projects.get(projectId);
   if (p) {
@@ -943,6 +946,7 @@ function switchEditorTab(filePath) {
   openFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
   f.tabEl.classList.add('active');
   activeFilePath = filePath;
+  setState({ activeFilePath: filePath, isPreview: !!f.isPreview });
 
   if (f.isPreview) {
     editorTextarea.classList.add('hidden');
@@ -1016,9 +1020,37 @@ editorTextarea.addEventListener('input', () => {
   const f = openFiles.get(activeFilePath);
   if (f) {
     f.content = editorTextarea.value;
-    if (!f.isScratch) updateEditorDirty(activeFilePath);
+    if (f.isScratch) {
+      setState({ scratchContent: f.content });
+    } else if (!f.isScratch) {
+      updateEditorDirty(activeFilePath);
+    }
   }
 });
+
+// Update cursor/selection state for get_focus
+function updateEditorCursorState() {
+  const f = activeFilePath ? openFiles.get(activeFilePath) : null;
+  if (!f || f.isPreview) {
+    setState({ cursorLine: null, selection: null });
+    return;
+  }
+  const value = editorTextarea.value;
+  const pos = editorTextarea.selectionStart;
+  const line = value.substring(0, pos).split('\n').length;
+  const selStart = editorTextarea.selectionStart;
+  const selEnd = editorTextarea.selectionEnd;
+  let selection = null;
+  if (selEnd > selStart) {
+    const startLine = value.substring(0, selStart).split('\n').length;
+    const endLine = value.substring(0, selEnd).split('\n').length;
+    selection = { startLine, endLine };
+  }
+  setState({ cursorLine: line, selection });
+}
+
+editorTextarea.addEventListener('keyup', updateEditorCursorState);
+editorTextarea.addEventListener('click', updateEditorCursorState);
 
 editorTextarea.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 's') {
@@ -1382,6 +1414,7 @@ function switchTab(tabId) {
   t.terminal.focus();
   activeTabId = tabId;
   projectActiveTab.set(t.projectId, tabId);
+  setState({ activeTerminalTabId: tabId });
   updateSendTarget();
 }
 
@@ -1408,6 +1441,7 @@ function closeTerminal(tabId) {
     } else {
       activeTabId = null;
       projectActiveTab.delete(projectId);
+      setState({ activeTerminalTabId: null });
       updateSendTarget();
     }
   }
@@ -1631,6 +1665,30 @@ function updateStatusBar() {
   }
   statusRight.textContent = parts.join('  |  ');
 }
+
+// ============================================================
+// Command handlers (Phase 1)
+// ============================================================
+
+// get_focus: build the human's attention state from the store + live data
+register('get_focus', () => {
+  const focus = buildFocusState((id) => projects.get(id) || null);
+  // Enrich terminal info from live tabs Map (store only has tabId)
+  if (focus.terminal) {
+    const t = tabs.get(focus.terminal.activeTabId);
+    if (t) {
+      focus.terminal.command = t.command;
+      focus.terminal.cwd = t.cwd;
+    }
+  }
+  return focus;
+});
+
+// Expose dispatch to main process via executeJavaScript (for MCP get_focus)
+// Returns a JSON-serializable focus state
+window.__pmDispatch = (name) => {
+  return dispatch(name);
+};
 
 // ============================================================
 // Init
