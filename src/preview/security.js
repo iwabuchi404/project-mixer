@@ -1,0 +1,1 @@
+export const PREVIEW_CSP = "default-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; img-src data: file:; style-src 'unsafe-inline' file:; font-src data: file:; media-src data: file:";

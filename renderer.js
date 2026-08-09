@@ -8,6 +8,8 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { register, dispatch } from './src/commands/registry.js';
 import { getState, setState, buildFocusState, getProjectScratchContent } from './src/store/index.js';
+import { calculatePreviewWidth, getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
+import { PREVIEW_CSP } from './src/preview/security.js';
 
 // ============================================================
 // State
@@ -252,7 +254,8 @@ async function selectProject(projectId) {
   activeProjectId = projectId;
   setState({ activeProjectId });
   // Update editor state in store after switching project editor
-  if (activePreviewPath && previewFiles.has(activePreviewPath)) {
+  const activePreview = previewFiles.get(activePreviewPath);
+  if (activeSurface === 'preview' && isPreviewForProject(activePreview, projectId)) {
     setState({ activeFilePath: activePreviewPath, isPreview: true, cursorLine: null, selection: null });
   } else {
     const activeFile = openFiles.get(activeFilePath);
@@ -609,6 +612,7 @@ let openFiles = new Map(); // path -> { path, name, content, originalContent, ta
 let previewFiles = new Map(); // previewPath -> { path, name, tabEl, isPreview, previewPath, projectId }
 let activeFilePath = null;
 let activePreviewPath = null;
+let activeSurface = 'editor'; // 'editor' | 'preview', restored per project
 let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
@@ -623,6 +627,8 @@ function saveCurrentEditorState() {
   projectEditorStates.set(activeEditorProjectId, {
     openFiles,
     activeFilePath,
+    activePreviewPath,
+    activeSurface,
     lastSentContent,
     lastSentTabPath,
     tempTabCounter,
@@ -642,6 +648,8 @@ function switchProjectEditor(projectId) {
   if (state) {
     openFiles = state.openFiles;
     activeFilePath = state.activeFilePath;
+    activePreviewPath = getPreviewForProject(previewFiles, projectId, state.activePreviewPath);
+    activeSurface = state.activeSurface === 'preview' && activePreviewPath ? 'preview' : 'editor';
     lastSentContent = state.lastSentContent;
     lastSentTabPath = state.lastSentTabPath;
     tempTabCounter = state.tempTabCounter;
@@ -649,6 +657,8 @@ function switchProjectEditor(projectId) {
   } else {
     openFiles = new Map();
     activeFilePath = null;
+    activePreviewPath = null;
+    activeSurface = 'editor';
     lastSentContent = '';
     lastSentTabPath = null;
     tempTabCounter = 0;
@@ -658,20 +668,25 @@ function switchProjectEditor(projectId) {
   }
 
   // Show preview tabs for this project
-  let hasVisiblePreview = false;
   previewFiles.forEach((f) => {
     if (f.projectId === projectId) {
       f.tabEl.style.display = '';
-      hasVisiblePreview = true;
     }
   });
 
+  activePreviewPath = getPreviewForProject(previewFiles, projectId, activePreviewPath);
+
   editorStateInitialized = true;
   editorTabBar.appendChild(newScratchTabBtn);
-  // If there's a visible preview tab and no active editor file, show preview
-  if (hasVisiblePreview && activePreviewPath && previewFiles.has(activePreviewPath) && previewFiles.get(activePreviewPath).projectId === projectId) {
+  const shouldFocusPreview = activeSurface === 'preview' && !!activePreviewPath;
+  clearPreviewContent();
+  if (activePreviewPath) {
+    showPreviewPane();
     switchPreviewTab(activePreviewPath);
   } else {
+    hidePreviewPane();
+  }
+  if (!shouldFocusPreview) {
     switchEditorTab(activeFilePath || SCRATCH_PATH);
   }
 }
@@ -691,6 +706,11 @@ function removeProjectEditorState(projectId) {
     }
   });
   previewToRemove.forEach((p) => previewFiles.delete(p));
+  if (!isPreviewForProject(previewFiles.get(activePreviewPath), activeEditorProjectId)) {
+    activePreviewPath = null;
+    activeSurface = 'editor';
+    hidePreviewPane();
+  }
   if (activeEditorProjectId === projectId) {
     editorStateInitialized = false;
     activeEditorProjectId = null;
@@ -913,19 +933,53 @@ function loadPreviewHtml(html) {
   previewWebview.src = dataUrl;
 }
 
+function buildSafePreviewDocument(source, baseUrl, extraStyle = '') {
+  const sanitized = DOMPurify.sanitize(source, { WHOLE_DOCUMENT: true });
+  const doc = new DOMParser().parseFromString(sanitized, 'text/html');
+  doc.querySelectorAll('base, meta[http-equiv]').forEach((el) => el.remove());
+
+  const csp = doc.createElement('meta');
+  csp.httpEquiv = 'Content-Security-Policy';
+  csp.content = PREVIEW_CSP;
+  doc.head.prepend(csp);
+
+  const base = doc.createElement('base');
+  base.href = baseUrl;
+  doc.head.appendChild(base);
+
+  if (extraStyle) {
+    const style = doc.createElement('style');
+    style.textContent = extraStyle;
+    doc.head.appendChild(style);
+  }
+
+  return `<!DOCTYPE html>${doc.documentElement.outerHTML}`;
+}
+
+function isActivePreview(f) {
+  return activeEditorProjectId === f.projectId && activePreviewPath === f.previewPath;
+}
+
 async function loadPreviewContent(f) {
   if (isImage(f.name)) {
+    if (!isActivePreview(f)) return;
     previewWebview.src = toFileUrl(f.path);
   } else if (isHtml(f.name)) {
-    previewWebview.src = toFileUrl(f.path);
+    const result = await window.api.readFile(f.path);
+    if (!result.success || !isActivePreview(f)) return;
+    const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
+    loadPreviewHtml(buildSafePreviewDocument(result.content, baseUrl));
   } else if (isMarkdown(f.name)) {
     const result = await window.api.readFile(f.path);
-    if (!result.success) return;
-    if (activePreviewPath !== f.previewPath) return;
-    const html = DOMPurify.sanitize(marked.parse(result.content));
+    if (!result.success || !isActivePreview(f)) return;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
-    loadPreviewHtml(`<!DOCTYPE html><html><head><meta charset="UTF-8"><base href="${baseUrl}"><style>${MD_CSS}</style></head><body class="markdown-body">${html}</body></html>`);
+    const markdownHtml = `<body class="markdown-body">${marked.parse(result.content)}</body>`;
+    loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS));
   }
+}
+
+function clearPreviewContent() {
+  previewWebview.src = 'about:blank';
 }
 
 function showPreviewPane() {
@@ -936,45 +990,43 @@ function showPreviewPane() {
 function hidePreviewPane() {
   previewPane.classList.add('hidden');
   vsplitter3.classList.add('hidden');
+  clearPreviewContent();
 }
 
 function switchPreviewTab(previewPath) {
   const f = previewFiles.get(previewPath);
-  if (!f) return;
+  if (!isPreviewForProject(f, activeEditorProjectId)) return;
 
   previewFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
   f.tabEl.classList.add('active');
   activePreviewPath = previewPath;
+  activeSurface = 'preview';
+  showPreviewPane();
   setState({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
-  loadPreviewContent(f);
+  loadPreviewContent(f).catch((error) => console.error('[preview] Failed to load:', error));
 }
 
 function closePreviewTab(previewPath) {
   const f = previewFiles.get(previewPath);
   if (!f) return;
 
+  const wasPreviewFocused = activeSurface === 'preview';
+  const projectId = f.projectId;
   f.tabEl.remove();
   previewFiles.delete(previewPath);
 
   if (activePreviewPath === previewPath) {
-    // Switch to next preview tab, or hide pane
-    let nextPath = null;
-    for (const [path] of previewFiles) {
-      nextPath = path;
-      break;
-    }
+    const nextPath = getNextPreviewForProject(previewFiles, projectId, previewPath);
     if (nextPath) {
       switchPreviewTab(nextPath);
+      if (!wasPreviewFocused) {
+        switchEditorTab(activeFilePath || SCRATCH_PATH);
+      }
     } else {
       activePreviewPath = null;
+      activeSurface = 'editor';
       hidePreviewPane();
-      // Restore editor state in store
-      const activeFile = openFiles.get(activeFilePath);
-      if (activeFile) {
-        setState({ isPreview: false, activeFilePath: activeFilePath });
-      } else {
-        setState({ isPreview: false, activeFilePath: null });
-      }
+      switchEditorTab(activeFilePath || SCRATCH_PATH);
     }
   }
 }
@@ -1041,6 +1093,7 @@ function switchEditorTab(filePath) {
   openFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
   f.tabEl.classList.add('active');
   activeFilePath = filePath;
+  activeSurface = 'editor';
   setState({ activeFilePath: filePath, isPreview: false });
 
   editorTextarea.classList.remove('hidden');
@@ -1761,9 +1814,45 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight) {
   });
 }
 
+function makePreviewSplitter(splitterEl, mainEl, previewEl, minMain, minPreview) {
+  let dragging = false;
+  let startX = 0;
+  let startPreviewWidth = 0;
+  let availableWidth = 0;
+
+  splitterEl.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startPreviewWidth = previewEl.offsetWidth;
+    availableWidth = mainEl.offsetWidth + startPreviewWidth;
+    document.body.style.cursor = 'ew-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const delta = e.clientX - startX;
+    const newWidth = calculatePreviewWidth({
+      startPreviewWidth,
+      delta,
+      availableWidth,
+      minMain,
+      minPreview,
+    });
+    previewEl.style.width = newWidth + 'px';
+    handleResize();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+  });
+}
+
 makeVSplitter(vsplitter1, document.getElementById('sidebar'), document.getElementById('file-tree-pane'), 120, 300);
 makeVSplitter(vsplitter2, document.getElementById('file-tree-pane'), document.getElementById('main-pane'), 120, 300);
-makeVSplitter(vsplitter3, document.getElementById('main-pane'), document.getElementById('preview-pane'), 200, 150);
+makePreviewSplitter(vsplitter3, document.getElementById('main-pane'), document.getElementById('preview-pane'), 200, 150);
 
 // ============================================================
 // Status bar
@@ -1910,6 +1999,7 @@ window.__pmGetPaneRect = (paneName) => {
   const el = document.getElementById(id);
   if (!el) return null;
   const r = el.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return null;
   return { x: r.x, y: r.y, width: r.width, height: r.height };
 };
 
