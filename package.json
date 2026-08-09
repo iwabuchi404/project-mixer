@@ -10,6 +10,7 @@
     "rebuild": "electron-rebuild -f -w node-pty",
     "build:renderer": "node build.cjs",
     "build:renderer:watch": "node build.cjs --watch",
+    "test:phase0": "node --test test/hook-settings.test.cjs",
     "dev:v2": "node scripts/dev.cjs",
     "prestart": "node build.cjs",
     "prestart:dev": "node build.cjs",
@@ -45,6 +46,7 @@
     },
     "files": [
       "main.js",
+      "hook-settings.cjs",
       "preload.js",
       "index.html",
       "styles.css",

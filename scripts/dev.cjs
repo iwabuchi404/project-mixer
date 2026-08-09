@@ -8,16 +8,17 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-const electronBin = path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
+const electronBin = require('electron');
+const nodeBin = process.execPath;
 
 function run(cmd, args, opts) {
-  return spawn(cmd, args, { stdio: 'inherit', shell: true, ...opts });
+  return spawn(cmd, args, { stdio: 'inherit', shell: false, ...opts });
 }
 
 async function main() {
   // 1. Initial build (must complete before Electron starts)
   console.log('[dev] Building renderer bundle...');
-  const build = run('node', ['build.cjs'], { cwd: root });
+  const build = run(nodeBin, [path.join(root, 'build.cjs')], { cwd: root });
   await new Promise((resolve, reject) => {
     build.on('exit', (code) => {
       if (code === 0) resolve();
@@ -29,22 +30,39 @@ async function main() {
 
   // 2. Start watch mode
   console.log('[dev] Starting esbuild watch...');
-  const watcher = run('node', ['build.cjs', '--watch'], { cwd: root });
+  const watcher = run(nodeBin, [path.join(root, 'build.cjs'), '--watch'], { cwd: root });
 
   // 3. Start Electron
   console.log('[dev] Starting Electron (--dev)...');
   const electron = run(electronBin, ['.', '--dev'], { cwd: root });
 
   // 4. Cleanup on exit
-  function cleanup() {
-    try { watcher.kill(); } catch (e) {}
-    try { electron.kill(); } catch (e) {}
-    process.exit(0);
+  let shuttingDown = false;
+  function cleanup(exitCode = 0) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    process.exitCode = exitCode;
+    try { if (watcher.exitCode === null) watcher.kill(); } catch (e) {}
+    try { if (electron.exitCode === null) electron.kill(); } catch (e) {}
   }
 
-  electron.on('exit', cleanup);
-  process.on('SIGINT', cleanup);
-  process.on('SIGTERM', cleanup);
+  electron.on('error', (e) => {
+    console.error('[dev] Electron failed to start:', e);
+    cleanup(1);
+  });
+  watcher.on('error', (e) => {
+    console.error('[dev] Watcher failed to start:', e);
+    cleanup(1);
+  });
+  electron.on('exit', (code, signal) => cleanup(code ?? (signal ? 1 : 0)));
+  watcher.on('exit', (code, signal) => {
+    if (!shuttingDown) {
+      console.error(`[dev] Watcher stopped unexpectedly (${signal || code || 0}).`);
+      cleanup(code || 1);
+    }
+  });
+  process.on('SIGINT', () => cleanup(0));
+  process.on('SIGTERM', () => cleanup(0));
 }
 
 main().catch((e) => {

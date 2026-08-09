@@ -6,6 +6,7 @@ const fsp = require('fs/promises');
 const http = require('http');
 const pty = require('node-pty');
 const { execSync } = require('child_process');
+const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -524,35 +525,35 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
     // resolved at runtime via env var, so both profiles can share this file)
     fs.writeFileSync(hookScriptPath, HOOK_SCRIPT, 'utf-8');
 
-    // Read existing settings.local.json or create new
+    // Read existing settings.local.json or create new. Never replace a file
+    // that cannot be parsed, because it may contain user-managed hooks.
     let settings = {};
     if (fs.existsSync(claudeSettings)) {
-      try { settings = JSON.parse(fs.readFileSync(claudeSettings, 'utf-8')); } catch (e) {}
+      try {
+        settings = JSON.parse(fs.readFileSync(claudeSettings, 'utf-8'));
+      } catch (e) {
+        throw new Error(`Cannot parse ${claudeSettings}: ${e.message}`);
+      }
     }
-
-    if (!settings.hooks) settings.hooks = {};
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      throw new Error(`${claudeSettings} must contain a JSON object`);
+    }
+    if (settings.hooks === undefined) settings.hooks = {};
+    if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
+      throw new Error(`${claudeSettings}: hooks must be a JSON object`);
+    }
 
     // Escape backslashes for Windows paths; Unix paths need no escaping
     const escapedScriptPath = os.platform() === 'win32'
       ? hookScriptPath.replace(/\\/g, '\\\\')
       : hookScriptPath;
     const hookCmd = `node "${escapedScriptPath}"`;
-    const pmHookEntry = { type: 'command', command: hookCmd };
 
-    // Add PM's hook as a single independent entry (matcher: '')
-    // Don't modify existing entries — just remove any previous PM entry and
-    // add a fresh one, so re-setup doesn't accumulate duplicates.
+    // Add one independent PM entry for each event. Remove only previous PM
+    // hook commands; preserve any user hooks that share the same matcher.
     for (const key of ['Notification', 'Stop']) {
-      if (!settings.hooks[key]) {
-        settings.hooks[key] = [{ matcher: '', hooks: [pmHookEntry] }];
-      } else {
-        // Remove existing PM entries (identified by 'project-mixer-hook' in command)
-        settings.hooks[key] = settings.hooks[key].filter(
-          (entry) => !(entry.hooks || []).some(h => h.command && h.command.includes('project-mixer-hook'))
-        );
-        // Add PM's independent entry
-        settings.hooks[key].push({ matcher: '', hooks: [pmHookEntry] });
-      }
+      const pmHookEntry = { type: 'command', command: `${hookCmd} ${key}` };
+      settings.hooks[key] = upsertProjectMixerHook(settings.hooks[key], pmHookEntry);
     }
 
     fs.writeFileSync(claudeSettings, JSON.stringify(settings, null, 2), 'utf-8');
