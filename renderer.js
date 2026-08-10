@@ -133,6 +133,7 @@ const statusLeft = document.getElementById('status-left');
 const statusRight = document.getElementById('status-right');
 const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
+const pushFocusCheckbox = document.getElementById('push-focus-checkbox');
 const newScratchTabBtn = document.createElement('button');
 newScratchTabBtn.id = 'new-scratch-tab-btn';
 newScratchTabBtn.title = 'New scratch buffer';
@@ -1599,6 +1600,39 @@ async function saveActiveFile() {
 // Send to terminal (D8: bracketed paste)
 // ============================================================
 
+// 3.1 push: build a compact context block from current focus state
+function getSelectionRange() {
+  const start = editorTextarea.selectionStart;
+  const end = editorTextarea.selectionEnd;
+  if (start === end) return null;
+  const before = editorTextarea.value.substring(0, start);
+  const selected = editorTextarea.value.substring(start, end);
+  const startLine = before.split('\n').length;
+  const endLine = startLine + selected.split('\n').length - 1;
+  return { startLine, endLine };
+}
+
+function buildPushFocusContext({ project, activeFilePath, isPreview, selectedText, selectionRange }) {
+  const parts = [];
+  parts.push('--- context ---');
+  if (project) {
+    parts.push(`project: ${project.name}`);
+  }
+  if (activeFilePath) {
+    const label = isPreview ? 'preview' : 'file';
+    parts.push(`${label}: ${activeFilePath}`);
+  }
+  if (selectionRange) {
+    if (selectionRange.startLine === selectionRange.endLine) {
+      parts.push(`selection: line ${selectionRange.startLine}`);
+    } else {
+      parts.push(`selection: lines ${selectionRange.startLine}-${selectionRange.endLine}`);
+    }
+  }
+  parts.push('--- end context ---');
+  return parts.join('\n');
+}
+
 function sendToTerminal(text, tabId) {
   if (tabId !== undefined) {
     switchTab(tabId);
@@ -1614,8 +1648,22 @@ function sendToTerminal(text, tabId) {
   const selectedText = f
     ? editorTextarea.value.substring(editorTextarea.selectionStart, editorTextarea.selectionEnd)
     : '';
-  const contentToSend = hasExplicitText ? text : (selectedText || f.content);
+  let contentToSend = hasExplicitText ? text : (selectedText || f.content);
   if (!contentToSend) return;
+
+  // 3.1 push: append focus context to the message
+  if (pushFocusCheckbox.checked) {
+    const ctx = buildPushFocusContext({
+      project: projects.get(activeProjectId),
+      activeFilePath,
+      isPreview: f?.isPreview,
+      selectedText,
+      selectionRange: f ? getSelectionRange() : null,
+    });
+    if (ctx) {
+      contentToSend = contentToSend + '\n' + ctx;
+    }
+  }
 
   const lineCount = contentToSend.split('\n').length;
   if (lineCount > 50) {
@@ -1665,6 +1713,7 @@ function undoLastSend() {
 }
 
 sendBtn.addEventListener('click', () => dispatch('send_to_terminal', {}));
+pushFocusCheckbox.addEventListener('change', () => saveLayout());
 
 function updateSendTarget() {
   if (activeTabId === null) {
@@ -2338,6 +2387,7 @@ async function saveLayout() {
       projectId: t.projectId,
     })),
     terminalSendModes,
+    pushFocusEnabled: pushFocusCheckbox.checked,
   };
   await window.api.layoutSave(layout);
 }
@@ -2348,6 +2398,9 @@ async function loadLayout() {
   // ユーザー設定で既知のツールの送信方式を上書き（未指定はデフォルトを使う）
   if (layout.terminalSendModes && typeof layout.terminalSendModes === 'object') {
     terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES, ...layout.terminalSendModes };
+  }
+  if (typeof layout.pushFocusEnabled === 'boolean') {
+    pushFocusCheckbox.checked = layout.pushFocusEnabled;
   }
   if (layout.activeProjectId && projects.has(layout.activeProjectId)) {
     await dispatch('select_project', { projectId: layout.activeProjectId });
