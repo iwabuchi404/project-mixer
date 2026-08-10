@@ -356,8 +356,6 @@ async function selectProject(projectId) {
     fileTreeTitle.textContent = p.name;
     await loadFileTree(p.path);
     window.api.hookSetup(p.path);
-    // Phase 3.1: notify main process to switch kamox target
-    window.api.kamoxSwitchProject(p.path, p.name);
   }
   showProjectTabs(projectId);
 }
@@ -2064,8 +2062,6 @@ function handleResize() {
         t.pinnedToBottom = shouldFollow;
       }
     }
-    // Phase 3.1: update kamox WebContentsView bounds on resize
-    window.api.kamoxUpdateBounds();
   }, 50);
 }
 window.addEventListener('resize', handleResize);

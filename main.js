@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, Menu, WebContentsView } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -10,7 +10,6 @@ const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
-const { readKamoxPort, checkKamoxStatus } = require('./src/kamox/detector.js');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -93,147 +92,6 @@ function createWindow() {
   mainWindow.loadFile('index.html');
   setupApplicationMenu();
 }
-
-// ============================================================
-// Phase 3.1: kamox dashboard WebContentsView
-// ============================================================
-
-let kamoxView = null;       // WebContentsView instance
-let kamoxPort = null;       // current target port
-let kamoxProjectName = null; // expected projectName from config
-let kamoxPollTimer = null;  // status polling timer
-let kamoxAttached = false;  // whether view is currently attached to mainWindow
-
-/**
- * Attach or detach the kamox WebContentsView based on status.
- * Called after layout rect updates and after status checks.
- */
-async function updateKamoxView() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-
-  const status = await checkKamoxStatus(kamoxPort);
-
-  if (!status) {
-    // kamox not running — detach if attached
-    if (kamoxAttached && kamoxView) {
-      mainWindow.contentView.removeChildView(kamoxView);
-      kamoxAttached = false;
-    }
-    return;
-  }
-
-  // Verify projectName matches (security: don't show wrong server)
-  if (kamoxProjectName && status.projectName && status.projectName !== kamoxProjectName) {
-    if (kamoxAttached && kamoxView) {
-      mainWindow.contentView.removeChildView(kamoxView);
-      kamoxAttached = false;
-    }
-    return;
-  }
-
-  // kamox is running — create view if needed
-  if (!kamoxView) {
-    kamoxView = new WebContentsView({
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    });
-    kamoxView.webContents.loadURL(`http://127.0.0.1:${kamoxPort}/`);
-  } else if (!kamoxAttached) {
-    // Re-attach
-    mainWindow.contentView.addChildView(kamoxView);
-  }
-
-  if (!kamoxAttached) {
-    mainWindow.contentView.addChildView(kamoxView);
-    kamoxAttached = true;
-  }
-
-  // Update bounds from renderer's pane rect
-  await updateKamoxBounds();
-}
-
-/**
- * Query the renderer for the preview pane rect and apply it to the WebContentsView.
- */
-async function updateKamoxBounds() {
-  if (!mainWindow || mainWindow.isDestroyed() || !kamoxView || !kamoxAttached) return;
-
-  try {
-    const rect = await mainWindow.webContents.executeJavaScript(
-      'window.__pmGetPaneRect && window.__pmGetPaneRect("preview")'
-    );
-    if (rect && rect.width > 0 && rect.height > 0) {
-      kamoxView.setBounds({
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      });
-    }
-  } catch {
-    // renderer not ready
-  }
-}
-
-/**
- * Switch kamox target to a new project.
- * Called when the active project changes.
- */
-async function switchKamoxProject(projectPath, projectName) {
-  // Stop existing polling
-  if (kamoxPollTimer) {
-    clearInterval(kamoxPollTimer);
-    kamoxPollTimer = null;
-  }
-
-  // Read port from kamox.config.json
-  const port = readKamoxPort(projectPath);
-  kamoxPort = port;
-  kamoxProjectName = projectName || null;
-
-  if (!port) {
-    // No kamox config — detach if attached
-    if (kamoxAttached && kamoxView && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.contentView.removeChildView(kamoxView);
-      kamoxAttached = false;
-    }
-    return;
-  }
-
-  // Initial check
-  await updateKamoxView();
-
-  // Poll every 5 seconds for status changes (kamox start/stop)
-  kamoxPollTimer = setInterval(() => {
-    updateKamoxView().catch(() => {});
-  }, 5000);
-}
-
-/**
- * Clean up kamox view on window close.
- */
-function cleanupKamoxView() {
-  if (kamoxPollTimer) {
-    clearInterval(kamoxPollTimer);
-    kamoxPollTimer = null;
-  }
-  if (kamoxView) {
-    kamoxView = null;
-  }
-  kamoxAttached = false;
-}
-
-// IPC: renderer requests bounds update (called on layout changes)
-ipcMain.handle('kamox:update-bounds', async () => {
-  await updateKamoxBounds();
-});
-
-// IPC: renderer notifies project switch
-ipcMain.handle('kamox:switch-project', async (event, { projectPath, projectName }) => {
-  await switchKamoxProject(projectPath, projectName);
-});
 
 // A8: Application menu — calls renderer dispatch for existing commands
 function dispatchToRenderer(name, args = {}) {
@@ -398,7 +256,6 @@ function savePortJson() {
 }
 
 app.on('window-all-closed', () => {
-  cleanupKamoxView();
   ptys.forEach((p) => p.process.kill());
   ptys.clear();
   if (process.platform !== 'darwin') app.quit();
