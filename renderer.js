@@ -105,6 +105,7 @@ const previewTabBar = document.getElementById('preview-tab-bar');
 const vsplitter3 = document.getElementById('vsplitter-3');
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
+const tabContextMenu = document.getElementById('tab-context-menu');
 const deleteConfirmModal = document.getElementById('delete-confirm-modal');
 const deleteConfirmMessage = document.getElementById('delete-confirm-message');
 const deleteCancelBtn = document.getElementById('delete-cancel-btn');
@@ -254,6 +255,11 @@ function renderProjectList() {
   for (const [id, p] of projects) {
     const el = document.createElement('div');
     el.className = 'project-item' + (id === activeProjectId ? ' active' : '');
+    // A6: tooltip with full path
+    el.title = p.path;
+    // A7: draggable for reorder
+    el.draggable = true;
+    el.dataset.projectId = id;
     el.innerHTML = `
       <span class="project-status idle"></span>
       <span class="project-name">${escapeHtml(p.name)}</span>
@@ -266,7 +272,54 @@ function renderProjectList() {
         dispatch('select_project', { projectId: id });
       }
     });
+    // A7: drag & drop reorder
+    el.addEventListener('dragstart', (e) => {
+      draggedProjectEl = el;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      projectList.querySelectorAll('.project-item').forEach(p => p.classList.remove('drag-over'));
+      draggedProjectEl = null;
+    });
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    el.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      if (draggedProjectEl && el !== draggedProjectEl) {
+        el.classList.add('drag-over');
+      }
+    });
+    el.addEventListener('dragleave', () => {
+      el.classList.remove('drag-over');
+    });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.classList.remove('drag-over');
+      if (!draggedProjectEl || draggedProjectEl === el) return;
+      // Reorder: insert dragged before target
+      projectList.insertBefore(draggedProjectEl, el);
+      saveProjectOrder();
+    });
     projectList.appendChild(el);
+  }
+}
+
+let draggedProjectEl = null;
+
+async function saveProjectOrder() {
+  const orderedIds = Array.from(projectList.querySelectorAll('.project-item'))
+    .map(el => el.dataset.projectId)
+    .filter(Boolean);
+  const updated = await window.api.projectReorder(orderedIds);
+  // Update the projects Map order in-place (projects is const)
+  const existing = new Map(projects);
+  projects.clear();
+  for (const p of updated) {
+    projects.set(p.id, existing.get(p.id) || { id: p.id, name: p.name, path: p.path });
   }
 }
 
@@ -437,6 +490,8 @@ function createTreeItem(entry, depth) {
   const el = document.createElement('div');
   el.className = 'tree-item';
   el.style.paddingLeft = (12 + depth * 16) + 'px';
+  // A6: tooltip with full path
+  el.title = entry.path;
   el.innerHTML = `<span class="tree-icon">${entry.isDirectory ? '\u{1F4C1}' : '\u{1F4C4}'}</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
 
   el.addEventListener('click', async (e) => {
@@ -549,6 +604,108 @@ document.addEventListener('click', () => hideContextMenu());
 document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('.tree-item')) hideContextMenu();
 });
+
+// ============================================================
+// A5: Tab context menu (per tab kind)
+// ============================================================
+
+let tabContextTarget = null; // { kind, tabId, filePath, previewPath }
+
+function showTabContextMenu(x, y, target) {
+  tabContextTarget = target;
+  tabContextMenu.innerHTML = '';
+  const items = buildTabMenuItems(target);
+  for (const item of items) {
+    const el = document.createElement('div');
+    el.className = 'context-menu-item' + (item.danger ? ' context-menu-danger' : '');
+    el.dataset.action = item.action;
+    el.textContent = item.label;
+    tabContextMenu.appendChild(el);
+  }
+  tabContextMenu.classList.remove('hidden');
+  tabContextMenu.style.left = x + 'px';
+  tabContextMenu.style.top = y + 'px';
+}
+
+function hideTabContextMenu() {
+  tabContextMenu.classList.add('hidden');
+  tabContextTarget = null;
+}
+
+function buildTabMenuItems(target) {
+  switch (target.kind) {
+    case 'terminal':
+      return [
+        { action: 'rename', label: 'Rename Tab' },
+        { action: 'copy-cwd', label: 'Copy cwd' },
+        { action: 'close', label: 'Close', danger: true },
+      ];
+    case 'preview':
+    case 'editor-file':
+      return [
+        { action: 'copy-path', label: 'Copy Path' },
+        { action: 'open-os', label: 'Open in OS' },
+        { action: 'close', label: 'Close', danger: true },
+      ];
+    case 'scratch':
+      return [
+        { action: 'rename', label: 'Rename Tab' },
+        { action: 'close', label: 'Close', danger: true },
+      ];
+    default:
+      return [];
+  }
+}
+
+tabContextMenu.addEventListener('click', (e) => {
+  const action = e.target.dataset.action;
+  if (!action || !tabContextTarget) return;
+  const t = tabContextTarget;
+  hideTabContextMenu();
+
+  if (action === 'close') {
+    if (t.kind === 'terminal') dispatch('close_terminal', { tabId: t.tabId });
+    else if (t.kind === 'preview') closePreviewTab(t.previewPath);
+    else if (t.kind === 'editor-file') closeEditorTab(t.filePath);
+    else if (t.kind === 'scratch') closeEditorTab(SCRATCH_PATH);
+  } else if (action === 'copy-path') {
+    if (t.filePath) window.api.clipboardWriteText(t.filePath);
+  } else if (action === 'open-os') {
+    if (t.filePath) window.api.openInOs(t.filePath);
+  } else if (action === 'copy-cwd') {
+    const term = tabs.get(t.tabId);
+    if (term?.cwd) window.api.clipboardWriteText(term.cwd);
+  } else if (action === 'rename') {
+    if (t.kind === 'terminal') renameTerminalTab(t.tabId);
+    else if (t.kind === 'scratch') renameScratchTab();
+  }
+});
+
+document.addEventListener('click', () => hideTabContextMenu());
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('#tab-context-menu')) hideTabContextMenu();
+});
+
+function renameTerminalTab(tabId) {
+  const t = tabs.get(tabId);
+  if (!t) return;
+  showPrompt('Rename Tab', 'Enter new label:', t.command.replace(/\.exe$/, '')).then((newName) => {
+    if (!newName) return;
+    const labelEl = t.tabElement.querySelector('.tab-label');
+    if (labelEl) labelEl.textContent = newName;
+    t.command = newName; // update display name
+  });
+}
+
+function renameScratchTab() {
+  const scratchFile = openFiles.get(SCRATCH_PATH);
+  if (!scratchFile) return;
+  showPrompt('Rename Tab', 'Enter new label:', scratchFile.tabEl.querySelector('.tab-label')?.textContent || 'scratch').then((newName) => {
+    if (!newName) return;
+    const labelEl = scratchFile.tabEl.querySelector('.tab-label');
+    if (labelEl) labelEl.textContent = newName;
+  });
+}
 
 // ============================================================
 // Delete confirmation modal
@@ -790,6 +947,12 @@ function initScratchTab() {
   tabEl.dataset.path = SCRATCH_PATH;
 
   tabEl.addEventListener('click', () => dispatch('switch_tab', { filePath: SCRATCH_PATH }));
+  // A5: scratch tab context menu
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showTabContextMenu(e.clientX, e.clientY, { kind: 'scratch' });
+  });
   makeEditorTabDraggable(tabEl, SCRATCH_PATH);
   editorTabBar.appendChild(tabEl);
   editorTabBar.appendChild(newScratchTabBtn);
@@ -944,6 +1107,8 @@ async function openFileInPreview(filePath, name) {
   tabEl.className = 'preview-tab';
   tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-close">\u00d7</span>`;
   tabEl.dataset.path = previewPath;
+  // A6: tooltip with full path
+  tabEl.title = filePath;
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
@@ -958,6 +1123,13 @@ async function openFileInPreview(filePath, name) {
       e.preventDefault();
       dispatch('close_tab', { filePath: previewPath });
     }
+  });
+
+  // A5: preview tab context menu
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showTabContextMenu(e.clientX, e.clientY, { kind: 'preview', previewPath, filePath });
   });
 
   previewTabBar.appendChild(tabEl);
@@ -1134,6 +1306,8 @@ async function openFileInEditor(filePath, name) {
   tabEl.className = 'editor-tab';
   tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-dirty hidden">*</span><span class="editor-tab-close">\u00d7</span>`;
   tabEl.dataset.path = filePath;
+  // A6: tooltip with full path
+  tabEl.title = filePath;
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
@@ -1148,6 +1322,13 @@ async function openFileInEditor(filePath, name) {
       e.preventDefault();
       dispatch('close_tab', { filePath });
     }
+  });
+
+  // A5: editor file tab context menu
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showTabContextMenu(e.clientX, e.clientY, { kind: 'editor-file', filePath });
   });
 
   makeEditorTabDraggable(tabEl, filePath);
@@ -1597,6 +1778,13 @@ async function createTerminal(command, cwd, projectId) {
       e.preventDefault();
       dispatch('close_terminal', { tabId });
     }
+  });
+
+  // A5: terminal tab context menu
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showTabContextMenu(e.clientX, e.clientY, { kind: 'terminal', tabId });
   });
 
   tabEl.draggable = true;
@@ -2326,8 +2514,25 @@ register('focus_terminal', ({ tabId }) => {
   switchTab(tabId);
 });
 
-register('create_terminal', ({ command, cwd, projectId }) => {
-  return createTerminal(command, cwd, projectId);
+register('create_terminal', ({ command, cwd, projectId } = {}) => {
+  // A8: defaults for menu-invoked creation
+  const cmd = command || 'devin';
+  const cwd_ = cwd || (projects.get(activeProjectId)?.path);
+  const pid = projectId || activeProjectId;
+  return createTerminal(cmd, cwd_, pid);
+});
+
+// A8: commands for application menu access
+register('add_project', () => {
+  showAddProjectModal();
+});
+
+register('new_file', () => {
+  treeNewFileBtn.click();
+});
+
+register('new_folder', () => {
+  treeNewFolderBtn.click();
 });
 
 register('close_terminal', ({ tabId }) => {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -90,6 +90,140 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+  setupApplicationMenu();
+}
+
+// A8: Application menu — calls renderer dispatch for existing commands
+function dispatchToRenderer(name, args = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.executeJavaScript(`window.__pmDispatch && window.__pmDispatch(${JSON.stringify(name)}, ${JSON.stringify(args)})`)
+    .catch(() => {});
+}
+
+function setupApplicationMenu() {
+  const isMac = process.platform === 'darwin';
+
+  const template = [
+    // File menu
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Add Project...',
+          accelerator: 'CmdOrCtrl+Shift+A',
+          click: () => dispatchToRenderer('add_project'),
+        },
+        {
+          label: 'New File',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => dispatchToRenderer('new_file'),
+        },
+        {
+          label: 'New Folder',
+          accelerator: 'CmdOrCtrl+Shift+N',
+          click: () => dispatchToRenderer('new_folder'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Save Active File',
+          accelerator: 'CmdOrCtrl+S',
+          click: () => dispatchToRenderer('save_active_file'),
+        },
+        { type: 'separator' },
+        isMac ? { role: 'close', label: 'Close Window' } : { role: 'quit', label: 'Exit' },
+      ],
+    },
+    // Edit menu
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    // View menu
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Sidebar (Ctrl+B)',
+          accelerator: 'CmdOrCtrl+B',
+          click: () => {
+            // Ctrl+B is handled in renderer; this is a fallback for menu
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            mainWindow.webContents.executeJavaScript(`{
+              const evt = new KeyboardEvent('keydown', { ctrlKey: true, key: 'b' });
+              document.dispatchEvent(evt);
+            }`).catch(() => {});
+          },
+        },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    // Terminal menu
+    {
+      label: 'Terminal',
+      submenu: [
+        {
+          label: 'New Terminal',
+          accelerator: 'CmdOrCtrl+Shift+T',
+          click: () => dispatchToRenderer('create_terminal'),
+        },
+        {
+          label: 'Send to Terminal',
+          accelerator: 'CmdOrCtrl+Enter',
+          click: () => {
+            // Send scratch content to active terminal (same as send button)
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            mainWindow.webContents.executeJavaScript(`{
+              const btn = document.getElementById('send-btn');
+              if (btn) btn.click();
+            }`).catch(() => {});
+          },
+        },
+        {
+          label: 'Undo Last Send',
+          accelerator: 'CmdOrCtrl+Shift+Z',
+          click: () => dispatchToRenderer('undo_last_send'),
+        },
+      ],
+    },
+    // Help menu
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'About Project Mixer',
+          click: () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'About Project Mixer',
+              message: 'Project Mixer',
+              detail: 'A multi-project terminal and editor manager with AI integration.\n\nPhase 2.5 — Adjustment Phase',
+              buttons: ['OK'],
+            });
+          },
+        },
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
 }
 
 app.whenReady().then(() => {
@@ -322,6 +456,20 @@ ipcMain.handle('project:remove', async (event, { id }) => {
   projects = projects.filter(p => p.id !== id);
   saveJson(projectsFile, projects);
   return projects;
+});
+
+ipcMain.handle('project:reorder', async (event, { orderedIds }) => {
+  let projects = loadJson(projectsFile, []);
+  const map = new Map(projects.map(p => [p.id, p]));
+  const reordered = orderedIds
+    .map(id => map.get(id))
+    .filter(Boolean);
+  // Append any projects not in orderedIds (defensive)
+  for (const p of projects) {
+    if (!orderedIds.includes(p.id)) reordered.push(p);
+  }
+  saveJson(projectsFile, reordered);
+  return reordered;
 });
 
 // --- File tree ---

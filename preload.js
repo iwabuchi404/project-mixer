@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('api', {
   projectList: () => ipcRenderer.invoke('project:list'),
   projectAdd: (name, projPath) => ipcRenderer.invoke('project:add', { name, path: projPath }),
   projectRemove: (id) => ipcRenderer.invoke('project:remove', { id }),
+  projectReorder: (orderedIds) => ipcRenderer.invoke('project:reorder', { orderedIds }),
 
   // File tree
   readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', { dirPath }),

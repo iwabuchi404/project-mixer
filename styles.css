@@ -154,6 +154,15 @@ body {
   color: #f44;
 }
 
+/* A7: project reorder drag styles */
+.project-item.dragging {
+  opacity: 0.5;
+}
+
+.project-item.drag-over {
+  border-top: 2px solid #0c7bef;
+}
+
 #sidebar-footer {
   padding: 6px 12px;
   border-top: 1px solid #3e3e3e;
