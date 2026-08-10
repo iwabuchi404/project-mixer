@@ -103,7 +103,18 @@ function dispatchToRenderer(name, args = {}) {
 function setupApplicationMenu() {
   const isMac = process.platform === 'darwin';
 
+  // メニューのアクセラレータは keydown より先に Electron が消費するため、
+  // ターミナルが使うキー（Ctrl+S=XOFF / Ctrl+B=tmux prefix / Ctrl+N=履歴 /
+  // Ctrl+Enter・Ctrl+Shift+Z=エディタ内限定）を登録すると機能後退になる。
+  // registerAccelerator:false なら「メニューに表示するが横取りしない」ため、
+  // 発見可能性（A8 の目的）だけを得られる。
+  const displayOnly = (accelerator) => ({ accelerator, registerAccelerator: false });
+
   const template = [
+    // macOS ではテンプレート先頭がアプリメニューの位置に昇格する。
+    // これを置かないと File の項目がアプリ名の下に吸収され、
+    // quit role がどこにも無いため Cmd+Q が効かなくなる。
+    ...(isMac ? [{ role: 'appMenu' }] : []),
     // File menu
     {
       label: 'File',
@@ -115,7 +126,6 @@ function setupApplicationMenu() {
         },
         {
           label: 'New File',
-          accelerator: 'CmdOrCtrl+N',
           click: () => dispatchToRenderer('new_file'),
         },
         {
@@ -126,7 +136,7 @@ function setupApplicationMenu() {
         { type: 'separator' },
         {
           label: 'Save Active File',
-          accelerator: 'CmdOrCtrl+S',
+          ...displayOnly('CmdOrCtrl+S'),
           click: () => dispatchToRenderer('save_active_file'),
         },
         { type: 'separator' },
@@ -151,16 +161,9 @@ function setupApplicationMenu() {
       label: 'View',
       submenu: [
         {
-          label: 'Toggle Sidebar (Ctrl+B)',
-          accelerator: 'CmdOrCtrl+B',
-          click: () => {
-            // Ctrl+B is handled in renderer; this is a fallback for menu
-            if (!mainWindow || mainWindow.isDestroyed()) return;
-            mainWindow.webContents.executeJavaScript(`{
-              const evt = new KeyboardEvent('keydown', { ctrlKey: true, key: 'b' });
-              document.dispatchEvent(evt);
-            }`).catch(() => {});
-          },
+          label: 'Toggle Sidebar',
+          ...displayOnly('CmdOrCtrl+B'),
+          click: () => dispatchToRenderer('toggle_sidebar'),
         },
         { type: 'separator' },
         { role: 'reload' },
@@ -184,19 +187,12 @@ function setupApplicationMenu() {
         },
         {
           label: 'Send to Terminal',
-          accelerator: 'CmdOrCtrl+Enter',
-          click: () => {
-            // Send scratch content to active terminal (same as send button)
-            if (!mainWindow || mainWindow.isDestroyed()) return;
-            mainWindow.webContents.executeJavaScript(`{
-              const btn = document.getElementById('send-btn');
-              if (btn) btn.click();
-            }`).catch(() => {});
-          },
+          ...displayOnly('CmdOrCtrl+Enter'),
+          click: () => dispatchToRenderer('send_to_terminal'),
         },
         {
           label: 'Undo Last Send',
-          accelerator: 'CmdOrCtrl+Shift+Z',
+          ...displayOnly('CmdOrCtrl+Shift+Z'),
           click: () => dispatchToRenderer('undo_last_send'),
         },
       ],

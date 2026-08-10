@@ -300,8 +300,15 @@ function renderProjectList() {
       e.preventDefault();
       el.classList.remove('drag-over');
       if (!draggedProjectEl || draggedProjectEl === el) return;
-      // Reorder: insert dragged before target
-      projectList.insertBefore(draggedProjectEl, el);
+      // 常に before に挿すと下方向への移動が無効化され、最下段にも置けない。
+      // ポインタが対象の中点より下なら after に挿す。
+      const rect = el.getBoundingClientRect();
+      const insertAfter = e.clientY > rect.top + rect.height / 2;
+      if (insertAfter) {
+        projectList.insertBefore(draggedProjectEl, el.nextSibling);
+      } else {
+        projectList.insertBefore(draggedProjectEl, el);
+      }
       saveProjectOrder();
     });
     projectList.appendChild(el);
@@ -565,6 +572,7 @@ function insertNameToTerminal(filePath) {
 let contextMenuEntry = null;
 
 function showContextMenu(x, y, entry) {
+  hideTabContextMenu();
   contextMenuEntry = entry;
   contextMenu.classList.remove('hidden');
   contextMenu.style.left = x + 'px';
@@ -612,6 +620,9 @@ document.addEventListener('contextmenu', (e) => {
 let tabContextTarget = null; // { kind, tabId, filePath, previewPath }
 
 function showTabContextMenu(x, y, target) {
+  // タブ側の contextmenu は stopPropagation するため document 側の hide が走らない。
+  // 2つのメニューが同時に開くと、古い方が前のターゲットに対して発火する。
+  hideContextMenu();
   tabContextTarget = target;
   tabContextMenu.innerHTML = '';
   const items = buildTabMenuItems(target);
@@ -689,20 +700,25 @@ document.addEventListener('contextmenu', (e) => {
 function renameTerminalTab(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
-  showPrompt('Rename Tab', 'Enter new label:', t.command.replace(/\.exe$/, '')).then((newName) => {
+  // t.command は起動コマンド（送信方式判定・待機検出・レイアウト復元に使う機能状態）。
+  // 表示名は t.label に分けて持つ。ここを混ぜると改名したタブが復元できなくなる。
+  showPrompt('Rename Tab', 'Enter new label:', t.label).then((newName) => {
     if (!newName) return;
+    t.label = newName;
     const labelEl = t.tabElement.querySelector('.tab-label');
     if (labelEl) labelEl.textContent = newName;
-    t.command = newName; // update display name
+    updateSendTarget();
+    saveLayout();
   });
 }
 
 function renameScratchTab() {
   const scratchFile = openFiles.get(SCRATCH_PATH);
   if (!scratchFile) return;
-  showPrompt('Rename Tab', 'Enter new label:', scratchFile.tabEl.querySelector('.tab-label')?.textContent || 'scratch').then((newName) => {
+  // scratch タブは .editor-tab-name で描画されている（.tab-label はターミナルタブ用）
+  const labelEl = scratchFile.tabEl.querySelector('.editor-tab-name');
+  showPrompt('Rename Tab', 'Enter new label:', labelEl?.textContent || 'scratch').then((newName) => {
     if (!newName) return;
-    const labelEl = scratchFile.tabEl.querySelector('.tab-label');
     if (labelEl) labelEl.textContent = newName;
   });
 }
@@ -1657,7 +1673,7 @@ function updateSendTarget() {
   } else {
     const t = tabs.get(activeTabId);
     if (t) {
-      sendTarget.textContent = `→ ${t.command.replace('.exe', '')}`;
+      sendTarget.textContent = `→ ${t.label}`;
       sendBtn.disabled = false;
     }
   }
@@ -1699,7 +1715,7 @@ document.addEventListener('mouseup', () => {
 // Terminal management
 // ============================================================
 
-async function createTerminal(command, cwd, projectId) {
+async function createTerminal(command, cwd, projectId, savedLabel) {
   const terminal = new Terminal({
     fontSize: 14,
     fontFamily: 'Consolas, "Courier New", monospace',
@@ -1759,10 +1775,10 @@ async function createTerminal(command, cwd, projectId) {
   });
 
   const tabId = ++tabCounter;
-  const label = command.replace('.exe', '');
+  const label = savedLabel || command.replace('.exe', '');
   const tabEl = document.createElement('div');
   tabEl.className = 'tab';
-  tabEl.innerHTML = `<span class="tab-status idle"></span><span class="tab-label">${label}</span><span class="tab-close">\u00d7</span>`;
+  tabEl.innerHTML = `<span class="tab-status idle"></span><span class="tab-label">${escapeHtml(label)}</span><span class="tab-close">\u00d7</span>`;
   tabEl.dataset.id = tabId;
 
   tabEl.addEventListener('click', (e) => {
@@ -1821,7 +1837,7 @@ async function createTerminal(command, cwd, projectId) {
 
   tabBar.insertBefore(tabEl, newTabBtn);
 
-  tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false, pinnedToBottom: true });
+  tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, label, cwd, waiting: false, pinnedToBottom: true });
 
   // A2: Use xterm's buffer-level event; DOM scroll events on the viewport do
   // not bubble to termEl.
@@ -2153,19 +2169,23 @@ fileTreeRestoreBtn.addEventListener('click', () => {
   applyCollapseState();
 });
 
+function toggleBothColumns() {
+  const bothCollapsed = sidebarCollapsed && fileTreeCollapsed;
+  if (bothCollapsed) {
+    sidebarCollapsed = false;
+    fileTreeCollapsed = false;
+  } else {
+    sidebarCollapsed = true;
+    fileTreeCollapsed = true;
+  }
+  applyCollapseState();
+}
+
 // Ctrl+B: toggle both columns
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'b') {
     e.preventDefault();
-    const bothCollapsed = sidebarCollapsed && fileTreeCollapsed;
-    if (bothCollapsed) {
-      sidebarCollapsed = false;
-      fileTreeCollapsed = false;
-    } else {
-      sidebarCollapsed = true;
-      fileTreeCollapsed = true;
-    }
-    applyCollapseState();
+    toggleBothColumns();
   }
 });
 
@@ -2313,6 +2333,7 @@ async function saveLayout() {
     activeProjectId,
     tabs: Array.from(tabs.values()).map(t => ({
       command: t.command,
+      label: t.label,
       cwd: t.cwd,
       projectId: t.projectId,
     })),
@@ -2514,12 +2535,14 @@ register('focus_terminal', ({ tabId }) => {
   switchTab(tabId);
 });
 
-register('create_terminal', ({ command, cwd, projectId } = {}) => {
-  // A8: defaults for menu-invoked creation
-  const cmd = command || 'devin';
+register('create_terminal', ({ command, cwd, projectId, label } = {}) => {
+  // A8: メニューからの呼び出し用デフォルト。
+  // 新規タブのドロップダウンはインストール済みのツールだけを出すため、
+  // ここで特定の AI CLI を決め打ちすると未インストール環境で必ず失敗する。
+  const cmd = command || defaultShell();
   const cwd_ = cwd || (projects.get(activeProjectId)?.path);
   const pid = projectId || activeProjectId;
-  return createTerminal(cmd, cwd_, pid);
+  return createTerminal(cmd, cwd_, pid, label);
 });
 
 // A8: commands for application menu access
@@ -2533,6 +2556,12 @@ register('new_file', () => {
 
 register('new_folder', () => {
   treeNewFolderBtn.click();
+});
+
+// A8: メニューからのサイドバー開閉。合成キーイベントを送らず、
+// renderer 側の実処理を直接呼ぶ（L4 の toggleBothColumns と同じ経路）。
+register('toggle_sidebar', () => {
+  toggleBothColumns();
 });
 
 register('close_terminal', ({ tabId }) => {

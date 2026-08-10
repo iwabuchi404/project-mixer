@@ -79,3 +79,39 @@ test('packaged app includes the main-process file inspection module', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.ok(pkg.build.files.includes('src/files/**/*'));
 });
+
+// register()/dispatch() は COMMAND_TYPES に無い名前で throw する。
+// renderer.js のトップレベルで register するため、定義漏れは起動そのものを壊す。
+// 単体テストは renderer をブラウザ環境で読み込まないので、静的に突き合わせる。
+test('every command used by the renderer is declared in COMMAND_TYPES', () => {
+  const types = loadBundledModule(path.join(__dirname, '..', 'src', 'commands', 'types.js'));
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+
+  const used = new Set();
+  for (const match of renderer.matchAll(/\b(?:register|dispatch)\(\s*'([a-z_]+)'/g)) {
+    used.add(match[1]);
+  }
+
+  assert.ok(used.has('add_project'), 'sanity: renderer should use add_project');
+  const undeclared = [...used].filter((name) => !types.COMMAND_TYPES[name]);
+  assert.deepEqual(undeclared, [], `undeclared commands: ${undeclared.join(', ')}`);
+});
+
+// メニューのアクセラレータは keydown より先に消費されるため、
+// ターミナルが使うキーは registerAccelerator:false で登録しない。
+test('menu accelerators that collide with terminal keys are display-only', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const menuSource = main.slice(main.indexOf('function setupApplicationMenu'));
+
+  for (const key of ['CmdOrCtrl+S', 'CmdOrCtrl+B', 'CmdOrCtrl+Enter', 'CmdOrCtrl+Shift+Z']) {
+    assert.ok(
+      menuSource.includes(`displayOnly('${key}')`),
+      `${key} must be registered as display-only`,
+    );
+    assert.ok(
+      !menuSource.includes(`accelerator: '${key}'`),
+      `${key} must not be a live menu accelerator`,
+    );
+  }
+  assert.ok(!menuSource.includes(`'CmdOrCtrl+N'`), 'Ctrl+N must not be taken from the terminal');
+});

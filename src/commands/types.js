@@ -56,7 +56,7 @@ export const COMMAND_TYPES = {
     returns: 'void',
   },
   create_terminal: {
-    args: { command: 'string', cwd: 'string?', projectId: 'string?' },
+    args: { command: 'string', cwd: 'string?', projectId: 'string?', label: 'string?' },
     returns: 'number',
   },
   close_terminal: {
@@ -70,5 +70,22 @@ export const COMMAND_TYPES = {
   get_focus: {
     args: {},
     returns: 'FocusState',
+  },
+  // A8: アプリケーションメニューから既存 UI を呼ぶためのコマンド
+  add_project: {
+    args: {},
+    returns: 'void',
+  },
+  new_file: {
+    args: {},
+    returns: 'void',
+  },
+  new_folder: {
+    args: {},
+    returns: 'void',
+  },
+  toggle_sidebar: {
+    args: {},
+    returns: 'void',
   },
 };
