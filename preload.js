@@ -56,4 +56,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // A3: Drag & drop file path resolution (Electron 31+ replacement for File.path)
   getPathForFile: (file) => webUtils.getPathForFile(file),
+
+  // Phase 3.1: kamox dashboard integration
+  kamoxUpdateBounds: () => ipcRenderer.invoke('kamox:update-bounds'),
+  kamoxSwitchProject: (projectPath, projectName) => ipcRenderer.invoke('kamox:switch-project', { projectPath, projectName }),
 });
