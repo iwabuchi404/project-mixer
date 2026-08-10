@@ -9,6 +9,7 @@ const { execSync } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
+const { isProbablyBinary } = require('./src/files/content.cjs');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -351,8 +352,11 @@ ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
 
 ipcMain.handle('fs:readFile', async (event, { filePath }) => {
   try {
-    const content = await fsp.readFile(filePath, 'utf-8');
-    return { success: true, content };
+    const buffer = await fsp.readFile(filePath);
+    if (isProbablyBinary(buffer)) {
+      return { success: true, isBinary: true, content: null };
+    }
+    return { success: true, isBinary: false, content: buffer.toString('utf-8') };
   } catch (e) {
     return { success: false, error: e.message };
   }

@@ -10,6 +10,14 @@ import { register, dispatch } from './src/commands/registry.js';
 import { getState, setState, buildFocusState, getProjectScratchContent } from './src/store/index.js';
 import { calculatePreviewWidth, getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
 import { PREVIEW_CSP } from './src/preview/security.js';
+import {
+  INTERNAL_FILE_MIME,
+  captureExpandedPaneWidth,
+  getEditorSurfaceKind,
+  isTerminalPinnedToBottom,
+  quotePathForCommand,
+  shouldOpenInOsByName,
+} from './src/phase25/state.js';
 
 // ============================================================
 // State
@@ -85,6 +93,7 @@ const fileTreeHeader = document.getElementById('file-tree-header');
 const fileTreeTitle = document.getElementById('file-tree-title');
 const tabBar = document.getElementById('tab-bar');
 const terminalContainer = document.getElementById('terminal-container');
+const terminalPane = document.getElementById('terminal-pane');
 const newTabBtn = document.getElementById('new-tab-btn');
 const memDisplay = document.getElementById('mem-display');
 const editorPane = document.getElementById('editor-pane');
@@ -167,11 +176,12 @@ function detectWaiting(command, data) {
 window.api.onPtyData(({ id, data }) => {
   for (const [tabId, t] of tabs) {
     if (t.ptyId === id) {
-      t.terminal.write(data);
-      // A2: only auto-scroll if user was already at the bottom
-      if (t.pinnedToBottom) {
-        t.terminal.scrollToBottom();
-      }
+      const shouldFollowOutput = t.pinnedToBottom;
+      t.terminal.write(data, () => {
+        if (shouldFollowOutput && tabs.get(tabId) === t) {
+          t.terminal.scrollToBottom();
+        }
+      });
       const wasWaiting = t.waiting;
       t.waiting = detectWaiting(t.command, data);
       if (t.waiting !== wasWaiting) {
@@ -458,6 +468,13 @@ function createTreeItem(entry, depth) {
   });
 
   if (!entry.isDirectory) {
+    el.draggable = true;
+    el.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData(INTERNAL_FILE_MIME, entry.path);
+      e.dataTransfer.setData('text/plain', entry.path);
+    });
+
     el.addEventListener('dblclick', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -625,6 +642,7 @@ let tempTabCounter = 0;
 const projectEditorStates = new Map();
 let activeEditorProjectId = null;
 let editorStateInitialized = false;
+let savedScratchEditorHeight = null;
 
 let draggedEditorTab = null;
 
@@ -684,6 +702,8 @@ function switchProjectEditor(projectId) {
 
   editorStateInitialized = true;
   editorTabBar.appendChild(newScratchTabBtn);
+  const backgroundEditor = openFiles.get(activeFilePath || SCRATCH_PATH);
+  if (backgroundEditor) applyEditorSurface(backgroundEditor);
   const shouldFocusPreview = activeSurface === 'preview' && !!activePreviewPath;
   clearPreviewContent();
   if (activePreviewPath) {
@@ -889,10 +909,25 @@ hr { border:0; border-top:1px solid #21262d; }
 
 async function openFileInPreview(filePath, name) {
   const projectId = activeEditorProjectId;
-  const previewPath = `preview:${filePath}`;
+  if (shouldOpenInOsByName(name)) {
+    await window.api.openInOs(filePath);
+    return;
+  }
+  const previewPath = `preview:${projectId}:${filePath}`;
   if (previewFiles.has(previewPath)) {
     switchPreviewTab(previewPath);
     return;
+  }
+
+  let initialContent;
+  if (!isImage(name)) {
+    const result = await window.api.readFile(filePath);
+    if (!result.success || activeEditorProjectId !== projectId) return;
+    if (result.isBinary) {
+      await window.api.openInOs(filePath);
+      return;
+    }
+    initialContent = result.content;
   }
 
   const fileData = {
@@ -902,6 +937,7 @@ async function openFileInPreview(filePath, name) {
     isPreview: true,
     previewPath,
     projectId,
+    initialContent,
   };
 
   const tabEl = document.createElement('div');
@@ -966,27 +1002,44 @@ function isActivePreview(f) {
   return activeEditorProjectId === f.projectId && activePreviewPath === f.previewPath;
 }
 
+async function readPreviewText(f) {
+  if (f.initialContent !== undefined) {
+    const content = f.initialContent;
+    f.initialContent = undefined;
+    return content;
+  }
+
+  const result = await window.api.readFile(f.path);
+  if (!result.success || !isActivePreview(f)) return null;
+  if (result.isBinary) {
+    await window.api.openInOs(f.path);
+    if (isActivePreview(f)) closePreviewTab(f.previewPath);
+    return null;
+  }
+  return result.content;
+}
+
 async function loadPreviewContent(f) {
   if (isImage(f.name)) {
     if (!isActivePreview(f)) return;
     previewWebview.src = toFileUrl(f.path);
   } else if (isHtml(f.name)) {
-    const result = await window.api.readFile(f.path);
-    if (!result.success || !isActivePreview(f)) return;
+    const content = await readPreviewText(f);
+    if (content === null || !isActivePreview(f)) return;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
-    loadPreviewHtml(buildSafePreviewDocument(result.content, baseUrl));
+    loadPreviewHtml(buildSafePreviewDocument(content, baseUrl));
   } else if (isMarkdown(f.name)) {
-    const result = await window.api.readFile(f.path);
-    if (!result.success || !isActivePreview(f)) return;
+    const content = await readPreviewText(f);
+    if (content === null || !isActivePreview(f)) return;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
-    const markdownHtml = `<body class="markdown-body">${marked.parse(result.content)}</body>`;
+    const markdownHtml = `<body class="markdown-body">${marked.parse(content)}</body>`;
     loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS));
   } else {
-    // A4: show text/code files as read-only preview with syntax highlighting
-    const result = await window.api.readFile(f.path);
-    if (!result.success || !isActivePreview(f)) return;
+    // A4: show text/code files as a safe read-only preview.
+    const content = await readPreviewText(f);
+    if (content === null || !isActivePreview(f)) return;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
-    const escaped = result.content
+    const escaped = content
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
@@ -1050,6 +1103,10 @@ function closePreviewTab(previewPath) {
 
 async function openFileInEditor(filePath, name) {
   const projectId = activeEditorProjectId;
+  if (shouldOpenInOsByName(name)) {
+    await window.api.openInOs(filePath);
+    return;
+  }
   if (openFiles.has(filePath)) {
     switchEditorTab(filePath);
     return;
@@ -1058,6 +1115,10 @@ async function openFileInEditor(filePath, name) {
   const result = await window.api.readFile(filePath);
   if (!result.success) return;
   if (activeEditorProjectId !== projectId) return;
+  if (result.isBinary) {
+    await window.api.openInOs(filePath);
+    return;
+  }
 
   const fileData = {
     path: filePath,
@@ -1094,7 +1155,6 @@ async function openFileInEditor(filePath, name) {
   fileData.tabEl = tabEl;
   openFiles.set(filePath, fileData);
 
-  showEditorPane();
   switchEditorTab(filePath);
 }
 
@@ -1112,6 +1172,7 @@ function switchEditorTab(filePath) {
   activeFilePath = filePath;
   activeSurface = 'editor';
   setState({ activeFilePath: filePath, isPreview: false });
+  applyEditorSurface(f);
 
   editorTextarea.classList.remove('hidden');
   editorTextarea.value = f.content;
@@ -1143,15 +1204,39 @@ function closeEditorTab(filePath) {
 
 function showEditorPane() {
   editorPane.classList.remove('hidden');
+  editorPane.classList.remove('central');
+  terminalPane.classList.remove('hidden');
   splitter.classList.remove('hidden');
-  if (!editorPane.style.height) {
-    editorPane.style.height = Math.max(200, Math.floor(window.innerHeight * 0.4)) + 'px';
+  const defaultHeight = Math.max(200, Math.floor(window.innerHeight * 0.4));
+  editorPane.style.height = `${savedScratchEditorHeight || defaultHeight}px`;
+  requestAnimationFrame(handleResize);
+}
+
+function showMainEditorSurface() {
+  if (!editorPane.classList.contains('central') && editorPane.offsetHeight > 0) {
+    savedScratchEditorHeight = editorPane.offsetHeight;
+  }
+  terminalPane.classList.add('hidden');
+  splitter.classList.add('hidden');
+  editorPane.classList.remove('hidden');
+  editorPane.classList.add('central');
+  editorPane.style.height = '';
+}
+
+function applyEditorSurface(file) {
+  if (getEditorSurfaceKind(file) === 'scratch') {
+    showEditorPane();
+  } else {
+    showMainEditorSurface();
   }
 }
 
 function hideEditorPane() {
   editorPane.classList.add('hidden');
+  editorPane.classList.remove('central');
+  terminalPane.classList.remove('hidden');
   splitter.classList.add('hidden');
+  requestAnimationFrame(handleResize);
 }
 
 function updateEditorDirty(filePath) {
@@ -1300,6 +1385,7 @@ async function saveActiveFile() {
     openFiles.set(savePath, f);
     activeFilePath = savePath;
     setState({ activeFilePath: savePath, isPreview: false, scratchContent: getState().scratchContent });
+    applyEditorSurface(f);
     updateEditorDirty(savePath);
     // Refresh file tree to show the new file
     if (project) await loadFileTree(project.path);
@@ -1423,6 +1509,7 @@ document.addEventListener('mousemove', (e) => {
 document.addEventListener('mouseup', () => {
   if (splitterDragging) {
     splitterDragging = false;
+    savedScratchEditorHeight = editorPane.offsetHeight;
     document.body.style.cursor = '';
   }
 });
@@ -1548,15 +1635,14 @@ async function createTerminal(command, cwd, projectId) {
 
   tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, cwd, waiting: false, pinnedToBottom: true });
 
-  // A2: Track scroll position to implement pinned-to-bottom behavior
-  // xterm.js doesn't expose a direct "is at bottom" API, so we use
-  // the viewport's scrollTop vs scrollHeight - clientHeight
-  termEl.addEventListener('scroll', () => {
-    const viewport = termEl.querySelector('.xterm-viewport');
-    if (!viewport) return;
-    const isAtBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
-    tabs.get(tabId).pinnedToBottom = isAtBottom;
-  }, { passive: true });
+  // A2: Use xterm's buffer-level event; DOM scroll events on the viewport do
+  // not bubble to termEl.
+  terminal.onScroll(() => {
+    const current = tabs.get(tabId);
+    if (current) {
+      current.pinnedToBottom = isTerminalPinnedToBottom(terminal.buffer.active);
+    }
+  });
 
   // Only switch to new tab if it belongs to the active project
   if (projectId === activeProjectId) {
@@ -1607,25 +1693,33 @@ function switchTab(tabId) {
 
   t.termEl.style.display = 'block';
   t.tabElement.classList.add('active');
-  // Guard against 0-dimension fits
-  const rect = t.termEl.getBoundingClientRect();
-  if (rect.width > 0 && rect.height > 0) {
-    const oldCols = t.terminal.cols;
-    const oldRows = t.terminal.rows;
-    t.fitAddon.fit();
-    if (t.terminal.cols !== oldCols || t.terminal.rows !== oldRows) {
-      window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
-    }
-  }
-  t.terminal.focus();
-  // A2: restore scroll position based on pinnedToBottom state
-  if (t.pinnedToBottom) {
-    t.terminal.scrollToBottom();
-  }
   activeTabId = tabId;
   projectActiveTab.set(t.projectId, tabId);
   setState({ activeTerminalTabId: tabId });
   updateSendTarget();
+
+  // Wait until display/layout changes have settled before measuring.
+  requestAnimationFrame(() => {
+    if (activeTabId !== tabId || t.termEl.style.display === 'none') return;
+    const shouldFollow = t.pinnedToBottom;
+    if (!resizeTerminalToContainer(t)) return;
+    t.pinnedToBottom = shouldFollow;
+    t.terminal.focus();
+    if (shouldFollow) t.terminal.scrollToBottom();
+  });
+}
+
+function resizeTerminalToContainer(t) {
+  const rect = t.termEl.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+
+  const oldCols = t.terminal.cols;
+  const oldRows = t.terminal.rows;
+  t.fitAddon.fit();
+  if (t.terminal.cols !== oldCols || t.terminal.rows !== oldRows) {
+    window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+  }
+  return true;
 }
 
 function closeTerminal(tabId) {
@@ -1759,20 +1853,9 @@ function handleResize() {
     if (activeTabId !== null) {
       const t = tabs.get(activeTabId);
       if (t && t.termEl.style.display !== 'none') {
-        // Guard against 0-dimension fits (container not yet laid out)
-        const rect = t.termEl.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-        const oldCols = t.terminal.cols;
-        const oldRows = t.terminal.rows;
-        t.fitAddon.fit();
-        // Only send resize if dimensions actually changed
-        if (t.terminal.cols !== oldCols || t.terminal.rows !== oldRows) {
-          window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
-        }
-        // A2: only scroll to bottom if user was already at the bottom
-        if (t.pinnedToBottom) {
-          t.terminal.scrollToBottom();
-        }
+        const shouldFollow = t.pinnedToBottom;
+        resizeTerminalToContainer(t);
+        t.pinnedToBottom = shouldFollow;
       }
     }
   }, 50);
@@ -1806,28 +1889,37 @@ let savedSidebarWidth = 200;
 let savedFileTreeWidth = 240;
 
 function applyCollapseState() {
+  savedSidebarWidth = captureExpandedPaneWidth({
+    isCollapsed: sidebar.classList.contains('collapsed'),
+    measuredWidth: sidebar.offsetWidth,
+    savedWidth: savedSidebarWidth,
+  });
+  savedFileTreeWidth = captureExpandedPaneWidth({
+    isCollapsed: fileTreePane.classList.contains('collapsed'),
+    measuredWidth: fileTreePane.offsetWidth,
+    savedWidth: savedFileTreeWidth,
+  });
+
   if (sidebarCollapsed) {
     sidebar.classList.add('collapsed');
     vsplitter1.classList.add('hidden');
     sidebarRestoreBar.classList.remove('hidden');
-    savedSidebarWidth = sidebar.offsetWidth || savedSidebarWidth;
   } else {
+    sidebar.style.width = savedSidebarWidth + 'px';
     sidebar.classList.remove('collapsed');
     vsplitter1.classList.remove('hidden');
     sidebarRestoreBar.classList.add('hidden');
-    if (sidebar.style.width === '0px') sidebar.style.width = savedSidebarWidth + 'px';
   }
 
   if (fileTreeCollapsed) {
     fileTreePane.classList.add('collapsed');
     vsplitter2.classList.add('hidden');
     fileTreeRestoreBar.classList.remove('hidden');
-    savedFileTreeWidth = fileTreePane.offsetWidth || savedFileTreeWidth;
   } else {
+    fileTreePane.style.width = savedFileTreeWidth + 'px';
     fileTreePane.classList.remove('collapsed');
     vsplitter2.classList.remove('hidden');
     fileTreeRestoreBar.classList.add('hidden');
-    if (fileTreePane.style.width === '0px') fileTreePane.style.width = savedFileTreeWidth + 'px';
   }
   handleResize();
   saveCollapseState();
@@ -1902,22 +1994,29 @@ loadCollapseState();
 //   terminal → insert path (no Enter)
 //   file-tree → nothing
 
+function hasFileDrop(dataTransfer) {
+  const types = Array.from(dataTransfer?.types || []);
+  return types.includes('Files') || types.includes(INTERNAL_FILE_MIME);
+}
+
 function getDroppedFilePaths(e) {
-  const files = [];
-  if (e.dataTransfer && e.dataTransfer.files) {
+  const paths = [];
+  if (e.dataTransfer?.files) {
     for (const file of e.dataTransfer.files) {
       try {
-        const path = window.api.getPathForFile(file);
-        if (path) files.push(path);
+        const filePath = window.api.getPathForFile(file);
+        if (filePath) paths.push(filePath);
       } catch {}
     }
   }
-  return files;
+  const internalPath = e.dataTransfer?.getData(INTERNAL_FILE_MIME);
+  if (internalPath) paths.push(internalPath);
+  return [...new Set(paths)];
 }
 
 // Preview pane: open file in preview
 previewPane.addEventListener('dragover', (e) => {
-  if (e.dataTransfer.types.includes('Files')) {
+  if (hasFileDrop(e.dataTransfer)) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   }
@@ -1934,7 +2033,7 @@ previewPane.addEventListener('drop', (e) => {
 // Main pane: open file in preview (same as preview for now)
 const mainPane = document.getElementById('main-pane');
 mainPane.addEventListener('dragover', (e) => {
-  if (e.dataTransfer.types.includes('Files')) {
+  if (hasFileDrop(e.dataTransfer)) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   }
@@ -1952,7 +2051,7 @@ mainPane.addEventListener('drop', (e) => {
 
 // Scratch (editor textarea): append path
 editorTextarea.addEventListener('dragover', (e) => {
-  if (e.dataTransfer.types.includes('Files')) {
+  if (hasFileDrop(e.dataTransfer)) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   }
@@ -1961,14 +2060,21 @@ editorTextarea.addEventListener('drop', (e) => {
   e.preventDefault();
   const paths = getDroppedFilePaths(e);
   if (paths.length > 0) {
-    const text = paths.join('\n') + '\n';
-    dispatch('append_to_scratch', { text });
+    const activeFile = openFiles.get(activeFilePath);
+    if (activeFile?.isScratch) {
+      dispatch('append_to_scratch', { text: paths.join('\n') });
+    } else {
+      for (const filePath of paths) {
+        const name = filePath.split(/[\\/]/).pop();
+        dispatch('open_preview', { path: filePath, name });
+      }
+    }
   }
 });
 
 // Terminal container: insert path (no Enter)
 terminalContainer.addEventListener('dragover', (e) => {
-  if (e.dataTransfer.types.includes('Files')) {
+  if (hasFileDrop(e.dataTransfer)) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   }
@@ -1979,9 +2085,35 @@ terminalContainer.addEventListener('drop', (e) => {
   if (paths.length > 0 && activeTabId !== null) {
     const t = tabs.get(activeTabId);
     if (t) {
-      t.terminal.paste(paths.join(' '));
+      const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, t.command));
+      t.terminal.paste(quotedPaths.join(' '));
     }
   }
+});
+
+// File tree is explicitly a no-op drop target. Prevent Chromium's default file
+// navigation so dropping a file here cannot replace the application document.
+fileTree.addEventListener('dragover', (e) => {
+  if (hasFileDrop(e.dataTransfer)) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'none';
+  }
+});
+fileTree.addEventListener('drop', (e) => {
+  if (hasFileDrop(e.dataTransfer)) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+});
+
+// Prevent an unhandled OS file drop from navigating the BrowserWindow away
+// from index.html.
+document.addEventListener('dragover', (e) => {
+  if (hasFileDrop(e.dataTransfer)) e.preventDefault();
+});
+document.addEventListener('drop', (e) => {
+  if (hasFileDrop(e.dataTransfer)) e.preventDefault();
 });
 
 // ============================================================
@@ -2026,7 +2158,7 @@ async function loadLayout() {
 // Vertical splitters (sidebar | file-tree | main-pane)
 // ============================================================
 
-function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight) {
+function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight, onResizeEnd) {
   let dragging = false;
   let startX = 0;
   let startWidth = 0;
@@ -2051,6 +2183,7 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight) {
     if (dragging) {
       dragging = false;
       document.body.style.cursor = '';
+      if (onResizeEnd) onResizeEnd(leftEl.offsetWidth);
     }
   });
 }
@@ -2091,8 +2224,14 @@ function makePreviewSplitter(splitterEl, mainEl, previewEl, minMain, minPreview)
   });
 }
 
-makeVSplitter(vsplitter1, document.getElementById('sidebar'), document.getElementById('file-tree-pane'), 120, 300);
-makeVSplitter(vsplitter2, document.getElementById('file-tree-pane'), document.getElementById('main-pane'), 120, 300);
+makeVSplitter(vsplitter1, sidebar, fileTreePane, 120, 300, (width) => {
+  savedSidebarWidth = width;
+  saveCollapseState();
+});
+makeVSplitter(vsplitter2, fileTreePane, document.getElementById('main-pane'), 120, 300, (width) => {
+  savedFileTreeWidth = width;
+  saveCollapseState();
+});
 makePreviewSplitter(vsplitter3, document.getElementById('main-pane'), document.getElementById('preview-pane'), 200, 150);
 
 // ============================================================
@@ -2178,6 +2317,12 @@ register('undo_last_send', () => {
 
 // focus_terminal: switch to a terminal tab
 register('focus_terminal', ({ tabId }) => {
+  // A central file editor intentionally hides the terminal surface. An
+  // explicit focus request must therefore restore the scratch/terminal
+  // layout before selecting the requested terminal tab.
+  if (terminalPane.classList.contains('hidden') && openFiles.has(SCRATCH_PATH)) {
+    switchEditorTab(SCRATCH_PATH);
+  }
   switchTab(tabId);
 });
 

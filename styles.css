@@ -287,6 +287,16 @@ body {
   display: none;
 }
 
+#editor-pane.central {
+  height: auto;
+  flex: 1;
+  border-top: none;
+}
+
+#editor-pane.central #send-bar {
+  display: none;
+}
+
 #editor-tab-bar {
   display: flex;
   align-items: center;
@@ -572,6 +582,10 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+#terminal-pane.hidden {
+  display: none;
 }
 
 #tab-bar {
