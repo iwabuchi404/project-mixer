@@ -47,8 +47,8 @@ test('port record is replaced atomically without leaving a temp file', () => {
 });
 
 test('each MCP SSE session gets a separate server instance', () => {
-  const getFocus = async () => ({ project: null });
-  assert.notEqual(createMcpServer(getFocus), createMcpServer(getFocus));
+  const dispatchToRenderer = async (name) => ({ ok: true });
+  assert.notEqual(createMcpServer(dispatchToRenderer), createMcpServer(dispatchToRenderer));
 });
 
 test('packaged app includes the main-process MCP and port modules', () => {

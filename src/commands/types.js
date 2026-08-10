@@ -88,4 +88,21 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // 3.4 show_file: commands for external UI control
+  preview_open: {
+    args: { path: 'string', reason: 'string?', newTab: 'boolean?' },
+    returns: 'ShowFileResult',
+  },
+  preview_reveal: {
+    args: { line: 'number', endLine: 'number?' },
+    returns: 'void',
+  },
+  tab_activate: {
+    args: { filePath: 'string' },
+    returns: 'void',
+  },
+  project_set_badge: {
+    args: { projectId: 'string', kind: 'string' },
+    returns: 'void',
+  },
 };

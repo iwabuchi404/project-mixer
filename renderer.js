@@ -264,6 +264,7 @@ function renderProjectList() {
     el.innerHTML = `
       <span class="project-status idle"></span>
       <span class="project-name">${escapeHtml(p.name)}</span>
+      <span class="project-badge" data-id="${id}"></span>
       <span class="project-remove" data-id="${id}">×</span>
     `;
     el.addEventListener('click', (e) => {
@@ -2615,6 +2616,96 @@ register('new_folder', () => {
 // renderer 側の実処理を直接呼ぶ（L4 の toggleBothColumns と同じ経路）。
 register('toggle_sidebar', () => {
   toggleBothColumns();
+});
+
+// ============================================================
+// 3.4 show_file: external UI control commands
+// ============================================================
+
+// project_set_badge: show a notification dot on a project in the sidebar
+register('project_set_badge', ({ projectId, kind }) => {
+  const item = projectList.querySelector(`.project-item[data-project-id="${projectId}"]`);
+  if (!item) return;
+  const badge = item.querySelector('.project-badge');
+  if (!badge) return;
+  if (kind === 'clear' || !kind) {
+    badge.classList.remove('active');
+  } else {
+    badge.classList.add('active');
+  }
+});
+
+// tab_activate: switch to an existing tab by filePath
+register('tab_activate', ({ filePath }) => {
+  if (!filePath) return;
+  if (previewFiles.has(filePath)) {
+    switchPreviewTab(filePath);
+  } else if (openFiles.has(filePath)) {
+    switchEditorTab(filePath);
+  }
+});
+
+// preview_open: open a file in the preview area (show_file core)
+// Returns { shown: boolean, reason: string }
+register('preview_open', ({ path: filePath, reason, newTab }) => {
+  if (!filePath) return { shown: false, reason: 'no path' };
+
+  // Determine which project the file belongs to
+  let targetProjectId = null;
+  let targetProject = null;
+  for (const [id, p] of projects) {
+    if (filePath.startsWith(p.path)) {
+      targetProjectId = id;
+      targetProject = p;
+      break;
+    }
+  }
+  if (!targetProject) {
+    return { shown: false, reason: 'file not in any open project' };
+  }
+
+  const name = filePath.split(/[/\\]/).pop();
+  const previewPath = `preview:${targetProjectId}:${filePath}`;
+
+  // Case 1: same project — open in preview area
+  if (targetProjectId === activeProjectId) {
+    if (previewFiles.has(previewPath) && !newTab) {
+      // Reuse existing tab
+      switchPreviewTab(previewPath);
+    } else {
+      // Open new preview tab (openFileInPreview uses activeEditorProjectId)
+      // We need to ensure the editor project matches
+      if (activeEditorProjectId !== targetProjectId) {
+        switchProjectEditor(targetProjectId);
+      }
+      openFileInPreview(filePath, name);
+    }
+    // Mark the tab if a reason was provided
+    if (reason) {
+      const f = previewFiles.get(previewPath);
+      if (f) {
+        f.tabEl.classList.add('notified');
+        f.tabEl.title = filePath + (reason ? ` — ${reason}` : '');
+      }
+    }
+    return { shown: true, reason: 'opened in active project' };
+  }
+
+  // Case 2: different project — don't switch, just badge
+  dispatch('project_set_badge', { projectId: targetProjectId, kind: 'show_file' });
+  return { shown: false, reason: `file is in project "${targetProject.name}", badge added` };
+});
+
+// preview_reveal: scroll to a line in the active preview
+register('preview_reveal', ({ line, endLine }) => {
+  if (!line) return;
+  // For markdown previews, we can scroll the webview
+  // For now, send a message to the preview webview
+  try {
+    previewWebview.send('reveal-line', { line, endLine: endLine || line });
+  } catch {
+    // webview not ready
+  }
 });
 
 register('close_terminal', ({ tabId }) => {

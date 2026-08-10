@@ -226,13 +226,13 @@ app.whenReady().then(() => {
   createWindow();
   startHookServer();
   // Start MCP server (Phase 1.3) — port written to port.json for discovery
-  startMcpServer(MCP_BASE_PORT, async () => {
-    // get_focus: call the renderer's command dispatch directly
+  startMcpServer(MCP_BASE_PORT, async (commandName, args = {}) => {
+    // Dispatch commands to the renderer via executeJavaScript
     if (!mainWindow || mainWindow.isDestroyed()) {
       return { error: 'no window' };
     }
     return await mainWindow.webContents.executeJavaScript(
-      'window.__pmDispatch && window.__pmDispatch("get_focus")'
+      `window.__pmDispatch && window.__pmDispatch(${JSON.stringify(commandName)}, ${JSON.stringify(args)})`
     );
   }, (port) => {
     MCP_PORT = port;
@@ -299,6 +299,8 @@ ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
       ...process.env,
       TERM: 'xterm-256color',
       PROJECT_MIXER_PORT_FILE: portFile,
+      // 3.5: inject MCP server URL so agents can discover it
+      ...(MCP_PORT ? { PM_MCP_URL: `http://127.0.0.1:${MCP_PORT}/sse` } : {}),
     },
   });
 

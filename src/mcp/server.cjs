@@ -4,10 +4,11 @@
 // Uses Phase 0.2's port discovery mechanism.
 
 const http = require('http');
+const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
 
-function createMcpServer(getFocus) {
+function createMcpServer(dispatchToRenderer) {
   const mcpServer = new McpServer({
     name: 'project-mixer',
     version: '0.1.0',
@@ -21,11 +22,40 @@ function createMcpServer(getFocus) {
     'active terminal tab, and scratch content.',
     {},
     async () => {
-      const focus = await getFocus();
+      const focus = await dispatchToRenderer('get_focus');
       return {
         content: [{
           type: 'text',
           text: JSON.stringify(focus, null, 2),
+        }],
+      };
+    }
+  );
+
+  // 3.4 show_file: open a file in the human's preview area
+  mcpServer.tool(
+    'show_file',
+    'Open a file in the human\'s preview area so they can see what you\'re ' +
+    'referring to. If the human is viewing the same project, the file opens ' +
+    'in the preview pane. If the file is in a different project, a badge ' +
+    'appears on that project in the sidebar (the project does NOT switch). ' +
+    'Returns { shown: boolean, reason: string }.',
+    {
+      path: z.string().describe('Absolute path to the file to show'),
+      reason: z.string().optional().describe('Short label for why you\'re showing this (e.g. "fixing typo here")'),
+      line: z.number().optional().describe('Line number to scroll to (1-based)'),
+      endLine: z.number().optional().describe('End of line range to highlight'),
+      new_tab: z.boolean().optional().describe('Force a new tab instead of reusing existing (default: false)'),
+    },
+    async ({ path, reason, line, endLine, new_tab }) => {
+      const result = await dispatchToRenderer('preview_open', { path, reason, newTab: new_tab });
+      if (result?.shown && line) {
+        await dispatchToRenderer('preview_reveal', { line, endLine });
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(result, null, 2),
         }],
       };
     }
@@ -37,10 +67,10 @@ function createMcpServer(getFocus) {
 /**
  * Start the MCP server with SSE transport.
  * @param {number} basePort - Base port to try
- * @param {function} getFocus - Returns the focus state from the renderer
+ * @param {function} dispatchToRenderer - (commandName, args) => Promise<any>
  * @param {function} onReady - Called with (port) when listening
  */
-function startMcpServer(basePort, getFocus, onReady) {
+function startMcpServer(basePort, dispatchToRenderer, onReady) {
 
   // SSE transport: one transport per connection, stored by session ID
   const transports = new Map();
@@ -94,7 +124,7 @@ function startMcpServer(basePort, getFocus, onReady) {
       // SSE endpoint: GET /sse — opens the event stream
       if (req.method === 'GET' && req.url.split('?')[0] === '/sse') {
         const transport = new SSEServerTransport('/messages', res);
-        const mcpServer = createMcpServer(getFocus);
+        const mcpServer = createMcpServer(dispatchToRenderer);
         const sessionId = transport.sessionId;
         transports.set(sessionId, { transport, mcpServer });
 

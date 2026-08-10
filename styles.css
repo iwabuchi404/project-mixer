@@ -154,6 +154,22 @@ body {
   color: #f44;
 }
 
+/* 3.4 show_file: project badge for cross-project notifications */
+.project-badge {
+  display: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #0c7bef;
+  margin-left: auto;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+.project-badge.active {
+  display: block;
+}
+
 /* A7: project reorder drag styles */
 .project-item.dragging {
   opacity: 0.5;
@@ -511,6 +527,11 @@ body {
 
 .preview-tab .editor-tab-name::before {
   content: "\1F441\00A0";
+}
+
+/* 3.4 show_file: mark tabs created by agent show_file */
+.preview-tab.notified .editor-tab-name::before {
+  content: "\2755\00A0";
 }
 
 .preview-tab .editor-tab-close {
