@@ -145,6 +145,7 @@ const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
 const pushFocusCheckbox = document.getElementById('push-focus-checkbox');
 const titleBarContext = document.getElementById('title-bar-context');
+const titleBarPath = document.getElementById('title-bar-path');
 const toastRegion = document.getElementById('toast-region');
 const errorRegion = document.getElementById('error-region');
 const newScratchTabBtn = document.createElement('button');
@@ -439,7 +440,13 @@ async function selectProject(projectId) {
   activeProjectId = projectId;
   setState({ activeProjectId });
   dispatch('project_set_badge', { projectId, kind: 'clear' });
-  titleBarContext.textContent = projects.get(projectId)?.name || '';
+  // タイトルは「どのプロジェクトか」。名前が主役で、パスは補助。
+  // パスは画面の他のどこにも出ないため、同名プロジェクトや worktree の
+  // 取り違えを防ぐ唯一の手がかりになる。
+  const activeProject = projects.get(projectId);
+  titleBarContext.textContent = activeProject?.name || '';
+  titleBarPath.textContent = activeProject?.path || '';
+  titleBarPath.title = activeProject?.path || '';
   // Update editor state in store after switching project editor
   const activePreview = previewFiles.get(activePreviewPath);
   if (activeSurface === 'preview' && isPreviewForProject(activePreview, projectId)) {

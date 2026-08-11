@@ -1040,14 +1040,19 @@ textarea:focus-visible,
   letter-spacing: .08em;
 }
 
-.title-bar-title {
-  color: var(--g-5);
+/* タイトルは情報量の順に重みを付ける。
+   プロジェクト名が唯一の情報なので主役、パスは補助。 */
+#title-bar-context {
+  color: var(--g-6);
+  font-size: var(--t-lg);
 }
 
-#title-bar-context::before {
-  content: "/";
-  margin-right: var(--s-2);
-  color: var(--g-3);
+#title-bar-path {
+  overflow: hidden;
+  color: var(--g-4);
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 #app {
@@ -1221,7 +1226,9 @@ textarea:focus-visible,
   padding: var(--s-1);
   overflow-x: auto;
   overflow-y: hidden;
-  background: var(--g-1);
+  /* 地を最も暗くする。タブ面との明度差があって初めて gap:1px が
+     区切りとして見える（線を引かずに境界を出す規則） */
+  background: var(--g-0);
   border: 0;
 }
 
@@ -1230,7 +1237,6 @@ textarea:focus-visible,
   height: 28px;
   min-height: 28px;
   padding: 2px var(--s-1);
-  background: var(--g-2);
 }
 
 .main-tab,
@@ -1244,7 +1250,9 @@ textarea:focus-visible,
   height: 26px;
   padding: 0 var(--s-2);
   color: var(--g-4);
-  background: transparent;
+  /* 非アクティブタブも面を持つ。transparent だと地に溶けて
+     タブ同士の境目が消える */
+  background: var(--g-1);
   border: 0;
   border-radius: var(--r-1);
   font-size: var(--t-sm);
