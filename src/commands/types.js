@@ -31,10 +31,6 @@ export const COMMAND_TYPES = {
     args: { filePath: 'string' },
     returns: 'void',
   },
-  create_scratch_tab: {
-    args: {},
-    returns: 'void',
-  },
   append_to_scratch: {
     args: { text: 'string' },
     returns: 'void',

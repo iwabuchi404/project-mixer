@@ -23,6 +23,7 @@ if (IS_DEV) {
 }
 
 let mainWindow;
+let applicationMenu;
 const ptys = new Map(); // id -> { process, cwd, command }
 let ptyCounter = 0;
 
@@ -228,9 +229,23 @@ function setupApplicationMenu() {
     },
   ];
 
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
+  applicationMenu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(applicationMenu);
 }
+
+ipcMain.handle('menu:popup', (event, { x, y } = {}) => {
+  const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!applicationMenu || !ownerWindow || ownerWindow.isDestroyed()) return false;
+  return new Promise((resolve) => {
+    const options = {
+      window: ownerWindow,
+      callback: () => resolve(true),
+    };
+    if (Number.isFinite(x)) options.x = Math.round(x);
+    if (Number.isFinite(y)) options.y = Math.round(y);
+    applicationMenu.popup(options);
+  });
+});
 
 app.whenReady().then(() => {
   createWindow();
@@ -618,6 +633,11 @@ ipcMain.handle('dialog:saveFile', async (event, { defaultPath, defaultName }) =>
 // --- Open file in OS default app ---
 
 ipcMain.handle('shell:openPath', async (event, { filePath }) => {
+  // URLの場合は openExternal、ファイルパスの場合は openPath
+  if (/^https?:\/\//i.test(filePath)) {
+    await shell.openExternal(filePath);
+    return { success: true, error: null };
+  }
   const errorMsg = await shell.openPath(filePath);
   return { success: !errorMsg, error: errorMsg || null };
 });

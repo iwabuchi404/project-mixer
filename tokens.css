@@ -5,9 +5,10 @@
   --g-3: #2e333b;
   --g-4: #6b7280;
   --g-5: #c8ccd4;
-  --g-6: #f0f2f5;
+  --g-6: var(--g-5);
   --attn: #c08b4d;
-  --act: #4d8480;
+  --act: #5b9691;
+  --act-ink: #0d1412;
   --err: #b56b66;
   --ok: #5f9278;
   --s-1: 4px;
@@ -22,6 +23,12 @@
   --mono: "Cascadia Mono", "Consolas", monospace;
   --r-1: 3px;
   --r-2: 6px;
+  --scrollbar-size: 12px;
+  --scrollbar-border: 2px;
+  --scrollbar-radius: 6px;
+  --scrollbar-track: var(--g-1);
+  --scrollbar-thumb: var(--g-3);
+  --scrollbar-thumb-hover: var(--g-4);
   --shadow: 0 6px 20px rgba(0, 0, 0, .45), 0 0 0 1px rgba(0, 0, 0, .3);
   --move: 120ms ease-out;
 }

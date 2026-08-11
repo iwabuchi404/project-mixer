@@ -60,6 +60,7 @@
       "src/files/**/*",
       "index.html",
       "styles.css",
+      "scrollbars.css",
       "tokens.css",
       "dist/renderer.bundle.js",
       "dist/renderer.bundle.js.map",

@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('api', {
   // Memory
   memGet: () => ipcRenderer.invoke('mem:get'),
 
+  // Application menu
+  menuPopup: (x, y) => ipcRenderer.invoke('menu:popup', { x, y }),
+
   // Projects
   projectList: () => ipcRenderer.invoke('project:list'),
   projectAdd: (name, projPath) => ipcRenderer.invoke('project:add', { name, path: projPath }),

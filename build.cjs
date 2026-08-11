@@ -27,6 +27,9 @@ const buildOptions = {
   format: 'iife',
   target: ['es2020'],
   sourcemap: true,
+  loader: {
+    '.css': 'text',
+  },
   define: {
     'process.env.NODE_ENV': '"production"',
   },

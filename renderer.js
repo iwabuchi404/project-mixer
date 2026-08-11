@@ -6,6 +6,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import sharedScrollbarCss from './scrollbars.css';
 import { register, dispatch } from './src/commands/registry.js';
 import { getState, setState, buildFocusState, getProjectScratchContent } from './src/store/index.js';
 import {
@@ -43,6 +44,11 @@ let draggedTerminalTab = null;
 const IS_WIN = navigator.userAgent.includes('Windows');
 const IS_MAC = /Macintosh|MacIntel|MacPPC|Mac68K/.test(navigator.userAgent);
 const PLATFORM = IS_WIN ? 'win32' : IS_MAC ? 'darwin' : 'linux';
+const PREVIEW_FONT = {
+  win32: '"Cascadia Mono", Consolas, "BIZ UDGothic", "MS Gothic", monospace',
+  darwin: '"SF Mono", Menlo, Monaco, "Hiragino Sans", monospace',
+  linux: '"Noto Sans Mono CJK JP", "DejaVu Sans Mono", "Liberation Mono", monospace',
+}[PLATFORM];
 
 const WIN_COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
 const UNIX_COMMANDS = ['bash', 'zsh', 'sh', 'claude', 'codex', 'devin'];
@@ -99,14 +105,13 @@ const projectConfirmBtn = document.getElementById('project-confirm-btn');
 const fileTree = document.getElementById('file-tree');
 const fileTreeHeader = document.getElementById('file-tree-header');
 const fileTreeTitle = document.getElementById('file-tree-title');
+const navigationPane = document.getElementById('navigation-pane');
 const tabBar = document.getElementById('main-tab-bar');
 const mainSurface = document.getElementById('main-surface');
 const terminalContainer = document.getElementById('terminal-container');
 const terminalPane = document.getElementById('terminal-pane');
 const newTabBtn = document.getElementById('new-tab-btn');
-const memDisplay = document.getElementById('mem-display');
 const editorPane = document.getElementById('editor-pane');
-const editorTabBar = document.getElementById('editor-tab-bar');
 const editorTextarea = document.getElementById('editor-textarea');
 const fileEditorPane = document.getElementById('file-editor-pane');
 const fileEditorTextarea = document.getElementById('file-editor-textarea');
@@ -116,6 +121,7 @@ const previewTabBar = tabBar;
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
 const tabContextMenu = document.getElementById('tab-context-menu');
+const previewContextMenu = document.getElementById('preview-context-menu');
 const deleteConfirmModal = document.getElementById('delete-confirm-modal');
 const deleteConfirmMessage = document.getElementById('delete-confirm-message');
 const deleteCancelBtn = document.getElementById('delete-cancel-btn');
@@ -126,6 +132,12 @@ const promptLabel = document.getElementById('prompt-label');
 const promptInput = document.getElementById('prompt-input');
 const promptCancelBtn = document.getElementById('prompt-cancel-btn');
 const promptConfirmBtn = document.getElementById('prompt-confirm-btn');
+const confirmModal = document.getElementById('confirm-modal');
+const confirmTitle = document.getElementById('confirm-title');
+const confirmMessage = document.getElementById('confirm-message');
+const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
+const confirmOkBtn = document.getElementById('confirm-ok-btn');
+let confirmResolve = null;
 const treeReloadBtn = document.getElementById('tree-reload-btn');
 const treeNewFileBtn = document.getElementById('tree-new-file-btn');
 const treeNewFolderBtn = document.getElementById('tree-new-folder-btn');
@@ -141,17 +153,16 @@ const sidebarRestoreBtn = document.getElementById('sidebar-restore-btn');
 const fileTreeRestoreBtn = document.getElementById('file-tree-restore-btn');
 const statusLeft = document.getElementById('status-left');
 const statusRight = document.getElementById('status-right');
+const statusSystem = document.getElementById('status-system');
 const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
 const pushFocusCheckbox = document.getElementById('push-focus-checkbox');
 const titleBarContext = document.getElementById('title-bar-context');
 const titleBarPath = document.getElementById('title-bar-path');
+const appMenuBtn = document.getElementById('app-menu-btn');
+const scratchCollapseBtn = document.getElementById('scratch-collapse-btn');
 const toastRegion = document.getElementById('toast-region');
 const errorRegion = document.getElementById('error-region');
-const newScratchTabBtn = document.createElement('button');
-newScratchTabBtn.id = 'new-scratch-tab-btn';
-newScratchTabBtn.title = 'New scratch buffer';
-newScratchTabBtn.textContent = '+';
 
 const TAB_ICONS = {
   terminal: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 4 3.5 4L3 12M8 12h5"/></svg>',
@@ -159,6 +170,11 @@ const TAB_ICONS = {
   preview: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 8s2.2-4 6.2-4 6.2 4 6.2 4-2.2 4-6.2 4-6.2-4-6.2-4Z"/><circle cx="8" cy="8" r="1.8"/></svg>',
   browser: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2.5 8h11M8 2c1.7 1.6 2.6 3.6 2.6 6S9.7 12.4 8 14M8 2C6.3 3.6 5.4 5.6 5.4 8s.9 4.4 2.6 6"/></svg>',
   scratch: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10M4 10l6.8-6.8 2 2L6 12H4z"/></svg>',
+};
+
+const TREE_ICONS = {
+  folder: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.5h5l1.4 1.6h6.6v7.4h-13z"/></svg>',
+  file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3.5h3"/></svg>',
 };
 
 function tabIcon(kind) {
@@ -176,6 +192,9 @@ function activateMainTab(tabEl) {
 }
 
 function showMainSurface(kind) {
+  if (mainSurface.dataset.surface === 'preview' && kind !== 'preview') {
+    queueVisiblePreviewScrollCapture();
+  }
   terminalPane.classList.toggle('hidden', kind !== 'terminal');
   fileEditorPane.classList.toggle('hidden', kind !== 'file');
   previewPane.classList.toggle('hidden', kind !== 'preview');
@@ -438,6 +457,7 @@ async function saveProjectOrder() {
 async function selectProject(projectId) {
   switchProjectEditor(projectId);
   activeProjectId = projectId;
+  focusedTreeEntry = null;
   setState({ activeProjectId });
   dispatch('project_set_badge', { projectId, kind: 'clear' });
   // タイトルは「どのプロジェクトか」。名前が主役で、パスは補助。
@@ -467,7 +487,8 @@ async function selectProject(projectId) {
   const p = projects.get(projectId);
   if (p) {
     fileTreeTitle.textContent = p.name;
-    await loadFileTree(p.path);
+    // プロジェクトを跨ぐと展開状態は無意味になるので捨てる
+    await loadFileTree(p.path, { preserveState: false });
     window.api.hookSetup(p.path);
   }
   showProjectTabs(projectId);
@@ -560,12 +581,77 @@ projectPathInput.addEventListener('keydown', (e) => {
 // File tree
 // ============================================================
 
-async function loadFileTree(dirPath) {
+// 展開中のディレクトリを絶対パスで覚えておく。ツリーは再読込のたびに
+// 作り直されるため、DOM 側に状態を持たせると毎回失われる。
+const expandedTreePaths = new Set();
+
+async function loadFileTree(dirPath, { preserveState = true } = {}) {
+  const previousScroll = fileTree.scrollTop;
+  const previousSelection = preserveState ? focusedTreeEntry?.path || null : null;
+  if (!preserveState) expandedTreePaths.clear();
+
   fileTree.innerHTML = '';
+  fileTree.setAttribute('role', 'tree');
+  fileTree.setAttribute('aria-label', 'Project files');
   const entries = await window.api.readDir(dirPath);
   for (const entry of entries) {
     fileTree.appendChild(createTreeItem(entry, 0));
   }
+
+  if (!preserveState) {
+    focusedTreeEntry = null;
+    return;
+  }
+
+  await restoreTreeExpansion(fileTree);
+  restoreTreeSelection(previousSelection);
+  fileTree.scrollTop = previousScroll;
+}
+
+// 展開状態は親から順に復元する。子は展開して初めて DOM に現れるため、
+// 再帰的にたどる必要がある。
+async function restoreTreeExpansion(container) {
+  const items = Array.from(container.children).filter((el) => el.classList.contains('tree-item'));
+  for (const el of items) {
+    if (!el.dataset.isDirectory || !expandedTreePaths.has(el.dataset.path)) continue;
+    await el.__pmExpand?.();
+    const children = el.nextElementSibling;
+    if (children?.classList.contains('tree-children')) {
+      await restoreTreeExpansion(children);
+    }
+  }
+}
+
+function restoreTreeSelection(selectedPath) {
+  if (!selectedPath) return;
+  const el = fileTree.querySelector(`.tree-item[data-path="${cssEscape(selectedPath)}"]`);
+  // 再読込中にフォーカスを奪うと入力中のターミナルからカーソルが飛ぶ。
+  // 選択の見た目だけ戻し、キーボードフォーカスは動かさない。
+  if (el) selectTreeEntry(el, el.__pmEntry, { focus: false });
+}
+
+function cssEscape(value) {
+  return window.CSS?.escape ? window.CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
+}
+
+let focusedTreeEntry = null;
+
+function selectTreeEntry(el, entry, { focus = true } = {}) {
+  fileTree.querySelectorAll('.tree-item[aria-selected="true"]').forEach((item) => {
+    item.setAttribute('aria-selected', 'false');
+    item.tabIndex = -1;
+  });
+  focusedTreeEntry = entry;
+  el.setAttribute('aria-selected', 'true');
+  el.tabIndex = 0;
+  if (focus) el.focus();
+}
+
+function getTreeCreateParent(projectPath) {
+  if (!focusedTreeEntry) return projectPath;
+  return focusedTreeEntry.isDirectory
+    ? focusedTreeEntry.path
+    : pathDirname(focusedTreeEntry.path);
 }
 
 // ============================================================
@@ -580,14 +666,17 @@ treeReloadBtn.addEventListener('click', async () => {
 treeNewFileBtn.addEventListener('click', async () => {
   const project = projects.get(activeProjectId);
   if (!project) return;
-  const name = await showPrompt('New File', `Create in: ${project.path}`, '');
+  const parentPath = getTreeCreateParent(project.path);
+  const name = await showPrompt('New File', `Create in: ${parentPath}`, '');
   if (!name) return;
-  const filePath = joinPath(project.path, name);
+  const filePath = joinPath(parentPath, name);
   const result = await window.api.createFile(filePath);
   if (!result.success) {
     showToast({ key: 'create-file-error', message: 'Create file failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
+  // 作成先が畳まれていると結果が見えないので開いておく
+  if (parentPath !== project.path) expandedTreePaths.add(parentPath);
   await loadFileTree(project.path);
   openFileInEditor(filePath, name.split(/[\\/]/).pop());
 });
@@ -595,14 +684,16 @@ treeNewFileBtn.addEventListener('click', async () => {
 treeNewFolderBtn.addEventListener('click', async () => {
   const project = projects.get(activeProjectId);
   if (!project) return;
-  const name = await showPrompt('New Folder', `Create in: ${project.path}`, '');
+  const parentPath = getTreeCreateParent(project.path);
+  const name = await showPrompt('New Folder', `Create in: ${parentPath}`, '');
   if (!name) return;
-  const dirPath = joinPath(project.path, name);
+  const dirPath = joinPath(parentPath, name);
   const result = await window.api.createDir(dirPath);
   if (!result.success) {
     showToast({ key: 'create-folder-error', message: 'Create folder failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
+  if (parentPath !== project.path) expandedTreePaths.add(parentPath);
   await loadFileTree(project.path);
 });
 
@@ -610,35 +701,71 @@ function createTreeItem(entry, depth) {
   const el = document.createElement('div');
   el.className = 'tree-item';
   el.style.paddingLeft = (12 + depth * 16) + 'px';
+  el.tabIndex = -1;
+  el.setAttribute('role', 'treeitem');
+  el.setAttribute('aria-selected', 'false');
+  if (entry.isDirectory) el.setAttribute('aria-expanded', 'false');
+  // 再読込後に状態を復元するための手がかり
+  el.dataset.path = entry.path;
+  if (entry.isDirectory) el.dataset.isDirectory = 'true';
+  el.__pmEntry = entry;
   // A6: tooltip with full path
   el.title = entry.path;
-  el.innerHTML = `<span class="tree-icon">${entry.isDirectory ? '\u{1F4C1}' : '\u{1F4C4}'}</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
+  el.innerHTML = `<span class="tree-icon">${entry.isDirectory ? TREE_ICONS.folder : TREE_ICONS.file}</span><span class="tree-name">${escapeHtml(entry.name)}</span>`;
 
-  el.addEventListener('click', async (e) => {
-    if (entry.isDirectory) {
-      const expanded = el.dataset.expanded === 'true';
-      if (expanded) {
-        el.dataset.expanded = 'false';
-        const next = el.nextElementSibling;
-        if (next && next.classList.contains('tree-children')) next.remove();
-      } else {
-        el.dataset.expanded = 'true';
-        const children = await window.api.readDir(entry.path);
-        const container = document.createElement('div');
-        container.className = 'tree-children';
-        for (const child of children) {
-          container.appendChild(createTreeItem(child, depth + 1));
-        }
-        el.after(container);
-      }
-    } else {
-      dispatch('append_to_scratch', { text: entry.path });
+  const expandEntry = async () => {
+    if (!entry.isDirectory || el.dataset.expanded === 'true') return;
+    el.dataset.expanded = 'true';
+    el.setAttribute('aria-expanded', 'true');
+    expandedTreePaths.add(entry.path);
+    const children = await window.api.readDir(entry.path);
+    const container = document.createElement('div');
+    container.className = 'tree-children';
+    container.setAttribute('role', 'group');
+    for (const child of children) {
+      container.appendChild(createTreeItem(child, depth + 1));
     }
+    el.after(container);
+  };
+
+  const collapseEntry = () => {
+    if (!entry.isDirectory) return;
+    el.dataset.expanded = 'false';
+    el.setAttribute('aria-expanded', 'false');
+    expandedTreePaths.delete(entry.path);
+    const next = el.nextElementSibling;
+    if (next && next.classList.contains('tree-children')) next.remove();
+  };
+
+  // 再読込時に外から展開を復元できるようにする
+  el.__pmExpand = expandEntry;
+
+  const activateEntry = async () => {
+    if (entry.isDirectory) {
+      if (el.dataset.expanded === 'true') collapseEntry();
+      else await expandEntry();
+    } else {
+      dispatch('open_preview', { path: entry.path, name: entry.name });
+    }
+  };
+
+  el.addEventListener('click', async () => {
+    selectTreeEntry(el, entry);
+    if (entry.isDirectory) await activateEntry();
+  });
+
+  el.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    await activateEntry();
   });
 
   el.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
+    // 右クリックした対象を選択状態にする。メニューの操作対象と、
+    // 新規作成の親（getTreeCreateParent）が見えているものと一致する。
+    selectTreeEntry(el, entry);
     showContextMenu(e.clientX, e.clientY, entry);
   });
 
@@ -654,7 +781,8 @@ function createTreeItem(entry, depth) {
       e.preventDefault();
       e.stopPropagation();
       // A4: double-click always opens in preview (read-only)
-      dispatch('open_preview', { path: entry.path, name: entry.name });
+      selectTreeEntry(el, entry);
+      activateEntry();
     });
   }
 
@@ -687,6 +815,10 @@ let contextMenuEntry = null;
 function showContextMenu(x, y, entry) {
   hideTabContextMenu();
   contextMenuEntry = entry;
+  contextMenu.querySelector('[data-action="preview"]').classList.toggle('hidden', entry.isDirectory);
+  contextMenu.querySelector('[data-action="edit"]').classList.toggle('hidden', entry.isDirectory);
+  contextMenu.querySelector('[data-action="open-os"]').classList.toggle('hidden', entry.isDirectory);
+  contextMenu.querySelector('[data-action="open-explorer"]').classList.toggle('hidden', !entry.isDirectory);
   contextMenu.classList.remove('hidden');
   contextMenu.style.left = x + 'px';
   contextMenu.style.top = y + 'px';
@@ -709,6 +841,8 @@ contextMenu.addEventListener('click', (e) => {
     dispatch('open_file', { path: contextMenuEntry.path, name: contextMenuEntry.name });
   } else if (action === 'open-os') {
     window.api.openInOs(contextMenuEntry.path);
+  } else if (action === 'open-explorer' && contextMenuEntry.isDirectory) {
+    window.api.openInOs(contextMenuEntry.path);
   } else if (action === 'copy-path') {
     window.api.clipboardWriteText(contextMenuEntry.path);
     showToast({ key: 'copy-path', message: 'Path copied', detail: contextMenuEntry.path });
@@ -726,6 +860,7 @@ document.addEventListener('click', () => hideContextMenu());
 document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('.tree-item')) hideContextMenu();
 });
+
 
 // ============================================================
 // A5: Tab context menu (per tab kind)
@@ -777,11 +912,6 @@ function buildTabMenuItems(target) {
         { action: 'copy-path', label: 'Copy URL' },
         { action: 'close', label: 'Close', danger: true },
       ];
-    case 'scratch':
-      return [
-        { action: 'rename', label: 'Rename Tab' },
-        { action: 'close', label: 'Close', danger: true },
-      ];
     default:
       return [];
   }
@@ -797,7 +927,6 @@ tabContextMenu.addEventListener('click', (e) => {
     if (t.kind === 'terminal') dispatch('close_terminal', { tabId: t.tabId });
     else if (t.kind === 'preview' || t.kind === 'browser') closePreviewTab(t.previewPath);
     else if (t.kind === 'editor-file') closeEditorTab(t.filePath);
-    else if (t.kind === 'scratch') closeEditorTab(SCRATCH_PATH);
   } else if (action === 'copy-path') {
     if (t.filePath) {
       window.api.clipboardWriteText(t.filePath);
@@ -813,13 +942,14 @@ tabContextMenu.addEventListener('click', (e) => {
     }
   } else if (action === 'rename') {
     if (t.kind === 'terminal') renameTerminalTab(t.tabId);
-    else if (t.kind === 'scratch') renameScratchTab();
   }
 });
 
 document.addEventListener('click', () => hideTabContextMenu());
+document.addEventListener('click', () => previewContextMenu.classList.add('hidden'));
 document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('#tab-context-menu')) hideTabContextMenu();
+  if (!e.target.closest('#preview-context-menu')) previewContextMenu.classList.add('hidden');
 });
 
 function renameTerminalTab(tabId) {
@@ -837,17 +967,6 @@ function renameTerminalTab(tabId) {
   });
 }
 
-function renameScratchTab() {
-  const scratchFile = openFiles.get(SCRATCH_PATH);
-  if (!scratchFile) return;
-  // scratch タブは .editor-tab-name で描画されている（.tab-label はターミナルタブ用）
-  const labelEl = scratchFile.tabEl.querySelector('.editor-tab-name');
-  showPrompt('Rename Tab', 'Enter new label:', labelEl?.textContent || 'scratch').then((newName) => {
-    if (!newName) return;
-    if (labelEl) labelEl.textContent = newName;
-  });
-}
-
 // ============================================================
 // Delete confirmation modal
 // ============================================================
@@ -857,8 +976,7 @@ let pendingDeleteEntry = null;
 function showDeleteConfirm(entry) {
   pendingDeleteEntry = entry;
   const typeStr = entry.isDirectory ? 'folder' : 'file';
-  deleteConfirmMessage.textContent = `Are you sure you want to delete this ${typeStr}?`;
-  deleteConfirmMessage.innerHTML += `<br><br><code style="background:#1e1e1e;padding:4px 8px;border-radius:3px;font-size:11px;word-break:break-all;">${escapeHtml(entry.path)}</code>`;
+  deleteConfirmMessage.innerHTML = `Are you sure you want to delete this ${typeStr}?<br><code>${escapeHtml(entry.path)}</code>`;
   deleteConfirmModal.classList.remove('hidden');
 }
 
@@ -925,11 +1043,45 @@ promptInput.addEventListener('keydown', (e) => {
 });
 
 // ============================================================
+// Confirm modal (yes/no confirmation for external link navigation etc.)
+// ============================================================
+
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    confirmTitle.textContent = title;
+    confirmMessage.textContent = message;
+    confirmResolve = resolve;
+    confirmModal.classList.remove('hidden');
+    setTimeout(() => confirmOkBtn.focus(), 0);
+  });
+}
+
+function hideConfirm(value) {
+  confirmModal.classList.add('hidden');
+  const r = confirmResolve;
+  confirmResolve = null;
+  if (r) r(value);
+}
+
+confirmCancelBtn.addEventListener('click', () => hideConfirm(false));
+confirmOkBtn.addEventListener('click', () => hideConfirm(true));
+confirmModal.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    hideConfirm(false);
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    hideConfirm(true);
+  }
+});
+
+// ============================================================
 // Editor management (D8: tabs below terminal, scratch = Composer)
 // ============================================================
 
 const SCRATCH_PATH = '__scratch__';
-let openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch, isTemp }
+let openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch }
 let previewFiles = new Map(); // previewPath -> { path, name, tabEl, isPreview, previewPath, projectId }
 let activeFilePath = null;
 let activePreviewPath = null;
@@ -941,12 +1093,15 @@ let previewReturnView = 'terminal';
 let previewReturnFilePath = null;
 let lastSentContent = '';
 let lastSentTabPath = null;
-let tempTabCounter = 0;
 let agentPreviewCounter = 0;
 const projectEditorStates = new Map();
 let activeEditorProjectId = null;
 let editorStateInitialized = false;
-let savedScratchEditorHeight = null;
+const SCRATCH_COMPACT_HEIGHT = 112;
+const SCRATCH_DEFAULT_EXPANDED_HEIGHT = 220;
+let savedScratchEditorHeight = SCRATCH_DEFAULT_EXPANDED_HEIGHT;
+let scratchCollapsed = false;
+let scratchExpanded = false;
 
 let draggedEditorTab = null;
 
@@ -964,7 +1119,6 @@ function saveCurrentEditorState() {
     previewReturnFilePath,
     lastSentContent,
     lastSentTabPath,
-    tempTabCounter,
   });
 }
 
@@ -972,7 +1126,7 @@ function switchProjectEditor(projectId) {
   if (editorStateInitialized && activeEditorProjectId === projectId) return;
 
   saveCurrentEditorState();
-  openFiles.forEach((f) => { f.tabEl.style.display = 'none'; });
+  openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = 'none'; });
   // Hide all preview tabs, will show matching ones below
   previewFiles.forEach((f) => { f.tabEl.style.display = 'none'; });
 
@@ -996,8 +1150,7 @@ function switchProjectEditor(projectId) {
       : null;
     lastSentContent = state.lastSentContent;
     lastSentTabPath = state.lastSentTabPath;
-    tempTabCounter = state.tempTabCounter;
-    openFiles.forEach((f) => { f.tabEl.style.display = ''; });
+    openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
   } else {
     openFiles = new Map();
     activeFilePath = null;
@@ -1010,7 +1163,6 @@ function switchProjectEditor(projectId) {
     previewReturnFilePath = null;
     lastSentContent = '';
     lastSentTabPath = null;
-    tempTabCounter = 0;
     editorStateInitialized = true;
     initScratchTab();
     saveCurrentEditorState();
@@ -1026,7 +1178,6 @@ function switchProjectEditor(projectId) {
   activePreviewPath = getPreviewForProject(previewFiles, projectId, activePreviewPath);
 
   editorStateInitialized = true;
-  editorTabBar.appendChild(newScratchTabBtn);
   const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
   if (composer) selectComposerTab(composer, { focus: false });
   if (activeMainView === 'preview' && activePreviewPath) {
@@ -1072,7 +1223,6 @@ function removeProjectEditorState(projectId) {
     previewReturnFilePath = null;
     lastSentContent = '';
     lastSentTabPath = null;
-    tempTabCounter = 0;
     switchProjectEditor(null);
   }
 }
@@ -1115,22 +1265,7 @@ function makeEditorTabDraggable(tabEl, path) {
 
 function initScratchTab() {
   const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab composer-tab active';
-  tabEl.innerHTML = `${tabIcon('scratch')}<span class="editor-tab-name">scratch</span>`;
-  tabEl.setAttribute('role', 'tab');
-  tabEl.setAttribute('aria-selected', 'true');
   tabEl.dataset.path = SCRATCH_PATH;
-
-  tabEl.addEventListener('click', () => dispatch('switch_tab', { filePath: SCRATCH_PATH }));
-  // A5: scratch tab context menu
-  tabEl.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    showTabContextMenu(e.clientX, e.clientY, { kind: 'scratch' });
-  });
-  makeEditorTabDraggable(tabEl, SCRATCH_PATH);
-  editorTabBar.appendChild(tabEl);
-  editorTabBar.appendChild(newScratchTabBtn);
 
   const scratchData = {
     path: SCRATCH_PATH,
@@ -1139,59 +1274,12 @@ function initScratchTab() {
     originalContent: '',
     tabEl,
     isScratch: true,
-    isTemp: false,
   };
   openFiles.set(SCRATCH_PATH, scratchData);
   activeFilePath = SCRATCH_PATH;
   activeComposerPath = SCRATCH_PATH;
   showEditorPane();
 }
-
-function createTempTab() {
-  tempTabCounter++;
-  const tempPath = `__temp_${tempTabCounter}__`;
-  const name = `temp-${tempTabCounter}`;
-
-  const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab composer-tab';
-  tabEl.innerHTML = `${tabIcon('scratch')}<span class="editor-tab-name">${name}</span><span class="editor-tab-close">\u00d7</span>`;
-  tabEl.setAttribute('role', 'tab');
-  tabEl.setAttribute('aria-selected', 'false');
-  tabEl.dataset.path = tempPath;
-
-  tabEl.addEventListener('click', (e) => {
-    if (e.target.classList.contains('editor-tab-close')) {
-      dispatch('close_tab', { filePath: tabEl.dataset.path });
-    } else {
-      dispatch('switch_tab', { filePath: tabEl.dataset.path });
-    }
-  });
-
-  tabEl.addEventListener('auxclick', (e) => {
-    if (e.button === 1) {
-      e.preventDefault();
-      dispatch('close_tab', { filePath: tabEl.dataset.path });
-    }
-  });
-
-  makeEditorTabDraggable(tabEl, tempPath);
-  editorTabBar.insertBefore(tabEl, newScratchTabBtn);
-
-  openFiles.set(tempPath, {
-    path: tempPath,
-    name,
-    content: '',
-    originalContent: '',
-    tabEl,
-    isScratch: true,
-    isTemp: true,
-  });
-
-  showEditorPane();
-  switchEditorTab(tempPath);
-}
-
-newScratchTabBtn.addEventListener('click', () => dispatch('create_scratch_tab'));
 
 // ============================================================
 // File preview (image / html / markdown)
@@ -1219,6 +1307,19 @@ function toFileUrl(p) {
   return 'file://' + normalized;
 }
 
+function fileUrlToPath(url) {
+  // file:///D:/path -> D:\path (Windows)
+  // file:///path -> /path (Unix)
+  let p = url.replace(/^file:\/\//, '');
+  // 先頭の / を取り除いてからOSのセパレータに戻す
+  // Windows: /D:/path -> D:\path
+  // Unix: /path -> /path
+  if (IS_WIN && /^\/[A-Za-z]:/.test(p)) {
+    p = p.slice(1); // 先頭の / を削除
+  }
+  return IS_WIN ? p.replace(/\//g, '\\') : p;
+}
+
 function pathDirname(p) {
   const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
   return i >= 0 ? p.slice(0, i) : '';
@@ -1233,12 +1334,12 @@ function joinPath(base, sub) {
 }
 
 const MD_CSS = `
-body { margin:0; padding:24px; color:#c8ccd4; background:#1c1f24; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; font-size:13px; line-height:1.6; }
+body { margin:0; padding:24px; color:#c8ccd4; background:#1c1f24; font-family:${PREVIEW_FONT}; font-size:13px; line-height:1.6; }
 a { color:#4d8480; }
 h1,h2,h3,h4,h5,h6 { color:#f0f2f5; margin-top:24px; margin-bottom:16px; line-height:1.25; }
 h1 { font-size:2em; border-bottom:1px solid #2e333b; padding-bottom:.3em; }
 h2 { font-size:1.5em; border-bottom:1px solid #2e333b; padding-bottom:.3em; }
-code { background:#23272e; padding:.2em .4em; border-radius:6px; font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:85%; }
+code { background:#23272e; padding:.2em .4em; border-radius:6px; font-family:${PREVIEW_FONT}; font-size:85%; }
 pre { background:#23272e; padding:16px; border-radius:6px; overflow:auto; }
 pre code { background:transparent; padding:0; font-size:100%; }
 blockquote { border-left:4px solid #2e333b; color:#6b7280; margin:0; padding:0 16px; }
@@ -1247,6 +1348,241 @@ th,td { border:1px solid #2e333b; padding:6px 13px; }
 img { max-width:100%; }
 hr { border:0; border-top:1px solid #2e333b; }
 `;
+
+function getPreviewScrollbarCss() {
+  const tokens = getComputedStyle(document.documentElement);
+  const names = [
+    '--scrollbar-size',
+    '--scrollbar-border',
+    '--scrollbar-radius',
+    '--scrollbar-track',
+    '--scrollbar-thumb',
+    '--scrollbar-thumb-hover',
+  ];
+  const resolveToken = (name, seen = new Set()) => {
+    if (seen.has(name)) return '';
+    seen.add(name);
+    return tokens.getPropertyValue(name).trim().replace(/var\((--[\w-]+)\)/g, (_match, nested) => (
+      resolveToken(nested, seen)
+    ));
+  };
+  const guestTokens = names.map((name) => `${name}:${resolveToken(name)};`).join('');
+  return `:root{${guestTokens}}\n${sharedScrollbarCss}`;
+}
+
+// ページ内アンカー（目次リンク）を自前で処理する。
+// <base> を置いているため `#foo` は file:// のベース URL に解決され、
+// 素のままだとページ内移動ではなく「別ページへの遷移」になってしまう。
+// executeJavaScript はページの CSP の影響を受けないので注入できる。
+//
+// ついでに:
+// - 全リンクのクリックを preventDefault し、webview のナビゲーションを阻止する。
+//   <webview> の will-navigate の preventDefault() は効かないため、
+//   ゲストページ側でクリックを止める必要がある。
+// - リンクURLは console.log の特殊プレフィックス経由でrendererに通知する。
+// - contextmenu イベントをキャッチし、選択テキストとリンクURLを
+//   window.__pmContextMenu に保存する。
+const PREVIEW_ANCHOR_SCRIPT = `(() => {
+  if (window.__pmAnchorsBound) return true;
+  window.__pmAnchorsBound = true;
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest && event.target.closest('a[href]');
+    if (!link) return;
+    const href = link.getAttribute('href') || '';
+    if (href.startsWith('#') && href !== '#') {
+      event.preventDefault();
+      let id = href.slice(1);
+      try { id = decodeURIComponent(id); } catch (e) { /* 生の値のまま使う */ }
+      const target = document.getElementById(id)
+        || document.getElementsByName(id)[0]
+        || document.getElementById(href.slice(1));
+      if (target) target.scrollIntoView({ block: 'start' });
+      return;
+    }
+    // 全リンクのデフォルト遷移を阻止。
+    // will-navigate の preventDefault() が <webview> で効かないため。
+    event.preventDefault();
+    // リンクURLを console.log 経由で renderer に通知。
+    // CSP で postMessage が使えないため、console-message イベントで受ける。
+    const url = link.href;
+    if (url) console.log('__pm_navigate:' + url);
+  }, true);
+  document.addEventListener('contextmenu', (event) => {
+    const link = event.target.closest && event.target.closest('a[href]');
+    const selection = window.getSelection ? window.getSelection().toString() : '';
+    window.__pmContextMenu = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      linkHref: link ? link.href : null,
+      linkText: link ? link.textContent : null,
+      hasSelection: !!(selection && selection.trim()),
+      selection: selection || '',
+    };
+  }, true);
+  return true;
+})()`;
+
+previewWebview.addEventListener('dom-ready', () => {
+  previewWebview.insertCSS(getPreviewScrollbarCss()).catch((error) => {
+    console.warn('[preview] Failed to apply scrollbar style:', error);
+  });
+  previewWebview.executeJavaScript(PREVIEW_ANCHOR_SCRIPT).catch((error) => {
+    console.warn('[preview] Failed to bind in-page anchors:', error);
+  });
+});
+
+// プレビュー内のナビゲーションを制御する。
+// ゲストページ側でクリックを preventDefault しているので、
+// webview の will-navigate は発火しない（または発火しても無視）。
+// リンクURLは console.log の特殊プレフィックス経由で通知される。
+//
+// - file:// の相対リンク → PM のプレビュー機構で開く
+// - http(s):// の外部リンク → モーダルで確認してから OS ブラウザで開く
+// - それ以外 → 無視
+previewWebview.addEventListener('console-message', async (e) => {
+  // e.message はゲストページの console.log の出力
+  const msg = e.message;
+  if (!msg || typeof msg !== 'string') return;
+  const prefix = '__pm_navigate:';
+  if (!msg.startsWith(prefix)) return;
+  const url = msg.slice(prefix.length).trim();
+
+  if (url.startsWith('file://')) {
+    try {
+      const filePath = fileUrlToPath(url);
+      const name = filePath.split(/[/\\]/).pop();
+      dispatch('open_preview', { path: filePath, name });
+    } catch (error) {
+      console.warn('[preview] Failed to handle navigation to', url, error);
+    }
+    return;
+  }
+
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    const ok = await showConfirm('Open external link?', url);
+    if (ok) {
+      window.api.openInOs(url);
+    }
+    return;
+  }
+
+  // その他のプロトコル（mailto:, tel: 等）は無視
+});
+
+// will-navigate はフォールバック。ゲスト側で preventDefault できなかった
+// 場合（JS無効化時など）の最終防波堤。ただし <webview> では
+// preventDefault() が効かないことがあるため、ここで止められない場合は
+// console-message 経由の処理に頼る。
+previewWebview.addEventListener('will-navigate', (e) => {
+  const url = e.url;
+  if (!url || url === previewWebview.src) return;
+  // ゲスト側で処理済みのはずなので、念のためブロックだけする
+  e.preventDefault();
+});
+
+// ============================================================
+// Preview context menu (copy selection, link actions)
+// ============================================================
+
+let previewContextInfo = null;
+
+previewWebview.addEventListener('contextmenu', async (e) => {
+  e.preventDefault();
+  // ゲストページから contextmenu 情報を取得
+  try {
+    const info = await previewWebview.executeJavaScript(`window.__pmContextMenu || null`);
+    previewContextInfo = info;
+  } catch {
+    previewContextInfo = null;
+  }
+
+  // webviewの座標系はゲストページ内。rendererの座標系に変換するため、
+  // webview要素の画面上の位置を加える。
+  const rect = previewWebview.getBoundingClientRect();
+  const x = rect.left + (info?.clientX || e.clientX - rect.left);
+  const y = rect.top + (info?.clientY || e.clientY - rect.top);
+
+  showPreviewContextMenu(x, y, previewContextInfo);
+});
+
+function showPreviewContextMenu(x, y, info) {
+  previewContextMenu.innerHTML = '';
+  const items = [];
+
+  // 選択テキストがある場合：コピー
+  if (info?.hasSelection) {
+    items.push({ action: 'copy-selection', label: 'Copy' });
+  }
+
+  // リンク上の場合：URL関連のメニュー
+  if (info?.linkHref) {
+    const href = info.linkHref;
+    if (items.length > 0) items.push({ separator: true });
+    items.push({ action: 'link-open-tab', label: 'Open Link in New Tab', url: href });
+    items.push({ action: 'link-open-browser', label: 'Open Link in Browser', url: href });
+    items.push({ action: 'link-open-os', label: 'Open Link in OS', url: href });
+    items.push({ action: 'link-copy', label: 'Copy Link Address', url: href });
+  }
+
+  if (items.length === 0) return;
+
+  for (const item of items) {
+    if (item.separator) {
+      const sep = document.createElement('div');
+      sep.className = 'context-menu-separator';
+      previewContextMenu.appendChild(sep);
+      continue;
+    }
+    const el = document.createElement('div');
+    el.className = 'context-menu-item';
+    el.dataset.action = item.action;
+    if (item.url) el.dataset.url = item.url;
+    el.textContent = item.label;
+    previewContextMenu.appendChild(el);
+  }
+
+  previewContextMenu.classList.remove('hidden');
+  previewContextMenu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+  previewContextMenu.style.top = Math.min(y, window.innerHeight - 200) + 'px';
+}
+
+previewContextMenu.addEventListener('click', async (e) => {
+  const item = e.target.closest('.context-menu-item');
+  if (!item) return;
+  const action = item.dataset.action;
+  const url = item.dataset.url;
+  previewContextMenu.classList.add('hidden');
+
+  if (action === 'copy-selection' && previewContextInfo?.selection) {
+    try {
+      await navigator.clipboard.writeText(previewContextInfo.selection);
+      showToast({ key: 'preview-copy', message: 'Copied' });
+    } catch {}
+  } else if (action === 'link-open-tab' && url) {
+    // file:// はPMのプレビューで開く、http(s):// はブラウザタブで開く
+    if (url.startsWith('file://')) {
+      try {
+        const filePath = fileUrlToPath(url);
+        const name = filePath.split(/[/\\]/).pop();
+        dispatch('open_preview', { path: filePath, name });
+      } catch {}
+    } else {
+      // ブラウザタブとして開く
+      openBrowserUrl(url);
+    }
+  } else if (action === 'link-open-browser' && url) {
+    const ok = await showConfirm('Open external link?', url);
+    if (ok) window.api.openInOs(url);
+  } else if (action === 'link-open-os' && url) {
+    const ok = await showConfirm('Open external link?', url);
+    if (ok) window.api.openInOs(url);
+  } else if (action === 'link-copy' && url) {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast({ key: 'preview-copy', message: 'Copied', detail: url });
+    } catch {}
+  }
+});
 
 async function openFileInPreview(filePath, name, options = {}) {
   const projectId = options.projectId ?? activeEditorProjectId;
@@ -1298,6 +1634,7 @@ async function openFileInPreview(filePath, name, options = {}) {
     previewPath,
     projectId,
     initialContent,
+    scrollPosition: { x: 0, y: 0 },
   };
 
   const tabEl = document.createElement('div');
@@ -1307,7 +1644,7 @@ async function openFileInPreview(filePath, name, options = {}) {
   tabEl.setAttribute('aria-selected', 'false');
   tabEl.dataset.path = previewPath;
   // A6: tooltip with full path
-  tabEl.title = filePath;
+  tabEl.title = `Preview — ${filePath}`;
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
@@ -1391,6 +1728,7 @@ async function openBrowserUrl(value) {
     isBrowser: true,
     previewPath,
     projectId,
+    scrollPosition: { x: 0, y: 0 },
   };
   const tabEl = document.createElement('div');
   tabEl.className = 'preview-tab main-tab browser-tab';
@@ -1422,12 +1760,56 @@ async function openBrowserUrl(value) {
 }
 
 let pendingPreviewLoad = null;
+let pendingPreviewScrollCapture = Promise.resolve();
+let previewSwitchSerial = 0;
 
-function loadPreviewHtml(html, revealRange = null) {
-  const dataUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
+async function capturePreviewScroll(f) {
+  if (!f) return;
+  try {
+    const position = await previewWebview.executeJavaScript(`(() => {
+      const root = document.scrollingElement || document.documentElement;
+      return { x: root.scrollLeft || window.scrollX || 0, y: root.scrollTop || window.scrollY || 0 };
+    })()`);
+    if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) {
+      f.scrollPosition = { x: position.x, y: position.y };
+    }
+  } catch (error) {
+    console.warn('[preview] Failed to capture scroll position:', error);
+  }
+}
+
+function queueVisiblePreviewScrollCapture() {
+  const preview = previewFiles.get(activePreviewPath);
+  pendingPreviewScrollCapture = capturePreviewScroll(preview);
+  return pendingPreviewScrollCapture;
+}
+
+async function restorePreviewScroll(f) {
+  if (!f || !f.scrollPosition) return;
+  const { x, y } = f.scrollPosition;
+  if (!x && !y) return;
+  try {
+    await previewWebview.executeJavaScript(`(() => {
+      const root = document.scrollingElement || document.documentElement;
+      root.scrollLeft = ${Number(x) || 0};
+      root.scrollTop = ${Number(y) || 0};
+      return { x: root.scrollLeft, y: root.scrollTop };
+    })()`);
+  } catch (error) {
+    console.warn('[preview] Failed to restore scroll position:', error);
+  }
+}
+
+function loadPreviewUrl(url, revealRange = null, scrollPosition = null) {
   // Assigning src is safe before the webview's initial dom-ready event.
   // loadURL() would reject until the guest WebContents has been created.
   if (pendingPreviewLoad) pendingPreviewLoad.cancel();
+  // スクロール位置は dom-ready のうちに当てる。読み込み完了後に当てると
+  // 先頭で描画されてから動くため、その移動が見えてしまう。
+  // 位置が確定するまではゲストページ内で visibility:hidden にして
+  // 描画を隠す。ホスト側の #preview-webview.settling だけでは
+  // webview のゲストコンテンツまで隠れないため、ゲスト側にも注入する。
+  previewWebview.classList.add('settling');
   const loaded = new Promise((resolve) => {
     let settled = false;
     const finish = (value) => {
@@ -1435,10 +1817,19 @@ function loadPreviewHtml(html, revealRange = null) {
       settled = true;
       previewWebview.removeEventListener('dom-ready', onReady);
       clearTimeout(timeoutId);
+      previewWebview.classList.remove('settling');
       if (pendingPreviewLoad?.finish === finish) pendingPreviewLoad = null;
       resolve(value);
     };
     const onReady = async () => {
+      // ゲストページを隠す（スクロール前に隠さないと先頭が見える）
+      try {
+        await previewWebview.executeJavaScript(`(() => {
+          document.documentElement.style.visibility = 'hidden';
+          return true;
+        })()`);
+      } catch { /* 初回 dom-ready ではゲストが準備中の可能性 */ }
+
       if (revealRange) {
         try {
           await previewWebview.executeJavaScript(`(() => {
@@ -1449,21 +1840,66 @@ function loadPreviewHtml(html, revealRange = null) {
         } catch (error) {
           console.warn('[preview] Failed to reveal line:', error);
         }
+      } else if (scrollPosition && (scrollPosition.x || scrollPosition.y)) {
+        try {
+          await previewWebview.executeJavaScript(`(() => {
+            const root = document.scrollingElement || document.documentElement;
+            root.scrollLeft = ${Number(scrollPosition.x) || 0};
+            root.scrollTop = ${Number(scrollPosition.y) || 0};
+            return { x: root.scrollLeft, y: root.scrollTop };
+          })()`);
+        } catch (error) {
+          console.warn('[preview] Failed to restore scroll position:', error);
+        }
       }
+
+      // スクロール位置が確定してからゲストページを表示
+      try {
+        await previewWebview.executeJavaScript(`(() => {
+          document.documentElement.style.visibility = '';
+          return true;
+        })()`);
+      } catch { /* ゲストが既に破棄されている場合は無視 */ }
+
       finish(true);
     };
     const timeoutId = setTimeout(() => finish(false), 10000);
     pendingPreviewLoad = { finish, cancel: () => finish(false) };
     previewWebview.addEventListener('dom-ready', onReady);
   });
-  previewWebview.src = dataUrl;
+  previewWebview.src = url;
   return loaded;
 }
 
-function buildSafePreviewDocument(source, baseUrl, extraStyle = '') {
+function loadPreviewHtml(html, revealRange = null, scrollPosition = null) {
+  return loadPreviewUrl(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`, revealRange, scrollPosition);
+}
+
+// marked v18 は見出しに id を付けない（headerIds は廃止された）。
+// 目次リンクは GitHub 互換のスラッグを指すため、同じ規則で id を補う。
+function slugifyHeading(text) {
+  return String(text).trim().toLowerCase()
+    .replace(/[ -⁯⸀-⹿\\'!"#$%&()*+,./:;<=>?@[\]^`{|}~]/g, '')
+    .replace(/\s+/g, '-');
+}
+
+function addHeadingIds(doc) {
+  const used = new Map();
+  for (const heading of doc.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+    if (heading.id) continue;
+    const base = slugifyHeading(heading.textContent);
+    if (!base) continue;
+    const seen = used.get(base) || 0;
+    used.set(base, seen + 1);
+    heading.id = seen === 0 ? base : `${base}-${seen}`;
+  }
+}
+
+function buildSafePreviewDocument(source, baseUrl, extraStyle = '', { headingIds = false } = {}) {
   const sanitized = DOMPurify.sanitize(source, { WHOLE_DOCUMENT: true });
   const doc = new DOMParser().parseFromString(sanitized, 'text/html');
   doc.querySelectorAll('base, meta[http-equiv]').forEach((el) => el.remove());
+  if (headingIds) addHeadingIds(doc);
 
   const csp = doc.createElement('meta');
   csp.httpEquiv = 'Content-Security-Policy';
@@ -1474,11 +1910,9 @@ function buildSafePreviewDocument(source, baseUrl, extraStyle = '') {
   base.href = baseUrl;
   doc.head.appendChild(base);
 
-  if (extraStyle) {
-    const style = doc.createElement('style');
-    style.textContent = extraStyle;
-    doc.head.appendChild(style);
-  }
+  const style = doc.createElement('style');
+  style.textContent = `body { font-family:${PREVIEW_FONT}; }\n${extraStyle}`;
+  doc.head.appendChild(style);
 
   return `<!DOCTYPE html>${doc.documentElement.outerHTML}`;
 }
@@ -1532,15 +1966,16 @@ body { padding:0; }
 }
 
 async function loadPreviewContent(f, reveal = null, allowOs = true) {
+  // 前回見ていた位置。描画前に当てるため読み込み経路へ渡す。
+  const restoreTo = reveal ? null : f.scrollPosition || null;
+
   if (f.isBrowser) {
     if (!isActivePreview(f)) return false;
-    previewWebview.src = f.path;
-    return true;
+    return await loadPreviewUrl(f.path, null, restoreTo);
   }
   if (isImage(f.name)) {
     if (!isActivePreview(f)) return false;
-    previewWebview.src = toFileUrl(f.path);
-    return true;
+    return await loadPreviewUrl(toFileUrl(f.path), null, restoreTo);
   }
 
   if (reveal?.line) {
@@ -1555,13 +1990,13 @@ async function loadPreviewContent(f, reveal = null, allowOs = true) {
     const content = await readPreviewText(f, allowOs);
     if (content === null || !isActivePreview(f)) return false;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
-    return await loadPreviewHtml(buildSafePreviewDocument(content, baseUrl));
+    return await loadPreviewHtml(buildSafePreviewDocument(content, baseUrl), null, restoreTo);
   } else if (isMarkdown(f.name)) {
     const content = await readPreviewText(f, allowOs);
     if (content === null || !isActivePreview(f)) return false;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
     const markdownHtml = `<body class="markdown-body">${marked.parse(content)}</body>`;
-    return await loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS));
+    return await loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS, { headingIds: true }), null, restoreTo);
   } else {
     // A4: show text/code files as a safe read-only preview.
     const content = await readPreviewText(f, allowOs);
@@ -1572,7 +2007,7 @@ async function loadPreviewContent(f, reveal = null, allowOs = true) {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
     const codeHtml = `<body class="markdown-body"><pre><code>${escaped}</code></pre></body>`;
-    return await loadPreviewHtml(buildSafePreviewDocument(codeHtml, baseUrl, MD_CSS));
+    return await loadPreviewHtml(buildSafePreviewDocument(codeHtml, baseUrl, MD_CSS), null, restoreTo);
   }
 }
 
@@ -1584,9 +2019,17 @@ function hidePreviewPane() {
   showMainSurface(activeMainFilePath ? 'file' : 'terminal');
 }
 
-function switchPreviewTab(previewPath, { preserveAttention = false, reveal = null } = {}) {
+async function switchPreviewTab(previewPath, { preserveAttention = false, reveal = null } = {}) {
   const f = previewFiles.get(previewPath);
-  if (!isPreviewForProject(f, activeEditorProjectId)) return Promise.resolve(false);
+  if (!isPreviewForProject(f, activeEditorProjectId)) return false;
+
+  const serial = ++previewSwitchSerial;
+  await pendingPreviewScrollCapture;
+  const previous = previewFiles.get(activePreviewPath);
+  if (mainSurface.dataset.surface === 'preview' && previous) {
+    await capturePreviewScroll(previous);
+  }
+  if (serial !== previewSwitchSerial) return false;
 
   if (activeMainView !== 'preview') {
     previewReturnView = activeMainView;
@@ -1601,9 +2044,18 @@ function switchPreviewTab(previewPath, { preserveAttention = false, reveal = nul
     activeSurface = 'preview';
     setState({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
   }
-  const loading = loadPreviewContent(f, reveal);
-  loading.catch((error) => console.error('[preview] Failed to load:', error));
-  return loading.then(() => true);
+  try {
+    // スクロール復元は loadPreviewContent の中（描画前）で行う。
+    // ここで当てると先頭で描画されてから動くのが見えてしまう。
+    const loaded = await loadPreviewContent(f, reveal);
+    if (!loaded || serial !== previewSwitchSerial || !isActivePreview(f)) return false;
+    // dom-ready 経由で復元されなかった場合のフォールバック
+    if (!reveal) await restorePreviewScroll(f);
+    return true;
+  } catch (error) {
+    console.error('[preview] Failed to load:', error);
+    return false;
+  }
 }
 
 function closePreviewTab(previewPath) {
@@ -1676,7 +2128,7 @@ async function openFileInEditor(filePath, name) {
   tabEl.setAttribute('aria-selected', 'false');
   tabEl.dataset.path = filePath;
   // A6: tooltip with full path
-  tabEl.title = filePath;
+  tabEl.title = `Edit — ${filePath}`;
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
@@ -1711,8 +2163,7 @@ async function openFileInEditor(filePath, name) {
 function switchEditorTab(filePath, { focus = true } = {}) {
   // Preview tabs are handled by switchPreviewTab
   if (previewFiles.has(filePath)) {
-    switchPreviewTab(filePath);
-    return;
+    return switchPreviewTab(filePath);
   }
   const f = openFiles.get(filePath);
   if (!f) return;
@@ -1735,6 +2186,7 @@ function switchEditorTab(filePath, { focus = true } = {}) {
   if (focus) fileEditorTextarea.focus();
   // Recalculate cursor/selection for the newly focused file
   updateEditorCursorState();
+  return true;
 }
 
 function selectComposerTab(file, { focus = true } = {}) {
@@ -1747,7 +2199,10 @@ function selectComposerTab(file, { focus = true } = {}) {
   activeSurface = 'editor';
   editorTextarea.value = file.content;
   setState({ activeFilePath: file.path, isPreview: false, scratchContent: file.content });
-  if (focus) editorTextarea.focus();
+  if (focus) {
+    setScratchCollapsed(false);
+    editorTextarea.focus();
+  }
   updateEditorCursorState();
 }
 
@@ -1758,7 +2213,7 @@ function closeEditorTab(filePath) {
     return;
   }
   const f = openFiles.get(filePath);
-  if (!f || (f.isScratch && !f.isTemp)) return;
+  if (!f || f.isScratch) return;
   const wasMainFile = !f.isScratch && activeMainView === 'file' && activeMainFilePath === filePath;
 
   f.tabEl.remove();
@@ -1783,10 +2238,78 @@ function closeEditorTab(filePath) {
 
 function showEditorPane() {
   editorPane.classList.remove('hidden');
-  splitter.classList.remove('hidden');
-  if (savedScratchEditorHeight) editorPane.style.height = `${savedScratchEditorHeight}px`;
+  splitter.classList.toggle('hidden', scratchCollapsed);
+  if (scratchCollapsed) {
+    applyScratchHeight(34);
+  } else {
+    setScratchExpanded(editorPane.contains(document.activeElement));
+  }
+}
+
+function clampScratchExpandedHeight(height) {
+  return Math.max(SCRATCH_COMPACT_HEIGHT, Math.min(height, window.innerHeight - 120));
+}
+
+function applyScratchHeight(height) {
+  editorPane.style.height = `${height}px`;
+  editorPane.style.flexBasis = `${height}px`;
   requestAnimationFrame(handleResize);
 }
+
+appMenuBtn.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const rect = appMenuBtn.getBoundingClientRect();
+  appMenuBtn.setAttribute('aria-expanded', 'true');
+  try {
+    await window.api.menuPopup(rect.left, rect.bottom);
+  } finally {
+    appMenuBtn.setAttribute('aria-expanded', 'false');
+  }
+});
+
+function setScratchExpanded(expanded) {
+  scratchExpanded = !scratchCollapsed && Boolean(expanded);
+  editorPane.classList.toggle('expanded', scratchExpanded);
+  applyScratchHeight(scratchExpanded
+    ? clampScratchExpandedHeight(savedScratchEditorHeight)
+    : SCRATCH_COMPACT_HEIGHT);
+}
+
+function setScratchCollapsed(collapsed) {
+  scratchCollapsed = Boolean(collapsed);
+  editorPane.classList.toggle('collapsed', scratchCollapsed);
+  splitter.classList.toggle('hidden', scratchCollapsed);
+  scratchCollapseBtn.setAttribute('aria-expanded', scratchCollapsed ? 'false' : 'true');
+  scratchCollapseBtn.title = scratchCollapsed ? 'Expand Scratch' : 'Collapse Scratch';
+  scratchCollapseBtn.setAttribute('aria-label', scratchCollapseBtn.title);
+  try {
+    localStorage.setItem('pm-scratch-collapsed', scratchCollapsed ? 'true' : 'false');
+  } catch {}
+  if (scratchCollapsed) {
+    scratchExpanded = false;
+    editorPane.classList.remove('expanded');
+    applyScratchHeight(34);
+  } else {
+    setScratchExpanded(editorPane.contains(document.activeElement));
+  }
+}
+
+scratchCollapseBtn.addEventListener('click', () => {
+  setScratchCollapsed(!scratchCollapsed);
+  if (!scratchCollapsed) editorTextarea.focus();
+});
+
+editorPane.addEventListener('focusin', () => {
+  if (!scratchCollapsed) setScratchExpanded(true);
+});
+
+editorPane.addEventListener('focusout', () => {
+  setTimeout(() => {
+    if (!scratchCollapsed && !splitterDragging && !editorPane.contains(document.activeElement)) {
+      setScratchExpanded(false);
+    }
+  }, 0);
+});
 
 function showMainEditorSurface() {
   showMainSurface('file');
@@ -1933,65 +2456,12 @@ fileEditorTextarea.addEventListener('keydown', (e) => {
 async function saveActiveFile() {
   if (!activeFilePath) return;
   const f = openFiles.get(activeFilePath);
-  if (!f || f.isScratch && !f.isTemp) return;
+  if (!f || f.isScratch) return;
 
-  if (f.isTemp) {
-    // Show save dialog for temp tabs
-    const project = projects.get(activeEditorProjectId);
-    const defaultPath = project ? project.path : undefined;
-    const savePath = await window.api.saveFileDialog(defaultPath, f.name || 'untitled.txt');
-    if (!savePath) return;
-
-    const result = await window.api.writeFile(savePath, f.content);
-    if (!result.success) return;
-
-    // Convert temp tab into a regular file tab
-    const oldPath = activeFilePath;
-    const newName = savePath.split(/[\\/]/).pop();
-    openFiles.delete(oldPath);
-    f.path = savePath;
-    f.name = newName;
-    f.isScratch = false;
-    f.isTemp = false;
+  const result = await window.api.writeFile(f.path, f.content);
+  if (result.success) {
     f.originalContent = f.content;
-    f.tabEl.classList.remove('composer-tab');
-    f.tabEl.classList.add('main-tab');
-    const icon = f.tabEl.querySelector('.tab-icon');
-    if (icon) icon.outerHTML = tabIcon('file');
-    f.tabEl.querySelector('.editor-tab-name').textContent = newName;
-    f.tabEl.dataset.path = savePath;
-    // Re-bind click handlers to new path
-    f.tabEl.onclick = (e) => {
-      if (e.target.classList.contains('editor-tab-close')) {
-        dispatch('close_tab', { filePath: savePath });
-      } else {
-        dispatch('switch_tab', { filePath: savePath });
-      }
-    };
-    // Add dirty indicator
-    const dirtyEl = document.createElement('span');
-    dirtyEl.className = 'editor-tab-dirty hidden';
-    dirtyEl.textContent = '*';
-    const closeEl = f.tabEl.querySelector('.editor-tab-close');
-    f.tabEl.insertBefore(dirtyEl, closeEl);
-    openFiles.set(savePath, f);
-    activeFilePath = savePath;
-    activeComposerPath = SCRATCH_PATH;
-    activeMainFilePath = savePath;
-    tabBar.insertBefore(f.tabEl, newTabBtn);
-    const scratch = openFiles.get(SCRATCH_PATH);
-    if (scratch) selectComposerTab(scratch, { focus: false });
-    setState({ activeFilePath: savePath, isPreview: false, scratchContent: getState().scratchContent });
-    switchEditorTab(savePath);
-    updateEditorDirty(savePath);
-    // Refresh file tree to show the new file
-    if (project) await loadFileTree(project.path);
-  } else {
-    const result = await window.api.writeFile(f.path, f.content);
-    if (result.success) {
-      f.originalContent = f.content;
-      updateEditorDirty(activeFilePath);
-    }
+    updateEditorDirty(activeFilePath);
   }
 }
 
@@ -2149,7 +2619,13 @@ let splitterStartY = 0;
 let splitterStartHeight = 0;
 
 splitter.addEventListener('mousedown', (e) => {
+  if (scratchCollapsed) return;
   splitterDragging = true;
+  scratchExpanded = true;
+  editorPane.classList.add('expanded');
+  // サイズ変更開始時にフォーカスをscratchエリアに移動する。
+  // これにより、ドラッグ中に focusout で expanded が解除されるのを防ぐ。
+  editorTextarea.focus();
   splitterStartY = e.clientY;
   splitterStartHeight = editorPane.offsetHeight;
   document.body.style.cursor = 'ns-resize';
@@ -2159,16 +2635,19 @@ splitter.addEventListener('mousedown', (e) => {
 document.addEventListener('mousemove', (e) => {
   if (!splitterDragging) return;
   const delta = splitterStartY - e.clientY;
-  const newHeight = Math.max(80, Math.min(splitterStartHeight + delta, window.innerHeight - 120));
-  editorPane.style.height = newHeight + 'px';
-  handleResize();
+  const newHeight = clampScratchExpandedHeight(splitterStartHeight + delta);
+  applyScratchHeight(newHeight);
 });
 
 document.addEventListener('mouseup', () => {
   if (splitterDragging) {
     splitterDragging = false;
-    savedScratchEditorHeight = editorPane.offsetHeight;
+    savedScratchEditorHeight = clampScratchExpandedHeight(editorPane.offsetHeight);
+    try {
+      localStorage.setItem('pm-scratch-expanded-height', String(savedScratchEditorHeight));
+    } catch {}
     document.body.style.cursor = '';
+    if (!editorPane.contains(document.activeElement)) setScratchExpanded(false);
   }
 });
 
@@ -2529,6 +3008,53 @@ document.addEventListener('click', () => {
 });
 
 // ============================================================
+// メニューのバックドロップ
+// document の click だけでは <webview>（プレビュー）上のクリックを
+// 拾えない。ゲスト側のイベントはホストに伝播しないため、開いている
+// 間だけ全面を覆ってそこで受ける。
+// <webview> は WebContentsView と違い z-index が効くので前面に出せる。
+// ============================================================
+
+const menuBackdrop = document.getElementById('menu-backdrop');
+const overlayMenus = [contextMenu, tabContextMenu, newTabMenu, previewContextMenu];
+
+function closeOverlayMenus() {
+  hideContextMenu();
+  hideTabContextMenu();
+  newTabMenu.classList.add('hidden');
+  previewContextMenu.classList.add('hidden');
+}
+
+function syncMenuBackdrop() {
+  const anyOpen = overlayMenus.some((menu) => !menu.classList.contains('hidden'));
+  menuBackdrop.classList.toggle('hidden', !anyOpen);
+}
+
+// 呼び出し側が classList を直接触っている箇所が多いので、表示状態を
+// 監視して同期する（呼び忘れによる同期漏れが起きない）
+const menuBackdropObserver = new MutationObserver(syncMenuBackdrop);
+for (const menu of overlayMenus) {
+  menuBackdropObserver.observe(menu, { attributes: true, attributeFilter: ['class'] });
+}
+
+menuBackdrop.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  closeOverlayMenus();
+});
+menuBackdrop.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  closeOverlayMenus();
+});
+// <webview> は別プロセスのため、backdrop の z-index が効かず、
+// webview 上のクリックが renderer に届かない。webview がフォーカスを
+// 取った瞬間にメニューを閉じる。
+previewWebview.addEventListener('focus', closeOverlayMenus);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeOverlayMenus();
+});
+window.addEventListener('blur', closeOverlayMenus);
+
+// ============================================================
 // Clipboard paste (Ctrl+V) -> save screenshot -> append path to scratch
 // ============================================================
 
@@ -2572,14 +3098,14 @@ resizeObserver.observe(terminalContainer);
 
 async function updateMemory() {
   const mem = await window.api.memGet();
-  memDisplay.textContent = `${mem.workingSetMB} MB | ${mem.ptyCount} PTY`;
+  statusSystem.textContent = `${mem.workingSetMB} MB  |  ${mem.ptyCount} PTY`;
 }
 setInterval(updateMemory, 2000);
 updateMemory();
 setInterval(updateStatusBar, 500);
 
 // ============================================================
-// L4: Sidebar / File Tree collapse & restore
+// L4: Stacked Projects / File Tree collapse & restore
 // ============================================================
 
 const sidebar = document.getElementById('sidebar');
@@ -2587,42 +3113,54 @@ const fileTreePane = document.getElementById('file-tree-pane');
 
 let sidebarCollapsed = false;
 let fileTreeCollapsed = false;
-let savedSidebarWidth = 200;
-let savedFileTreeWidth = 240;
+let savedNavigationWidth = 280;
+let savedSidebarHeight = 220;
 
 function applyCollapseState() {
-  savedSidebarWidth = captureExpandedPaneWidth({
-    isCollapsed: sidebar.classList.contains('collapsed'),
-    measuredWidth: sidebar.offsetWidth,
-    savedWidth: savedSidebarWidth,
+  const bothWereCollapsed = sidebar.classList.contains('collapsed') && fileTreePane.classList.contains('collapsed');
+  savedNavigationWidth = captureExpandedPaneWidth({
+    isCollapsed: bothWereCollapsed,
+    measuredWidth: navigationPane.offsetWidth,
+    savedWidth: savedNavigationWidth,
   });
-  savedFileTreeWidth = captureExpandedPaneWidth({
-    isCollapsed: fileTreePane.classList.contains('collapsed'),
-    measuredWidth: fileTreePane.offsetWidth,
-    savedWidth: savedFileTreeWidth,
+  savedSidebarHeight = captureExpandedPaneWidth({
+    isCollapsed: sidebar.classList.contains('collapsed') || fileTreePane.classList.contains('collapsed'),
+    measuredWidth: sidebar.offsetHeight,
+    savedWidth: savedSidebarHeight,
   });
+
+  const bothCollapsed = sidebarCollapsed && fileTreeCollapsed;
+  // 両方畳んだときは復元バーの中身に合わせる。固定幅を与えると
+  // ラベル付きボタンが押し潰されて崩れる。
+  navigationPane.classList.toggle('all-collapsed', bothCollapsed);
+  navigationPane.style.width = bothCollapsed ? '' : savedNavigationWidth + 'px';
+  vsplitter2.classList.toggle('hidden', bothCollapsed);
 
   if (sidebarCollapsed) {
     sidebar.classList.add('collapsed');
-    vsplitter1.classList.add('hidden');
     sidebarRestoreBar.classList.remove('hidden');
   } else {
-    sidebar.style.width = savedSidebarWidth + 'px';
     sidebar.classList.remove('collapsed');
-    vsplitter1.classList.remove('hidden');
     sidebarRestoreBar.classList.add('hidden');
+    if (fileTreeCollapsed) {
+      sidebar.style.height = 'auto';
+      sidebar.style.flexBasis = 'auto';
+      sidebar.style.flexGrow = '1';
+    } else {
+      sidebar.style.height = savedSidebarHeight + 'px';
+      sidebar.style.flexBasis = savedSidebarHeight + 'px';
+      sidebar.style.flexGrow = '0';
+    }
   }
 
   if (fileTreeCollapsed) {
     fileTreePane.classList.add('collapsed');
-    vsplitter2.classList.add('hidden');
     fileTreeRestoreBar.classList.remove('hidden');
   } else {
-    fileTreePane.style.width = savedFileTreeWidth + 'px';
     fileTreePane.classList.remove('collapsed');
-    vsplitter2.classList.remove('hidden');
     fileTreeRestoreBar.classList.add('hidden');
   }
+  vsplitter1.classList.toggle('hidden', sidebarCollapsed || fileTreeCollapsed);
   handleResize();
   saveCollapseState();
 }
@@ -2631,7 +3169,8 @@ function saveCollapseState() {
   try {
     localStorage.setItem('pm-collapse', JSON.stringify({
       sidebarCollapsed, fileTreeCollapsed,
-      sidebarWidth: savedSidebarWidth, fileTreeWidth: savedFileTreeWidth,
+      navigationWidth: savedNavigationWidth,
+      sidebarHeight: savedSidebarHeight,
     }));
   } catch {}
 }
@@ -2641,8 +3180,8 @@ function loadCollapseState() {
     const data = JSON.parse(localStorage.getItem('pm-collapse') || '{}');
     if (data.sidebarCollapsed !== undefined) sidebarCollapsed = data.sidebarCollapsed;
     if (data.fileTreeCollapsed !== undefined) fileTreeCollapsed = data.fileTreeCollapsed;
-    if (data.sidebarWidth) { savedSidebarWidth = data.sidebarWidth; sidebar.style.width = data.sidebarWidth + 'px'; }
-    if (data.fileTreeWidth) { savedFileTreeWidth = data.fileTreeWidth; fileTreePane.style.width = data.fileTreeWidth + 'px'; }
+    savedNavigationWidth = data.navigationWidth || data.fileTreeWidth || savedNavigationWidth;
+    savedSidebarHeight = data.sidebarHeight || data.sidebarWidth || savedSidebarHeight;
   } catch {}
   applyCollapseState();
 }
@@ -2859,7 +3398,7 @@ async function loadLayout() {
 }
 
 // ============================================================
-// Vertical splitters (sidebar | file-tree | main-pane)
+// Navigation splitters (Projects / Files | main-pane)
 // ============================================================
 
 function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight, onResizeEnd) {
@@ -2892,12 +3431,42 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight, onResizeE
   });
 }
 
-makeVSplitter(vsplitter1, sidebar, fileTreePane, 120, 300, (width) => {
-  savedSidebarWidth = width;
+function makeHSplitter(splitterEl, topEl, containerEl, minTop, minBottom, onResizeEnd) {
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  splitterEl.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startHeight = topEl.offsetHeight;
+    document.body.style.cursor = 'ns-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const maxHeight = containerEl.clientHeight - minBottom - splitterEl.offsetHeight;
+    const newHeight = Math.max(minTop, Math.min(startHeight + e.clientY - startY, maxHeight));
+    topEl.style.height = newHeight + 'px';
+    topEl.style.flexBasis = newHeight + 'px';
+    handleResize();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+    if (onResizeEnd) onResizeEnd(topEl.offsetHeight);
+  });
+}
+
+makeHSplitter(vsplitter1, sidebar, navigationPane, 100, 120, (height) => {
+  savedSidebarHeight = height;
   saveCollapseState();
 });
-makeVSplitter(vsplitter2, fileTreePane, document.getElementById('main-pane'), 120, 300, (width) => {
-  savedFileTreeWidth = width;
+makeVSplitter(vsplitter2, navigationPane, document.getElementById('main-pane'), 180, 300, (width) => {
+  savedNavigationWidth = width;
   saveCollapseState();
 });
 
@@ -2910,13 +3479,15 @@ function updateStatusBar() {
   statusLeft.textContent = p ? p.name : 'No project selected';
 
   const parts = [];
-  if (activeTabId !== null) {
+  if (activeMainView === 'terminal' && activeTabId !== null) {
     const t = tabs.get(activeTabId);
     if (t) parts.push(t.command.replace('.exe', ''));
-  }
-  if (activeFilePath) {
-    const f = openFiles.get(activeFilePath);
+  } else if (activeMainView === 'file' && activeMainFilePath) {
+    const f = openFiles.get(activeMainFilePath);
     if (f) parts.push(f.name + (f.content !== f.originalContent ? ' *' : ''));
+  } else if (activeMainView === 'preview' && activePreviewPath) {
+    const preview = previewFiles.get(activePreviewPath);
+    if (preview) parts.push(preview.name);
   }
   statusRight.textContent = parts.join('  |  ');
 }
@@ -2959,11 +3530,7 @@ register('close_tab', ({ filePath }) => {
 
 // switch_tab: switch to an editor tab
 register('switch_tab', ({ filePath }) => {
-  switchEditorTab(filePath);
-});
-
-register('create_scratch_tab', () => {
-  createTempTab();
+  return switchEditorTab(filePath);
 });
 
 register('append_to_scratch', ({ text }) => {
@@ -3260,6 +3827,15 @@ function escapeHtml(text) {
 }
 
 (async () => {
+  try {
+    const savedHeight = Number(localStorage.getItem('pm-scratch-expanded-height'));
+    if (Number.isFinite(savedHeight) && savedHeight >= SCRATCH_COMPACT_HEIGHT) {
+      savedScratchEditorHeight = clampScratchExpandedHeight(savedHeight);
+    }
+    setScratchCollapsed(localStorage.getItem('pm-scratch-collapsed') === 'true');
+  } catch {
+    setScratchCollapsed(false);
+  }
   await loadProjects();
   await loadLayout();
   if (tabs.size === 0 && projects.size > 0) {
