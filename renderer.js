@@ -8,6 +8,13 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { register, dispatch } from './src/commands/registry.js';
 import { getState, setState, buildFocusState, getProjectScratchContent } from './src/store/index.js';
+import {
+  clampLineRange,
+  decidePreviewActivation,
+  findOwningProject,
+  makePreviewPath,
+  resolveAttentionFile,
+} from './src/phase3/state.mjs';
 import { calculatePreviewWidth, getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
 import { PREVIEW_CSP } from './src/preview/security.js';
 import {
@@ -336,6 +343,7 @@ async function selectProject(projectId) {
   switchProjectEditor(projectId);
   activeProjectId = projectId;
   setState({ activeProjectId });
+  dispatch('project_set_badge', { projectId, kind: 'clear' });
   // Update editor state in store after switching project editor
   const activePreview = previewFiles.get(activePreviewPath);
   if (activeSurface === 'preview' && isPreviewForProject(activePreview, projectId)) {
@@ -814,6 +822,7 @@ let activeSurface = 'editor'; // 'editor' | 'preview', restored per project
 let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
+let agentPreviewCounter = 0;
 const projectEditorStates = new Map();
 let activeEditorProjectId = null;
 let editorStateInitialized = false;
@@ -1088,25 +1097,38 @@ img { max-width:100%; }
 hr { border:0; border-top:1px solid #21262d; }
 `;
 
-async function openFileInPreview(filePath, name) {
-  const projectId = activeEditorProjectId;
+async function openFileInPreview(filePath, name, options = {}) {
+  const projectId = options.projectId ?? activeEditorProjectId;
+  const activate = options.activate !== false;
+  const allowOs = options.allowOs !== false;
+  const previewPath = options.previewPath || makePreviewPath(projectId, filePath);
   if (shouldOpenInOsByName(name)) {
-    await window.api.openInOs(filePath);
-    return;
+    if (allowOs) await window.api.openInOs(filePath);
+    return { shown: false, previewPath: null, reason: 'file type is not supported by the preview' };
   }
-  const previewPath = `preview:${projectId}:${filePath}`;
   if (previewFiles.has(previewPath)) {
-    switchPreviewTab(previewPath);
-    return;
+    let loaded = true;
+    if (activate) {
+      loaded = await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention });
+    }
+    return {
+      shown: loaded && activate && activeEditorProjectId === projectId && activePreviewPath === previewPath,
+      previewPath,
+      reason: !loaded
+        ? 'preview was superseded before it finished rendering'
+        : (activate ? 'reused existing preview tab' : 'existing preview tab left in background'),
+    };
   }
 
   let initialContent;
   if (!isImage(name)) {
     const result = await window.api.readFile(filePath);
-    if (!result.success || activeEditorProjectId !== projectId) return;
+    if (!result.success) {
+      return { shown: false, previewPath: null, reason: result.error || 'failed to read file' };
+    }
     if (result.isBinary) {
-      await window.api.openInOs(filePath);
-      return;
+      if (allowOs) await window.api.openInOs(filePath);
+      return { shown: false, previewPath: null, reason: 'binary file cannot be previewed' };
     }
     initialContent = result.content;
   }
@@ -1154,15 +1176,70 @@ async function openFileInPreview(filePath, name) {
   fileData.tabEl = tabEl;
   previewFiles.set(previewPath, fileData);
 
-  showPreviewPane();
-  switchPreviewTab(previewPath);
+  // Tabs belonging to another project are prepared in the background. They
+  // become visible when the human switches to that project themselves.
+  tabEl.style.display = projectId === activeEditorProjectId ? '' : 'none';
+
+  if (activate && projectId === activeEditorProjectId) {
+    showPreviewPane();
+    try {
+      const loaded = await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention });
+      if (!loaded || activePreviewPath !== previewPath) {
+        return { shown: false, previewPath, reason: 'preview was superseded before it finished rendering' };
+      }
+    } catch (error) {
+      closePreviewTab(previewPath);
+      return { shown: false, previewPath: null, reason: error.message || 'failed to render preview' };
+    }
+    return { shown: true, previewPath, reason: 'opened in preview pane' };
+  }
+
+  return {
+    shown: false,
+    previewPath,
+    reason: projectId === activeEditorProjectId
+      ? 'preview tab created without activation'
+      : 'preview tab created in another project',
+  };
 }
 
-function loadPreviewHtml(html) {
+let pendingPreviewLoad = null;
+
+function loadPreviewHtml(html, revealRange = null) {
   const dataUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
   // Assigning src is safe before the webview's initial dom-ready event.
   // loadURL() would reject until the guest WebContents has been created.
+  if (pendingPreviewLoad) pendingPreviewLoad.cancel();
+  const loaded = new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      previewWebview.removeEventListener('dom-ready', onReady);
+      clearTimeout(timeoutId);
+      if (pendingPreviewLoad?.finish === finish) pendingPreviewLoad = null;
+      resolve(value);
+    };
+    const onReady = async () => {
+      if (revealRange) {
+        try {
+          await previewWebview.executeJavaScript(`(() => {
+            const target = document.querySelector('[data-pm-line="${revealRange.start}"]');
+            if (target) target.scrollIntoView({ block: 'center' });
+            return !!target;
+          })()`);
+        } catch (error) {
+          console.warn('[preview] Failed to reveal line:', error);
+        }
+      }
+      finish(true);
+    };
+    const timeoutId = setTimeout(() => finish(false), 10000);
+    pendingPreviewLoad = { finish, cancel: () => finish(false) };
+    previewWebview.addEventListener('dom-ready', onReady);
+  });
   previewWebview.src = dataUrl;
+  return loaded;
 }
 
 function buildSafePreviewDocument(source, baseUrl, extraStyle = '') {
@@ -1192,7 +1269,7 @@ function isActivePreview(f) {
   return activeEditorProjectId === f.projectId && activePreviewPath === f.previewPath;
 }
 
-async function readPreviewText(f) {
+async function readPreviewText(f, allowOs = true) {
   if (f.initialContent !== undefined) {
     const content = f.initialContent;
     f.initialContent = undefined;
@@ -1202,39 +1279,74 @@ async function readPreviewText(f) {
   const result = await window.api.readFile(f.path);
   if (!result.success || !isActivePreview(f)) return null;
   if (result.isBinary) {
-    await window.api.openInOs(f.path);
+    if (allowOs) await window.api.openInOs(f.path);
     if (isActivePreview(f)) closePreviewTab(f.previewPath);
     return null;
   }
   return result.content;
 }
 
-async function loadPreviewContent(f) {
+function buildLinePreviewDocument(content, baseUrl, line, endLine) {
+  const lines = String(content).split('\n');
+  const range = clampLineRange(line, endLine, lines.length);
+  const lineHtml = lines.map((value, index) => {
+    const lineNumber = index + 1;
+    const escaped = escapeHtml(value || ' ');
+    const highlighted = lineNumber >= range.start && lineNumber <= range.end ? ' pm-highlight' : '';
+    return `<span class="pm-source-line${highlighted}" data-pm-line="${lineNumber}"><span class="pm-line-number">${lineNumber}</span><span class="pm-line-text">${escaped}</span></span>`;
+  }).join('');
+  const css = `${MD_CSS}
+body { padding:0; }
+.pm-source { margin:0; padding:18px 0; overflow:visible; background:#0d1117; }
+.pm-source-line { display:flex; min-height:1.45em; white-space:pre; }
+.pm-line-number { box-sizing:border-box; flex:0 0 5em; padding:0 1em; color:#6e7681; text-align:right; user-select:none; }
+.pm-line-text { flex:1; padding-right:24px; }
+.pm-highlight { background:rgba(210,153,34,.24); box-shadow:inset 3px 0 #d29922; }
+`;
+  const source = `<body><pre class="pm-source"><code>${lineHtml}</code></pre></body>`;
+  return {
+    html: buildSafePreviewDocument(source, baseUrl, css),
+    range,
+  };
+}
+
+async function loadPreviewContent(f, reveal = null, allowOs = true) {
   if (isImage(f.name)) {
-    if (!isActivePreview(f)) return;
+    if (!isActivePreview(f)) return false;
     previewWebview.src = toFileUrl(f.path);
-  } else if (isHtml(f.name)) {
-    const content = await readPreviewText(f);
-    if (content === null || !isActivePreview(f)) return;
+    return true;
+  }
+
+  if (reveal?.line) {
+    const content = await readPreviewText(f, allowOs);
+    if (content === null || !isActivePreview(f)) return false;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
-    loadPreviewHtml(buildSafePreviewDocument(content, baseUrl));
+    const document = buildLinePreviewDocument(content, baseUrl, reveal.line, reveal.endLine);
+    return await loadPreviewHtml(document.html, document.range);
+  }
+
+  if (isHtml(f.name)) {
+    const content = await readPreviewText(f, allowOs);
+    if (content === null || !isActivePreview(f)) return false;
+    const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
+    return await loadPreviewHtml(buildSafePreviewDocument(content, baseUrl));
   } else if (isMarkdown(f.name)) {
-    const content = await readPreviewText(f);
-    if (content === null || !isActivePreview(f)) return;
+    const content = await readPreviewText(f, allowOs);
+    if (content === null || !isActivePreview(f)) return false;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
     const markdownHtml = `<body class="markdown-body">${marked.parse(content)}</body>`;
-    loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS));
+    return await loadPreviewHtml(buildSafePreviewDocument(markdownHtml, baseUrl, MD_CSS));
   } else {
     // A4: show text/code files as a safe read-only preview.
-    const content = await readPreviewText(f);
-    if (content === null || !isActivePreview(f)) return;
+    const content = await readPreviewText(f, allowOs);
+    if (content === null || !isActivePreview(f)) return false;
     const baseUrl = toFileUrl(pathDirname(f.path)) + '/';
     const escaped = content
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
     const codeHtml = `<body class="markdown-body"><pre><code>${escaped}</code></pre></body>`;
-    loadPreviewHtml(buildSafePreviewDocument(codeHtml, baseUrl, MD_CSS));
+    return await loadPreviewHtml(buildSafePreviewDocument(codeHtml, baseUrl, MD_CSS));
   }
 }
 
@@ -1253,17 +1365,22 @@ function hidePreviewPane() {
   clearPreviewContent();
 }
 
-function switchPreviewTab(previewPath) {
+function switchPreviewTab(previewPath, { preserveAttention = false, reveal = null } = {}) {
   const f = previewFiles.get(previewPath);
-  if (!isPreviewForProject(f, activeEditorProjectId)) return;
+  if (!isPreviewForProject(f, activeEditorProjectId)) return Promise.resolve(false);
 
   previewFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
   f.tabEl.classList.add('active');
+  f.tabEl.classList.remove('notified');
   activePreviewPath = previewPath;
-  activeSurface = 'preview';
   showPreviewPane();
-  setState({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
-  loadPreviewContent(f).catch((error) => console.error('[preview] Failed to load:', error));
+  if (!preserveAttention) {
+    activeSurface = 'preview';
+    setState({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
+  }
+  const loading = loadPreviewContent(f, reveal);
+  loading.catch((error) => console.error('[preview] Failed to load:', error));
+  return loading.then(() => true);
 }
 
 function closePreviewTab(previewPath) {
@@ -1643,6 +1760,7 @@ function sendToTerminal(text, tabId) {
   if (!t) return;
 
   const hasExplicitText = typeof text === 'string';
+  const focusState = getState();
   const f = openFiles.get(activeFilePath);
   if (!f && !hasExplicitText) return;
 
@@ -1654,12 +1772,13 @@ function sendToTerminal(text, tabId) {
 
   // 3.1 push: append focus context to the message
   if (pushFocusCheckbox.checked) {
+    const attention = resolveAttentionFile(focusState, previewFiles);
     const ctx = buildPushFocusContext({
-      project: projects.get(activeProjectId),
-      activeFilePath,
-      isPreview: f?.isPreview,
+      project: projects.get(focusState.activeProjectId),
+      activeFilePath: attention.filePath,
+      isPreview: attention.isPreview,
       selectedText,
-      selectionRange: f ? getSelectionRange() : null,
+      selectionRange: focusState.isPreview ? focusState.selection : (f ? getSelectionRange() : null),
     });
     if (ctx) {
       contentToSend = contentToSend + '\n' + ctx;
@@ -1810,7 +1929,14 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
   const cols = terminal.cols;
   const rows = terminal.rows;
 
-  const ptyId = await window.api.ptyCreate({ command, args: [], cwd: cwd || undefined, cols, rows });
+  const ptyId = await window.api.ptyCreate({
+    command,
+    args: [],
+    cwd: cwd || undefined,
+    projectId: projectId || null,
+    cols,
+    rows,
+  });
 
   terminal.onData((data) => {
     window.api.ptyWrite(ptyId, data);
@@ -2647,65 +2773,86 @@ register('tab_activate', ({ filePath }) => {
 
 // preview_open: open a file in the preview area (show_file core)
 // Returns { shown: boolean, reason: string }
-register('preview_open', ({ path: filePath, reason, newTab }) => {
+register('preview_open', async ({ path: filePath, reason, newTab }) => {
   if (!filePath) return { shown: false, reason: 'no path' };
 
-  // Determine which project the file belongs to
-  let targetProjectId = null;
-  let targetProject = null;
-  for (const [id, p] of projects) {
-    if (filePath.startsWith(p.path)) {
-      targetProjectId = id;
-      targetProject = p;
-      break;
-    }
-  }
-  if (!targetProject) {
+  // Compare complete path segments and prefer the deepest nested project.
+  // A raw startsWith() would incorrectly assign app-extra to app on Windows.
+  const owner = findOwningProject(projects, filePath);
+  if (!owner) {
     return { shown: false, reason: 'file not in any open project' };
   }
+  const { id: targetProjectId, project: targetProject } = owner;
 
   const name = filePath.split(/[/\\]/).pop();
-  const previewPath = `preview:${targetProjectId}:${filePath}`;
+  const previewPath = makePreviewPath(
+    targetProjectId,
+    filePath,
+    newTab ? ++agentPreviewCounter : null,
+  );
+  const sameProject = targetProjectId === activeProjectId && targetProjectId === activeEditorProjectId;
+  const activation = decidePreviewActivation({
+    sameProject,
+    activeSurface,
+    activePreviewPath,
+    requestedPreviewPath: previewPath,
+    newTab,
+  });
+  const { activate, preserveAttention } = activation;
 
-  // Case 1: same project — open in preview area
-  if (targetProjectId === activeProjectId) {
-    if (previewFiles.has(previewPath) && !newTab) {
-      // Reuse existing tab
-      switchPreviewTab(previewPath);
-    } else {
-      // Open new preview tab (openFileInPreview uses activeEditorProjectId)
-      // We need to ensure the editor project matches
-      if (activeEditorProjectId !== targetProjectId) {
-        switchProjectEditor(targetProjectId);
-      }
-      openFileInPreview(filePath, name);
+  const result = await openFileInPreview(filePath, name, {
+    projectId: targetProjectId,
+    previewPath,
+    activate,
+    preserveAttention,
+    // Agent-originated show_file must never launch an external application.
+    allowOs: false,
+  });
+
+  if (result.previewPath && reason) {
+    const preview = previewFiles.get(result.previewPath);
+    if (preview) {
+      preview.tabEl.classList.add('notified');
+      preview.tabEl.title = `${filePath} — ${reason}`;
     }
-    // Mark the tab if a reason was provided
-    if (reason) {
-      const f = previewFiles.get(previewPath);
-      if (f) {
-        f.tabEl.classList.add('notified');
-        f.tabEl.title = filePath + (reason ? ` — ${reason}` : '');
-      }
-    }
-    return { shown: true, reason: 'opened in active project' };
   }
 
-  // Case 2: different project — don't switch, just badge
-  dispatch('project_set_badge', { projectId: targetProjectId, kind: 'show_file' });
-  return { shown: false, reason: `file is in project "${targetProject.name}", badge added` };
+  if (!sameProject) {
+    dispatch('project_set_badge', { projectId: targetProjectId, kind: 'show_file' });
+    return {
+      ...result,
+      shown: false,
+      reason: result.previewPath
+        ? `preview tab created in project "${targetProject.name}"; project was not switched`
+        : result.reason,
+    };
+  }
+
+  if (activation.reason === 'human-on-other-preview') {
+    return {
+      ...result,
+      shown: false,
+      reason: 'preview tab created without activation because the human is viewing another preview tab',
+    };
+  }
+
+  return result;
 });
 
 // preview_reveal: scroll to a line in the active preview
-register('preview_reveal', ({ line, endLine }) => {
-  if (!line) return;
-  // For markdown previews, we can scroll the webview
-  // For now, send a message to the preview webview
-  try {
-    previewWebview.send('reveal-line', { line, endLine: endLine || line });
-  } catch {
-    // webview not ready
+register('preview_reveal', async ({ previewPath, line, endLine }) => {
+  if (!line) return { revealed: false, reason: 'no line' };
+  const targetPath = previewPath || activePreviewPath;
+  const preview = previewFiles.get(targetPath);
+  if (!preview || targetPath !== activePreviewPath || !isActivePreview(preview)) {
+    return { revealed: false, reason: 'preview is not visible' };
   }
+  if (isImage(preview.name)) {
+    return { revealed: false, reason: 'line reveal is not supported for images' };
+  }
+  const revealed = await loadPreviewContent(preview, { line, endLine: endLine || line }, false);
+  if (!revealed) return { revealed: false, reason: 'file could not be rendered' };
+  return { revealed: true, previewPath: targetPath };
 });
 
 register('close_terminal', ({ tabId }) => {
@@ -2718,10 +2865,50 @@ register('send_to_terminal', ({ text, tabId }) => {
 });
 
 // get_focus: build the human's attention state from the store + live data
-register('get_focus', () => {
+register('get_focus', ({ $session: session = null } = {}) => {
   const focus = buildFocusState((id) => projects.get(id) || null);
+  const scopedProjectId = session?.projectId || focus.project?.id || null;
+
+  // A PTY may remain alive while the human looks at another project. In that
+  // case do not leak the other project's editor/scratch state into this MCP
+  // session; report the owning project and that it is currently in background.
+  if (session?.projectId && session.projectId !== focus.project?.id) {
+    const project = projects.get(session.projectId) || null;
+    const editorState = projectEditorStates.get(session.projectId);
+    focus.project = project ? { id: project.id, name: project.name, path: project.path } : {
+      id: session.projectId,
+      name: null,
+      path: session.cwd || null,
+    };
+    focus.editor = null;
+    focus.scratch = {
+      content: editorState
+        ? getProjectScratchContent(editorState.openFiles, editorState.activeFilePath, SCRATCH_PATH)
+        : '',
+      length: 0,
+    };
+    focus.scratch.length = focus.scratch.content.length;
+  }
+
   // Enrich terminal info from live tabs Map (store only has tabId)
-  if (focus.terminal) {
+  let sessionTerminal = null;
+  if (session?.ptyId) {
+    for (const [tabId, tab] of tabs) {
+      if (tab.ptyId === session.ptyId) {
+        sessionTerminal = {
+          activeTabId: tabId === activeTabId ? tabId : null,
+          ownTabId: tabId,
+          active: tabId === activeTabId,
+          command: tab.command,
+          cwd: session.cwd || null,
+        };
+        break;
+      }
+    }
+  }
+  if (sessionTerminal) {
+    focus.terminal = sessionTerminal;
+  } else if (focus.terminal) {
     const t = tabs.get(focus.terminal.activeTabId);
     if (t) {
       focus.terminal.command = t.command;
@@ -2735,6 +2922,12 @@ register('get_focus', () => {
       focus.editor.activeTab = pf.name;
     }
   }
+  focus.session = session ? {
+    projectId: scopedProjectId,
+    ptyId: session.ptyId || null,
+    cwd: session.cwd || null,
+    activeProject: scopedProjectId === activeProjectId,
+  } : null;
   return focus;
 });
 

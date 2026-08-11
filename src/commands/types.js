@@ -94,8 +94,8 @@ export const COMMAND_TYPES = {
     returns: 'ShowFileResult',
   },
   preview_reveal: {
-    args: { line: 'number', endLine: 'number?' },
-    returns: 'void',
+    args: { previewPath: 'string?', line: 'number', endLine: 'number?' },
+    returns: 'RevealResult',
   },
   tab_activate: {
     args: { filePath: 'string' },

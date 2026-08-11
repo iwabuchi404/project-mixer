@@ -8,6 +8,7 @@ const pty = require('node-pty');
 const { execSync } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
+const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
 
@@ -31,6 +32,9 @@ const BASE_PORT = IS_DEV ? 47842 : 47832;
 const MCP_BASE_PORT = IS_DEV ? 47852 : 47822;
 let HOOK_PORT = null; // set only after the hook server is listening
 let MCP_PORT = null; // set only after the MCP server is listening
+let mcpControl = null;
+let resolveMcpReady;
+const mcpReady = new Promise((resolve) => { resolveMcpReady = resolve; });
 
 const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
@@ -226,18 +230,24 @@ app.whenReady().then(() => {
   createWindow();
   startHookServer();
   // Start MCP server (Phase 1.3) — port written to port.json for discovery
-  startMcpServer(MCP_BASE_PORT, async (commandName, args = {}) => {
+  mcpControl = startMcpServer(MCP_BASE_PORT, async (commandName, args = {}, sessionContext = null) => {
     // Dispatch commands to the renderer via executeJavaScript
     if (!mainWindow || mainWindow.isDestroyed()) {
       return { error: 'no window' };
     }
+    const commandArgs = sessionContext ? { ...args, $session: sessionContext } : args;
     return await mainWindow.webContents.executeJavaScript(
-      `window.__pmDispatch && window.__pmDispatch(${JSON.stringify(commandName)}, ${JSON.stringify(args)})`
+      `window.__pmDispatch && window.__pmDispatch(${JSON.stringify(commandName)}, ${JSON.stringify(commandArgs)})`
     );
   }, (port) => {
     MCP_PORT = port;
+    resolveMcpReady(port);
     console.log(`[Project Mixer] MCP port: ${MCP_PORT}`);
     savePortJson();
+  }, () => {
+    // MCP is optional for local editing. A bind failure must not prevent the
+    // terminal itself from opening.
+    resolveMcpReady(null);
   });
 });
 
@@ -256,14 +266,26 @@ function savePortJson() {
 }
 
 app.on('window-all-closed', () => {
-  ptys.forEach((p) => p.process.kill());
+  ptys.forEach((p) => {
+    p.process.kill();
+    if (p.mcpToken) void mcpControl?.revokeSession(p.mcpToken);
+  });
   ptys.clear();
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
+ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols, rows }) => {
   const id = ++ptyCounter;
   const shellCwd = cwd || os.homedir();
+  const mcpPort = MCP_PORT || await mcpReady;
+  const mcpToken = mcpPort ? mcpControl.registerSession({
+      ptyId: id,
+      projectId: projectId || null,
+      cwd: shellCwd,
+    }) : null;
+  const mcpUrl = mcpToken ? `http://127.0.0.1:${mcpPort}/s/${mcpToken}` : null;
+  const requestedArgs = args || [];
+  const agentMcpArgs = buildAgentMcpArgs(command, mcpUrl);
 
   const isWin = os.platform() === 'win32';
   const winShells = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe'];
@@ -272,37 +294,47 @@ ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
   let shell, shellArgs;
   if (!command) {
     shell = isWin ? 'pwsh.exe' : 'bash';
-    shellArgs = args || [];
+    shellArgs = requestedArgs;
   } else if (isWin && winShells.includes(command)) {
     shell = command;
-    shellArgs = args || [];
+    shellArgs = requestedArgs;
   } else if (!isWin && unixShells.includes(command)) {
     shell = command;
-    shellArgs = args || [];
+    shellArgs = requestedArgs;
   } else {
     // claude, codex, etc. — wrap in pwsh -NoExit -Command on Windows
     if (isWin) {
       shell = 'pwsh.exe';
-      shellArgs = ['-NoExit', '-Command', command];
+      shellArgs = [
+        '-NoExit',
+        '-Command',
+        buildPowerShellInvocation(command, [...requestedArgs, ...agentMcpArgs]),
+      ];
     } else {
       shell = command;
-      shellArgs = args || [];
+      shellArgs = [...requestedArgs, ...agentMcpArgs];
     }
   }
 
-  const ptyProcess = pty.spawn(shell, shellArgs, {
-    name: 'xterm-256color',
-    cols: cols || 80,
-    rows: rows || 30,
-    cwd: shellCwd,
-    env: {
-      ...process.env,
-      TERM: 'xterm-256color',
-      PROJECT_MIXER_PORT_FILE: portFile,
-      // 3.5: inject MCP server URL so agents can discover it
-      ...(MCP_PORT ? { PM_MCP_URL: `http://127.0.0.1:${MCP_PORT}/sse` } : {}),
-    },
-  });
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(shell, shellArgs, {
+      name: 'xterm-256color',
+      cols: cols || 80,
+      rows: rows || 30,
+      cwd: shellCwd,
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        PROJECT_MIXER_PORT_FILE: portFile,
+        // 3.5: inject a per-PTY MCP URL so agents discover only their session.
+        ...(mcpUrl ? { PM_MCP_URL: mcpUrl } : {}),
+      },
+    });
+  } catch (error) {
+    if (mcpToken) await mcpControl.revokeSession(mcpToken);
+    throw error;
+  }
 
   ptyProcess.onData((data) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -315,9 +347,10 @@ ipcMain.handle('pty:create', (event, { command, args, cwd, cols, rows }) => {
       mainWindow.webContents.send('pty:exit', { id, exitCode, signal });
     }
     ptys.delete(id);
+    void mcpControl?.revokeSession(mcpToken);
   });
 
-  ptys.set(id, { process: ptyProcess, cwd: shellCwd, command: command || shell });
+  ptys.set(id, { process: ptyProcess, cwd: shellCwd, command: command || shell, mcpToken });
   return id;
 });
 
@@ -336,6 +369,7 @@ ipcMain.handle('pty:kill', (event, { id }) => {
   if (p) {
     p.process.kill();
     ptys.delete(id);
+    if (p.mcpToken) void mcpControl?.revokeSession(p.mcpToken);
   }
 });
 
