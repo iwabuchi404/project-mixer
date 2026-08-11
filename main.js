@@ -85,6 +85,12 @@ function createWindow() {
     width: 1400,
     height: 900,
     title: 'Project Mixer',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#16181c',
+      symbolColor: '#c8ccd4',
+      height: 32,
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

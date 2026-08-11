@@ -1,0 +1,521 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Mixer — Design System</title>
+<style>
+/* ═══════════════════════════════════════════════════════════
+   TOKENS
+   容れ物に徹する。中身（ANSIカラー・プレビュー・差分）が
+   色を持つので、器は色を持たない。
+   ═══════════════════════════════════════════════════════════ */
+:root {
+  /* Gray — 単一色相 (220°) 6段階。他色相のグレーを混ぜない */
+  --g-0:  #16181c;   /* 最背面 / アプリ地 */
+  --g-1:  #1c1f24;   /* ペイン面 */
+  --g-2:  #23272e;   /* 浮いた面 / 非アクティブタブ */
+  --g-3:  #2e333b;   /* 境界・区切り */
+  --g-4:  #6b7280;   /* 弱いテキスト */
+  --g-5:  #c8ccd4;   /* 通常テキスト */
+  --g-6:  #f0f2f5;   /* 強調テキスト */
+
+  /* Accent — 1色 = 1つの意味。彩度を揃えて共存させる */
+  --attn: #c08b4d;   /* 人間の介入が必要（入力待ち・エージェント操作） */
+  --act:  #4d8480;   /* 主要動作（送信・確定）— 琥珀と補色関係を外したティール */
+  --err:  #b56b66;   /* エラー */
+  --ok:   #5f9278;   /* 差分の追加 */
+
+  /* Space — 4px 基準・5段階 */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px;  --s-4: 16px;  --s-5: 24px;
+
+  /* Type — 3段階 */
+  --t-sm: 11px;  --t-md: 13px;  --t-lg: 15px;
+  --font: "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", monospace;
+
+  /* Radius — 2値 */
+  --r-1: 3px;  --r-2: 6px;
+
+  /* Shadow — 1段階のみ。浮いているものにだけ */
+  --shadow: 0 6px 20px rgba(0,0,0,.45), 0 0 0 1px rgba(0,0,0,.3);
+
+  /* Motion — 1種類 */
+  --move: 120ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) { :root { --move: 1ms; } }
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--g-0); color: var(--g-5);
+  font: var(--t-md)/1.5 var(--font);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   BORDER RULES — 境界は「明度差」で表す。線は例外的にのみ引く
+   ═══════════════════════════════════════════════════════════ */
+
+/* L1: ペイン間 — 線を引かない。地(--g-0)の隙間が境界になる */
+.app { display: flex; gap: 1px; background: var(--g-0); }
+.pane { background: var(--g-1); min-width: 0; }
+
+/* L2: ペイン内の区切り — ヘッダ・フッタは面を変える。線を引かない */
+.pane-head, .pane-foot { background: var(--g-1); }
+.pane-body { background: var(--g-1); }
+
+/* L3: 浮いた面 — 影のみ。線を引かない（Menu / Toast） */
+
+/* 例外1: 入力可能な領域の輪郭。押せる・打てることを示す */
+.edge-input { border: 1px solid var(--g-3); border-radius: var(--r-1); }
+.edge-input:focus-within { border-color: var(--act); }
+
+/* 例外2: リスト内の意味的な区切り。1本だけ */
+.edge-sep { height: 1px; background: var(--g-3); border: 0; margin: var(--s-1) 0; }
+
+/* 例外3: フォーカスリング。キーボード操作時のみ */
+.edge-focus:focus-visible { outline: 2px solid var(--act); outline-offset: 1px; }
+
+/* 禁止パターンの実演用 */
+.bad-mix { border: 1px solid var(--g-3); background: var(--g-2); }
+.tabbar { display: flex; align-items: stretch; background: var(--g-0); height: 34px; }
+.tab {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 0 var(--s-3); background: var(--g-2); color: var(--g-4);
+  border: none; border-right: 1px solid var(--g-0);
+  font: var(--t-md) var(--font); cursor: pointer;
+  transition: background var(--move), color var(--move);
+}
+.tab:hover { color: var(--g-5); }
+.tab[aria-selected="true"] { background: var(--g-1); color: var(--g-6); }
+.tab:focus-visible { outline: 2px solid var(--act); outline-offset: -2px; }
+.tab .ico { width: 13px; height: 13px; flex: none; opacity: .8; }
+.tab .x {
+  width: 15px; height: 15px; border-radius: var(--r-1);
+  display: grid; place-items: center; opacity: 0;
+  transition: opacity var(--move), background var(--move);
+}
+.tab:hover .x, .tab[aria-selected="true"] .x { opacity: .55; }
+.tab .x:hover { background: var(--g-3); opacity: 1; }
+.tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--attn); flex: none; }
+
+/* ═══════════════════════════════════════════════════════════
+   2. ListRow — プロジェクト・ファイルツリー共通
+   ═══════════════════════════════════════════════════════════ */
+.row {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) var(--s-3); cursor: pointer; color: var(--g-5);
+  transition: background var(--move);
+}
+.row:hover { background: var(--g-2); }
+.row[aria-selected="true"] { background: var(--g-3); color: var(--g-6); }
+.row .ico { width: 14px; height: 14px; flex: none; opacity: .7; }
+.row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ═══════════════════════════════════════════════════════════
+   3. Button
+   ═══════════════════════════════════════════════════════════ */
+.btn {
+  padding: var(--s-1) var(--s-3); border-radius: var(--r-1);
+  border: 1px solid var(--g-3); background: var(--g-2); color: var(--g-5);
+  font: var(--t-md) var(--font); cursor: pointer;
+  transition: background var(--move), border-color var(--move);
+}
+.btn:hover { background: var(--g-3); }
+.btn:focus-visible { outline: 2px solid var(--act); outline-offset: 1px; }
+.btn--primary { background: var(--act); border-color: var(--act); color: #0d1412; font-weight: 600; }
+.btn--primary:hover { filter: brightness(1.12); }
+.btn--icon { padding: var(--s-1); width: 24px; height: 24px; display: grid; place-items: center; }
+
+/* ═══════════════════════════════════════════════════════════
+   4. Menu — 影を使う唯一の場所
+   ═══════════════════════════════════════════════════════════ */
+.menu {
+  background: var(--g-2); border-radius: var(--r-2);
+  box-shadow: var(--shadow); padding: var(--s-1) 0; min-width: 190px;
+}
+.menu-item {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) var(--s-3); color: var(--g-5); cursor: pointer;
+  transition: background var(--move);
+}
+.menu-item:hover { background: var(--g-3); color: var(--g-6); }
+.menu-item .key { margin-left: auto; color: var(--g-4); font: var(--t-sm) var(--mono); }
+.menu-sep { height: 1px; background: var(--g-3); margin: var(--s-1) 0; }
+
+/* ═══════════════════════════════════════════════════════════
+   5. PaneHeader
+   ═══════════════════════════════════════════════════════════ */
+.pane-head {
+  display: flex; align-items: center; gap: var(--s-2);
+  height: 28px; padding: 0 var(--s-2) 0 var(--s-3);
+  background: var(--g-1); color: var(--g-4);
+  font-size: var(--t-sm); letter-spacing: .06em; text-transform: uppercase;
+}
+.pane-head .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ═══════════════════════════════════════════════════════════
+   6. Splitter
+   ═══════════════════════════════════════════════════════════ */
+.split { width: 4px; background: var(--g-0); cursor: col-resize; transition: background var(--move); }
+.split:hover, .split.is-drag { background: var(--act); }
+
+/* ═══════════════════════════════════════════════════════════
+   7. Badge — 見るまで消えない。エージェント起点の通知
+   ═══════════════════════════════════════════════════════════ */
+.badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 5px;
+  border-radius: 8px; background: var(--attn); color: var(--g-0);
+  font: 600 var(--t-sm)/1 var(--font);
+}
+.badge--dot { min-width: 7px; width: 7px; height: 7px; padding: 0; border-radius: 50%; }
+
+/* ═══════════════════════════════════════════════════════════
+   8. Input
+   ═══════════════════════════════════════════════════════════ */
+.input {
+  width: 100%; padding: var(--s-1) var(--s-2);
+  background: var(--g-0); border: 1px solid var(--g-3);
+  border-radius: var(--r-1); color: var(--g-5);
+  font: var(--t-md) var(--font);
+  transition: border-color var(--move);
+}
+.input::placeholder { color: var(--g-4); }
+.input:focus { outline: none; border-color: var(--act); }
+
+/* ═══════════════════════════════════════════════════════════
+   9. Toast — 人間起点。自動で消える。undo の置き場所
+   ═══════════════════════════════════════════════════════════ */
+.toast {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-2);
+  background: var(--g-2); box-shadow: var(--shadow); color: var(--g-5);
+}
+.toast .glyph {
+  width: 14px; height: 14px; flex: none; color: var(--g-4);
+}
+.toast--warn .glyph { color: var(--attn); }
+.toast--err  .glyph { color: var(--err); }
+.toast .msg { display: flex; align-items: baseline; gap: var(--s-2); }
+.toast .path { color: var(--g-4); font: var(--t-sm) var(--mono); }
+.toast .undo {
+  margin-left: var(--s-2); background: none; border: none; color: var(--g-4);
+  font: var(--t-md) var(--font); cursor: pointer; padding: 0 0 1px;
+  border-bottom: 1px solid var(--g-3);
+  transition: color var(--move), border-color var(--move);
+}
+.toast .undo:hover { color: var(--g-6); border-color: var(--g-4); }
+
+/* 代替案: ステータスライン型 — カードを持たず、下端に出す */
+.statusline {
+  display: flex; align-items: center; gap: var(--s-2);
+  width: 100%; padding: var(--s-1) var(--s-3);
+  background: var(--g-2); color: var(--g-5);
+  font: var(--t-md) var(--font);
+}
+.statusline .glyph { width: 13px; height: 13px; flex: none; color: var(--g-4); }
+.statusline--warn .glyph { color: var(--attn); }
+.statusline--err  .glyph { color: var(--err); }
+.statusline .path { color: var(--g-4); font: var(--t-sm) var(--mono); }
+.statusline .undo {
+  margin-left: auto; background: none; border: none; color: var(--g-4);
+  font: var(--t-sm) var(--font); cursor: pointer; padding: 0;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.statusline .undo:hover { color: var(--g-6); }
+
+/* ═══════════════════════════════════════════════════════════
+   DOCUMENT CHROME（このページ専用・プロダクトの一部ではない）
+   ═══════════════════════════════════════════════════════════ */
+.page { max-width: 940px; margin: 0 auto; padding: var(--s-5); }
+.page h1 { font-size: 22px; color: var(--g-6); font-weight: 600; margin: 0 0 var(--s-1); }
+.page .lede { color: var(--g-4); margin: 0 0 var(--s-5); }
+.sec { margin: var(--s-5) 0; border-top: 1px solid var(--g-3); padding-top: var(--s-4); }
+.sec h2 { font-size: var(--t-lg); color: var(--g-6); font-weight: 600; margin: 0 0 var(--s-1); }
+.sec .note { color: var(--g-4); font-size: var(--t-sm); margin: 0 0 var(--s-4); max-width: 62ch; }
+.demo { background: var(--g-1); border-radius: var(--r-2); padding: var(--s-4); display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: flex-start; }
+.demo--col { flex-direction: column; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: var(--s-2); }
+.sw { border-radius: var(--r-1); overflow: hidden; background: var(--g-1); }
+.sw .chip { height: 44px; }
+.sw .meta { padding: var(--s-1) var(--s-2); font: var(--t-sm)/1.4 var(--mono); color: var(--g-4); }
+.sw .meta b { display: block; color: var(--g-5); font-weight: 400; }
+.scale { display: flex; align-items: flex-end; gap: var(--s-4); }
+.spacer { background: var(--act); opacity: .5; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Project Mixer — Design System</h1>
+  <p class="lede">容れ物に徹する。中身が色を持つので、器は色を持たない。</p>
+
+  <!-- ── Color ───────────────────────────── -->
+  <section class="sec">
+    <h2>Color</h2>
+    <p class="note">グレーは単一色相 6 段階。アクセントは 1 色 = 1 つの意味。<b style="color:var(--attn)">attn</b> は「人間の介入が必要」専用で、アクティブ状態には使わない — 常時見えていると入力待ちの表示が埋もれるため。</p>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:var(--g-0)"></div><div class="meta"><b>--g-0</b>地</div></div>
+      <div class="sw"><div class="chip" style="background:var(--g-1)"></div><div class="meta"><b>--g-1</b>ペイン</div></div>
+      <div class="sw"><div class="chip" style="background:var(--g-2)"></div><div class="meta"><b>--g-2</b>浮いた面</div></div>
+      <div class="sw"><div class="chip" style="background:var(--g-3)"></div><div class="meta"><b>--g-3</b>境界</div></div>
+      <div class="sw"><div class="chip" style="background:var(--g-4)"></div><div class="meta"><b>--g-4</b>弱文字</div></div>
+      <div class="sw"><div class="chip" style="background:var(--g-5)"></div><div class="meta"><b>--g-5</b>本文</div></div>
+      <div class="sw"><div class="chip" style="background:var(--g-6)"></div><div class="meta"><b>--g-6</b>強調</div></div>
+      <div class="sw"><div class="chip" style="background:var(--attn)"></div><div class="meta"><b>--attn</b>要介入</div></div>
+      <div class="sw"><div class="chip" style="background:var(--act)"></div><div class="meta"><b>--act</b>主要動作</div></div>
+      <div class="sw"><div class="chip" style="background:var(--err)"></div><div class="meta"><b>--err</b>失敗</div></div>
+    </div>
+  </section>
+
+  <!-- ── Space / Type ────────────────────── -->
+  <section class="sec">
+    <h2>Space &amp; Type</h2>
+    <p class="note">余白は 4px 基準の 5 段階、文字は 3 段階。値を数えられる状態を保つことが目的で、超えた分が「つぎはぎ」の実体になる。</p>
+    <div class="demo">
+      <div class="scale">
+        <div><div class="spacer" style="width:var(--s-1);height:var(--s-1)"></div><div class="meta" style="font:var(--t-sm) var(--mono);color:var(--g-4);padding-top:6px">4</div></div>
+        <div><div class="spacer" style="width:var(--s-2);height:var(--s-2)"></div><div class="meta" style="font:var(--t-sm) var(--mono);color:var(--g-4);padding-top:6px">8</div></div>
+        <div><div class="spacer" style="width:var(--s-3);height:var(--s-3)"></div><div class="meta" style="font:var(--t-sm) var(--mono);color:var(--g-4);padding-top:6px">12</div></div>
+        <div><div class="spacer" style="width:var(--s-4);height:var(--s-4)"></div><div class="meta" style="font:var(--t-sm) var(--mono);color:var(--g-4);padding-top:6px">16</div></div>
+        <div><div class="spacer" style="width:var(--s-5);height:var(--s-5)"></div><div class="meta" style="font:var(--t-sm) var(--mono);color:var(--g-4);padding-top:6px">24</div></div>
+      </div>
+      <div style="border-left:1px solid var(--g-3);padding-left:var(--s-4)">
+        <div style="font-size:var(--t-lg);color:var(--g-6)">15 — 見出し・強調</div>
+        <div style="font-size:var(--t-md)">13 — 本文・UI 既定</div>
+        <div style="font-size:var(--t-sm);color:var(--g-4)">11 — ラベル・パス・数値</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Border ──────────────────────────── -->
+  <section class="sec">
+    <h2>Border — 境界の規則</h2>
+    <p class="note">境界は <b>明度差で表し、線は引かない</b>。両方使うと必ず散らかる。地（<code style="font:var(--t-sm) var(--mono)">--g-0</code>）の上に面（<code style="font:var(--t-sm) var(--mono)">--g-1</code>）を 1px の隙間を空けて並べると、その隙間自体が境界になる。</p>
+
+    <div class="demo demo--col">
+      <div style="width:100%">
+        <div style="color:var(--g-4);font-size:var(--t-sm);margin-bottom:var(--s-2)">3 つのレイヤー</div>
+        <div class="app" style="border-radius:var(--r-1);overflow:hidden">
+          <div class="pane" style="width:150px">
+            <div class="pane-head"><span class="title">projects</span></div>
+            <div class="pane-body" style="padding:var(--s-1) 0">
+              <div class="row"><span class="name">kamox</span></div>
+              <div class="row" aria-selected="true"><span class="name">project-mixer</span></div>
+            </div>
+          </div>
+          <div class="split"></div>
+          <div class="pane" style="flex:1">
+            <div class="pane-head"><span class="title">terminal</span></div>
+            <div class="pane-body" style="padding:var(--s-3);font:var(--t-sm) var(--mono);color:var(--g-4);min-height:74px">
+              $ npm run dev<br>
+              <span style="color:var(--g-5)">  ready on http://localhost:5173</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <table style="width:100%;border-collapse:collapse;font-size:var(--t-md)">
+        <tr style="color:var(--g-4);font-size:var(--t-sm);text-align:left">
+          <th style="padding:var(--s-1) var(--s-2) var(--s-1) 0;font-weight:400">レイヤー</th>
+          <th style="padding:var(--s-1) var(--s-2);font-weight:400">境界の表し方</th>
+          <th style="padding:var(--s-1) 0 var(--s-1) var(--s-2);font-weight:400">値</th>
+        </tr>
+        <tr><td style="padding:var(--s-1) var(--s-2) var(--s-1) 0">L1 ペイン間</td><td style="padding:var(--s-1) var(--s-2)">地の隙間 1px</td><td style="padding:var(--s-1) 0 var(--s-1) var(--s-2);font:var(--t-sm) var(--mono);color:var(--g-4)">gap:1px / --g-0</td></tr>
+        <tr><td style="padding:var(--s-1) var(--s-2) var(--s-1) 0">L2 ペイン内</td><td style="padding:var(--s-1) var(--s-2)">面の明度差のみ</td><td style="padding:var(--s-1) 0 var(--s-1) var(--s-2);font:var(--t-sm) var(--mono);color:var(--g-4)">--g-1 / --g-2</td></tr>
+        <tr><td style="padding:var(--s-1) var(--s-2) var(--s-1) 0">L3 浮いた面</td><td style="padding:var(--s-1) var(--s-2)">影のみ</td><td style="padding:var(--s-1) 0 var(--s-1) var(--s-2);font:var(--t-sm) var(--mono);color:var(--g-4)">--shadow</td></tr>
+      </table>
+
+      <div style="width:100%">
+        <div style="color:var(--g-4);font-size:var(--t-sm);margin-bottom:var(--s-2)">線を引いてよい 3 つの例外</div>
+        <div style="display:flex;gap:var(--s-4);flex-wrap:wrap;align-items:flex-start">
+          <div style="width:210px">
+            <input class="input" placeholder="ファイルを絞り込む">
+            <div style="color:var(--g-4);font-size:var(--t-sm);margin-top:var(--s-1)">1. 入力できる領域の輪郭</div>
+          </div>
+          <div style="width:210px;background:var(--g-2);border-radius:var(--r-1);padding:var(--s-1) 0">
+            <div class="menu-item">プレビューで開く</div>
+            <div class="menu-sep"></div>
+            <div class="menu-item">タブを閉じる</div>
+            <div style="color:var(--g-4);font-size:var(--t-sm);margin:var(--s-1) var(--s-3) 0">2. 意味的な区切り 1 本</div>
+          </div>
+          <div style="width:210px">
+            <button class="btn" style="outline:2px solid var(--act);outline-offset:1px">キーボード選択中</button>
+            <div style="color:var(--g-4);font-size:var(--t-sm);margin-top:var(--s-1)">3. フォーカスリング</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:100%">
+        <div style="color:var(--g-4);font-size:var(--t-sm);margin-bottom:var(--s-2)">やらないこと</div>
+        <div style="display:flex;gap:var(--s-4);flex-wrap:wrap">
+          <div class="bad-mix" style="width:210px;padding:var(--s-3);border-radius:var(--r-1)">
+            <div style="color:var(--g-5)">面 + 線の併用</div>
+            <div style="color:var(--g-4);font-size:var(--t-sm);margin-top:var(--s-1)">二重に境界を主張し、階層が読めなくなる</div>
+          </div>
+          <div style="width:210px;padding:var(--s-3);border:1px solid var(--attn);border-radius:var(--r-1)">
+            <div style="color:var(--g-5)">色付きの枠</div>
+            <div style="color:var(--g-4);font-size:var(--t-sm);margin-top:var(--s-1)">attn は「行動が要る」専用。枠に使うと <span class="badge badge--dot" style="vertical-align:middle"></span> が埋もれる</div>
+          </div>
+          <div style="width:210px;padding:var(--s-3);background:var(--g-2);border-radius:var(--r-1);box-shadow:var(--shadow)">
+            <div style="color:var(--g-5)">浮いていない面に影</div>
+            <div style="color:var(--g-4);font-size:var(--t-sm);margin-top:var(--s-1)">影は Menu と Toast だけ。深度の意味が薄まる</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Tab ─────────────────────────────── -->
+  <section class="sec">
+    <h2>Tab</h2>
+    <p class="note">案 B でターミナル・プレビュー・ブラウザが 1 本のタブバーに集まる。寿命が違うもの（長命なターミナル / 使い捨てのプレビュー）が並ぶので、<b>種別はアイコンだけで表す</b> — 誤って閉じる事故への最も安い対策。</p>
+    <div class="demo demo--col">
+      <div class="tabbar" style="width:100%;border-radius:var(--r-1);overflow:hidden">
+        <button class="tab" aria-selected="false">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6.5 6 8.5 4 10.5M8 10.5h4"/></svg>
+          codex <span class="x">✕</span>
+        </button>
+        <button class="tab" aria-selected="true">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6.5 6 8.5 4 10.5M8 10.5h4"/></svg>
+          devin <span class="dot" title="入力待ち"></span> <span class="x">✕</span>
+        </button>
+        <button class="tab" aria-selected="false">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3.5h3M5.5 8h5M5.5 11h5"/></svg>
+          README.md <span class="x">✕</span>
+        </button>
+        <button class="tab" aria-selected="false">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M1.9 8h12.2M8 1.8c3.2 3.4 3.2 9 0 12.4M8 1.8c-3.2 3.4-3.2 9 0 12.4"/></svg>
+          localhost:5173 <span class="x">✕</span>
+        </button>
+      </div>
+      <p class="note" style="margin:0">アクティブ状態は<b>明度差</b>で表す。ここに色を使うと <span style="color:var(--attn)">●</span> が埋もれる。</p>
+    </div>
+  </section>
+
+  <!-- ── ListRow ─────────────────────────── -->
+  <section class="sec">
+    <h2>ListRow</h2>
+    <p class="note">プロジェクト列とファイルツリーで共通。バッジはエージェントが呼んだ事実だけを示す — 稼働状態の推定はしない。</p>
+    <div class="demo">
+      <div style="background:var(--g-1);border-radius:var(--r-1);width:230px;padding:var(--s-1) 0">
+        <div class="row"><span class="name">project-mixer</span></div>
+        <div class="row" aria-selected="true"><span class="name">salvage-mechanoid</span></div>
+        <div class="row"><span class="name">kamox</span><span class="badge badge--dot" title="入力待ち"></span></div>
+        <div class="row"><span class="name">photon-mixer</span><span class="badge" title="エージェントが 2 件呼び出した">2</span></div>
+      </div>
+      <div style="background:var(--g-1);border-radius:var(--r-1);width:230px;padding:var(--s-1) 0">
+        <div class="row"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1.5 4.5h5l1.4 1.6h6.6v7.4h-13z"/></svg><span class="name">src</span></div>
+        <div class="row" style="padding-left:var(--s-5)"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3.5h3"/></svg><span class="name">App.vue</span></div>
+        <div class="row" style="padding-left:var(--s-5)"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M9.5 1.5v3.5h3"/></svg><span class="name">main.ts</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Menu ────────────────────────────── -->
+  <section class="sec">
+    <h2>Menu</h2>
+    <p class="note">影を使う唯一の場所。ドロップダウンが背後のターミナルに溶けていた問題への対処で、装飾ではなく深度の手がかり。<b>キーは表示するが登録しない</b>（Electron の <code style="font:var(--t-sm) var(--mono)">registerAccelerator: false</code>）— アプリ全体のショートカットを増やすほどターミナルのキーを削るため。</p>
+    <div class="demo">
+      <div class="menu">
+        <div class="menu-item">プレビューで開く</div>
+        <div class="menu-item">パスをコピー<span class="key">Ctrl+Shift+C</span></div>
+        <div class="menu-item">ターミナルに挿入</div>
+        <div class="menu-sep"></div>
+        <div class="menu-item">名前を変更<span class="key">F2</span></div>
+        <div class="menu-item">タブを閉じる<span class="key">Ctrl+W</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── PaneHeader / Splitter / Input / Button ── -->
+  <section class="sec">
+    <h2>PaneHeader ・ Splitter ・ Input ・ Button</h2>
+    <p class="note">境界の表現は<b>背景差に統一</b>し、border と併用しない。両方使うと必ず散らかる。</p>
+    <div class="demo demo--col">
+      <div style="display:flex;width:100%;background:var(--g-1);border-radius:var(--r-1);overflow:hidden">
+        <div style="width:220px">
+          <div class="pane-head">
+            <span class="title">projects</span>
+            <button class="btn btn--icon" title="プロジェクトを追加" aria-label="プロジェクトを追加"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg></button>
+          </div>
+          <div style="padding:var(--s-2)"><input class="input" placeholder="ファイルを絞り込む"></div>
+        </div>
+        <div class="split"></div>
+        <div style="flex:1">
+          <div class="pane-head"><span class="title">salvage-mechanoid</span></div>
+          <div style="padding:var(--s-3);display:flex;gap:var(--s-2);align-items:center">
+            <button class="btn">キャンセル</button>
+            <button class="btn btn--primary">devin に送る</button>
+            <span style="margin-left:auto;color:var(--g-4);font:var(--t-sm) var(--mono)">→ devin</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── act 決定 ────────────────────────── -->
+  <section class="sec">
+    <h2>主要動作の色 — スレートティールに決定</h2>
+    <p class="note">当初の青（210°）は琥珀（35°）と<b>ほぼ補色</b>だった。補色はどちらも引かない関係なので、彩度を揃えるとかえって互いに同じ強さで主張し合う。明度や彩度の調整では解けない構造的な問題で、色相をずらすか色をやめるかの二択だった。<br><b style="color:var(--g-5)">採用: <code style="font:var(--t-sm) var(--mono);color:var(--act)">#4d8480</code></b> — 琥珀との距離が 141° で補色を外れ、冷たい色として「構造的な UI 要素」に読まれる。</p>
+    <div class="demo demo--col">
+      <div style="display:flex;align-items:center;gap:var(--s-4);width:100%">
+        <button class="btn btn--primary">devin に送る</button>
+        <button class="btn">キャンセル</button>
+        <div style="display:flex;align-items:center;gap:var(--s-2);color:var(--g-5);margin-left:var(--s-4)">kamox <span class="badge badge--dot"></span></div>
+        <div style="display:flex;align-items:center;gap:var(--s-2);color:var(--g-5)">photon-mixer <span class="badge">2</span></div>
+      </div>
+      <p class="note" style="margin:0">色が 3 つになるぶん、attn の相対的な強さは無彩色案より落ちる。<b>実機で 5〜10 プロジェクトを並べ、<span class="badge badge--dot" style="vertical-align:middle"></span> が拾えるか確認する。</b>拾えない場合は attn を強めるのではなく、<code style="font:var(--t-sm) var(--mono)">--g-4</code> など周囲を下げる — 目立ちは絶対値ではなく相対値。</p>
+    </div>
+  </section>
+
+  <!-- ── Toast ───────────────────────────── -->
+  <section class="sec">
+    <h2>Toast</h2>
+    <p class="note">人間が起こしたことは消えてよい。エージェントが起こしたことは消えてはいけない（そちらは Badge）。<b>やったのに画面が何も変わらないもの</b>にだけ出す。100 回やって 100 回とも同じ結果なら出さない。</p>
+    <div class="demo demo--col">
+      <p class="note" style="margin:0 0 calc(var(--s-1) * -1)"><b style="color:var(--g-5)">案 1（推奨）— 統一サーフェス + グリフ</b><br>面はすべて同じ。意味を運ぶのは先頭グリフの色だけで、色面は持たない。</p>
+      <div class="toast">
+        <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8.5 6.5 12 13 4.5"/></svg>
+        <span class="msg">パスをコピーしました <span class="path">src/App.vue</span></span>
+      </div>
+      <div class="toast">
+        <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 8h11M9.5 4 13.5 8l-4 4"/></svg>
+        <span class="msg">devin に送信しました</span>
+        <button class="undo">元に戻す</button>
+      </div>
+      <div class="toast toast--warn">
+        <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.3"/><path d="M8 4.7v4M8 11.1v.2"/></svg>
+        <span class="msg">bracketed paste 非対応のため行単位で送信しました</span>
+      </div>
+      <div class="toast toast--err">
+        <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.3"/><path d="m5.8 5.8 4.4 4.4M10.2 5.8l-4.4 4.4"/></svg>
+        <span class="msg">送信できませんでした。ターミナルが終了しています</span>
+        <button class="undo">再接続</button>
+      </div>
+
+      <p class="note" style="margin:var(--s-3) 0 calc(var(--s-1) * -1)"><b style="color:var(--g-5)">案 2 — ステータスライン型</b><br>カードを持たず、ペイン下端に 1 行で出る。ターミナルの隣にある道具としては自然だが、undo の存在に気づきにくい。</p>
+      <div style="width:100%;border-radius:var(--r-1);overflow:hidden">
+        <div class="statusline">
+          <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8.5 6.5 12 13 4.5"/></svg>
+          パスをコピーしました <span class="path">src/App.vue</span>
+        </div>
+        <div class="statusline statusline--warn" style="background:var(--g-1)">
+          <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.3"/><path d="M8 4.7v4M8 11.1v.2"/></svg>
+          bracketed paste 非対応のため行単位で送信しました
+        </div>
+        <div class="statusline">
+          <svg class="glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 8h11M9.5 4 13.5 8l-4 4"/></svg>
+          devin に送信しました
+          <button class="undo">元に戻す</button>
+        </div>
+      </div>
+
+      <p class="note" style="margin:var(--s-3) 0 0">上から 3 番目（bracketed paste）が最も見落とされやすい種類 — 失敗ではないが期待と違う。黙っていると原因不明の混乱になる。</p>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

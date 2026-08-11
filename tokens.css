@@ -1,0 +1,31 @@
+:root {
+  --g-0: #16181c;
+  --g-1: #1c1f24;
+  --g-2: #23272e;
+  --g-3: #2e333b;
+  --g-4: #6b7280;
+  --g-5: #c8ccd4;
+  --g-6: #f0f2f5;
+  --attn: #c08b4d;
+  --act: #4d8480;
+  --err: #b56b66;
+  --ok: #5f9278;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --t-sm: 11px;
+  --t-md: 13px;
+  --t-lg: 15px;
+  --font: "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", monospace;
+  --r-1: 3px;
+  --r-2: 6px;
+  --shadow: 0 6px 20px rgba(0, 0, 0, .45), 0 0 0 1px rgba(0, 0, 0, .3);
+  --move: 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --move: 1ms; }
+}

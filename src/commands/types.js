@@ -19,6 +19,10 @@ export const COMMAND_TYPES = {
     args: { path: 'string', name: 'string' },
     returns: 'void',
   },
+  open_browser: {
+    args: { url: 'string' },
+    returns: 'void',
+  },
   close_tab: {
     args: { filePath: 'string' },
     returns: 'void',
@@ -36,7 +40,7 @@ export const COMMAND_TYPES = {
     returns: 'void',
   },
   update_editor_content: {
-    args: { content: 'string' },
+    args: { filePath: 'string?', content: 'string' },
     returns: 'void',
   },
   update_editor_selection: {

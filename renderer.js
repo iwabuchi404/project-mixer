@@ -15,8 +15,9 @@ import {
   makePreviewPath,
   resolveAttentionFile,
 } from './src/phase3/state.mjs';
-import { calculatePreviewWidth, getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
+import { getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
 import { PREVIEW_CSP } from './src/preview/security.js';
+import { getBrowserTabLabel, normalizeLocalBrowserUrl } from './src/ui/browser.mjs';
 import {
   INTERNAL_FILE_MIME,
   captureExpandedPaneWidth,
@@ -98,7 +99,8 @@ const projectConfirmBtn = document.getElementById('project-confirm-btn');
 const fileTree = document.getElementById('file-tree');
 const fileTreeHeader = document.getElementById('file-tree-header');
 const fileTreeTitle = document.getElementById('file-tree-title');
-const tabBar = document.getElementById('tab-bar');
+const tabBar = document.getElementById('main-tab-bar');
+const mainSurface = document.getElementById('main-surface');
 const terminalContainer = document.getElementById('terminal-container');
 const terminalPane = document.getElementById('terminal-pane');
 const newTabBtn = document.getElementById('new-tab-btn');
@@ -106,10 +108,11 @@ const memDisplay = document.getElementById('mem-display');
 const editorPane = document.getElementById('editor-pane');
 const editorTabBar = document.getElementById('editor-tab-bar');
 const editorTextarea = document.getElementById('editor-textarea');
+const fileEditorPane = document.getElementById('file-editor-pane');
+const fileEditorTextarea = document.getElementById('file-editor-textarea');
 const previewWebview = document.getElementById('preview-webview');
 const previewPane = document.getElementById('preview-pane');
-const previewTabBar = document.getElementById('preview-tab-bar');
-const vsplitter3 = document.getElementById('vsplitter-3');
+const previewTabBar = tabBar;
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
 const tabContextMenu = document.getElementById('tab-context-menu');
@@ -141,10 +144,102 @@ const statusRight = document.getElementById('status-right');
 const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
 const pushFocusCheckbox = document.getElementById('push-focus-checkbox');
+const titleBarContext = document.getElementById('title-bar-context');
+const toastRegion = document.getElementById('toast-region');
+const errorRegion = document.getElementById('error-region');
 const newScratchTabBtn = document.createElement('button');
 newScratchTabBtn.id = 'new-scratch-tab-btn';
 newScratchTabBtn.title = 'New scratch buffer';
 newScratchTabBtn.textContent = '+';
+
+const TAB_ICONS = {
+  terminal: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 4 3.5 4L3 12M8 12h5"/></svg>',
+  file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h5l3 3v8H4zM9 2.5v3h3"/></svg>',
+  preview: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 8s2.2-4 6.2-4 6.2 4 6.2 4-2.2 4-6.2 4-6.2-4-6.2-4Z"/><circle cx="8" cy="8" r="1.8"/></svg>',
+  browser: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2.5 8h11M8 2c1.7 1.6 2.6 3.6 2.6 6S9.7 12.4 8 14M8 2C6.3 3.6 5.4 5.6 5.4 8s.9 4.4 2.6 6"/></svg>',
+  scratch: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10M4 10l6.8-6.8 2 2L6 12H4z"/></svg>',
+};
+
+function tabIcon(kind) {
+  return `<span class="tab-icon tab-icon-${kind}">${TAB_ICONS[kind] || TAB_ICONS.file}</span>`;
+}
+
+function setTabSelected(tabEl, selected) {
+  if (!tabEl) return;
+  tabEl.classList.toggle('active', selected);
+  tabEl.setAttribute('aria-selected', selected ? 'true' : 'false');
+}
+
+function activateMainTab(tabEl) {
+  tabBar.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === tabEl));
+}
+
+function showMainSurface(kind) {
+  terminalPane.classList.toggle('hidden', kind !== 'terminal');
+  fileEditorPane.classList.toggle('hidden', kind !== 'file');
+  previewPane.classList.toggle('hidden', kind !== 'preview');
+  mainSurface.dataset.surface = kind;
+  requestAnimationFrame(handleResize);
+}
+
+const visibleToasts = new Map();
+
+function showToast({
+  key = 'default',
+  message,
+  detail = '',
+  type = 'info',
+  duration = 1500,
+  actionLabel = '',
+  onAction = null,
+  persistent = false,
+}) {
+  const previous = visibleToasts.get(key);
+  if (previous) previous.remove();
+
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<span class="toast-glyph" aria-hidden="true">${type === 'error' ? '\u00d7' : (type === 'warn' ? '!' : '\u2713')}</span><span class="toast-message"></span>`;
+  const messageEl = toast.querySelector('.toast-message');
+  messageEl.textContent = message;
+  if (detail) {
+    const detailEl = document.createElement('span');
+    detailEl.className = 'toast-detail';
+    detailEl.textContent = detail;
+    messageEl.append(' ', detailEl);
+  }
+  if (actionLabel && onAction) {
+    const action = document.createElement('button');
+    action.className = 'toast-action';
+    action.textContent = actionLabel;
+    action.addEventListener('click', () => {
+      onAction();
+      toast.remove();
+      visibleToasts.delete(key);
+    });
+    toast.appendChild(action);
+  } else if (persistent || type === 'error') {
+    const dismiss = document.createElement('button');
+    dismiss.className = 'toast-action toast-dismiss';
+    dismiss.textContent = '\u00d7';
+    dismiss.title = 'Dismiss';
+    dismiss.addEventListener('click', () => {
+      toast.remove();
+      visibleToasts.delete(key);
+    });
+    toast.appendChild(dismiss);
+  }
+  const region = persistent || type === 'error' ? errorRegion : toastRegion;
+  region.appendChild(toast);
+  visibleToasts.set(key, toast);
+  if (!persistent && duration > 0) {
+    setTimeout(() => {
+      if (visibleToasts.get(key) === toast) visibleToasts.delete(key);
+      toast.remove();
+    }, duration);
+  }
+  return toast;
+}
 
 // ============================================================
 // PTY data/exit handlers
@@ -344,6 +439,7 @@ async function selectProject(projectId) {
   activeProjectId = projectId;
   setState({ activeProjectId });
   dispatch('project_set_badge', { projectId, kind: 'clear' });
+  titleBarContext.textContent = projects.get(projectId)?.name || '';
   // Update editor state in store after switching project editor
   const activePreview = previewFiles.get(activePreviewPath);
   if (activeSurface === 'preview' && isPreviewForProject(activePreview, projectId)) {
@@ -482,7 +578,7 @@ treeNewFileBtn.addEventListener('click', async () => {
   const filePath = joinPath(project.path, name);
   const result = await window.api.createFile(filePath);
   if (!result.success) {
-    alert('Create file failed: ' + result.error);
+    showToast({ key: 'create-file-error', message: 'Create file failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
   await loadFileTree(project.path);
@@ -497,7 +593,7 @@ treeNewFolderBtn.addEventListener('click', async () => {
   const dirPath = joinPath(project.path, name);
   const result = await window.api.createDir(dirPath);
   if (!result.success) {
-    alert('Create folder failed: ' + result.error);
+    showToast({ key: 'create-folder-error', message: 'Create folder failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
   await loadFileTree(project.path);
@@ -608,6 +704,7 @@ contextMenu.addEventListener('click', (e) => {
     window.api.openInOs(contextMenuEntry.path);
   } else if (action === 'copy-path') {
     window.api.clipboardWriteText(contextMenuEntry.path);
+    showToast({ key: 'copy-path', message: 'Path copied', detail: contextMenuEntry.path });
   } else if (action === 'insert-path') {
     insertPathToTerminal(contextMenuEntry.path);
   } else if (action === 'insert-name') {
@@ -668,6 +765,11 @@ function buildTabMenuItems(target) {
         { action: 'open-os', label: 'Open in OS' },
         { action: 'close', label: 'Close', danger: true },
       ];
+    case 'browser':
+      return [
+        { action: 'copy-path', label: 'Copy URL' },
+        { action: 'close', label: 'Close', danger: true },
+      ];
     case 'scratch':
       return [
         { action: 'rename', label: 'Rename Tab' },
@@ -686,16 +788,22 @@ tabContextMenu.addEventListener('click', (e) => {
 
   if (action === 'close') {
     if (t.kind === 'terminal') dispatch('close_terminal', { tabId: t.tabId });
-    else if (t.kind === 'preview') closePreviewTab(t.previewPath);
+    else if (t.kind === 'preview' || t.kind === 'browser') closePreviewTab(t.previewPath);
     else if (t.kind === 'editor-file') closeEditorTab(t.filePath);
     else if (t.kind === 'scratch') closeEditorTab(SCRATCH_PATH);
   } else if (action === 'copy-path') {
-    if (t.filePath) window.api.clipboardWriteText(t.filePath);
+    if (t.filePath) {
+      window.api.clipboardWriteText(t.filePath);
+      showToast({ key: 'copy-path', message: 'Path copied', detail: t.filePath });
+    }
   } else if (action === 'open-os') {
     if (t.filePath) window.api.openInOs(t.filePath);
   } else if (action === 'copy-cwd') {
     const term = tabs.get(t.tabId);
-    if (term?.cwd) window.api.clipboardWriteText(term.cwd);
+    if (term?.cwd) {
+      window.api.clipboardWriteText(term.cwd);
+      showToast({ key: 'copy-cwd', message: 'Working directory copied', detail: term.cwd });
+    }
   } else if (action === 'rename') {
     if (t.kind === 'terminal') renameTerminalTab(t.tabId);
     else if (t.kind === 'scratch') renameScratchTab();
@@ -760,7 +868,7 @@ deleteConfirmBtn.addEventListener('click', async () => {
   hideDeleteConfirm();
   const result = await window.api.deleteFile(entry.path);
   if (!result.success) {
-    alert('Delete failed: ' + result.error);
+    showToast({ key: 'delete-error', message: 'Delete failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
   // Close editor tab if the deleted file was open
@@ -819,6 +927,11 @@ let previewFiles = new Map(); // previewPath -> { path, name, tabEl, isPreview, 
 let activeFilePath = null;
 let activePreviewPath = null;
 let activeSurface = 'editor'; // 'editor' | 'preview', restored per project
+let activeComposerPath = SCRATCH_PATH;
+let activeMainView = 'terminal'; // 'terminal' | 'file' | 'preview'
+let activeMainFilePath = null;
+let previewReturnView = 'terminal';
+let previewReturnFilePath = null;
 let lastSentContent = '';
 let lastSentTabPath = null;
 let tempTabCounter = 0;
@@ -837,6 +950,11 @@ function saveCurrentEditorState() {
     activeFilePath,
     activePreviewPath,
     activeSurface,
+    activeComposerPath,
+    activeMainView,
+    activeMainFilePath,
+    previewReturnView,
+    previewReturnFilePath,
     lastSentContent,
     lastSentTabPath,
     tempTabCounter,
@@ -858,6 +976,17 @@ function switchProjectEditor(projectId) {
     activeFilePath = state.activeFilePath;
     activePreviewPath = getPreviewForProject(previewFiles, projectId, state.activePreviewPath);
     activeSurface = state.activeSurface === 'preview' && activePreviewPath ? 'preview' : 'editor';
+    activeComposerPath = state.activeComposerPath && state.openFiles.has(state.activeComposerPath)
+      ? state.activeComposerPath
+      : SCRATCH_PATH;
+    activeMainView = state.activeMainView || 'terminal';
+    activeMainFilePath = state.activeMainFilePath && state.openFiles.has(state.activeMainFilePath)
+      ? state.activeMainFilePath
+      : null;
+    previewReturnView = state.previewReturnView || 'terminal';
+    previewReturnFilePath = state.previewReturnFilePath && state.openFiles.has(state.previewReturnFilePath)
+      ? state.previewReturnFilePath
+      : null;
     lastSentContent = state.lastSentContent;
     lastSentTabPath = state.lastSentTabPath;
     tempTabCounter = state.tempTabCounter;
@@ -867,6 +996,11 @@ function switchProjectEditor(projectId) {
     activeFilePath = null;
     activePreviewPath = null;
     activeSurface = 'editor';
+    activeComposerPath = SCRATCH_PATH;
+    activeMainView = 'terminal';
+    activeMainFilePath = null;
+    previewReturnView = 'terminal';
+    previewReturnFilePath = null;
     lastSentContent = '';
     lastSentTabPath = null;
     tempTabCounter = 0;
@@ -886,18 +1020,16 @@ function switchProjectEditor(projectId) {
 
   editorStateInitialized = true;
   editorTabBar.appendChild(newScratchTabBtn);
-  const backgroundEditor = openFiles.get(activeFilePath || SCRATCH_PATH);
-  if (backgroundEditor) applyEditorSurface(backgroundEditor);
-  const shouldFocusPreview = activeSurface === 'preview' && !!activePreviewPath;
-  clearPreviewContent();
-  if (activePreviewPath) {
-    showPreviewPane();
+  const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+  if (composer) selectComposerTab(composer, { focus: false });
+  if (activeMainView === 'preview' && activePreviewPath) {
     switchPreviewTab(activePreviewPath);
+  } else if (activeMainView === 'file' && activeMainFilePath) {
+    switchEditorTab(activeMainFilePath, { focus: false });
   } else {
-    hidePreviewPane();
-  }
-  if (!shouldFocusPreview) {
-    switchEditorTab(activeFilePath || SCRATCH_PATH);
+    const terminalId = projectActiveTab.get(projectId);
+    if (terminalId !== undefined && tabs.has(terminalId)) switchTab(terminalId, { focus: false });
+    else showMainSurface('terminal');
   }
 }
 
@@ -926,6 +1058,11 @@ function removeProjectEditorState(projectId) {
     activeEditorProjectId = null;
     openFiles = new Map();
     activeFilePath = null;
+    activeComposerPath = SCRATCH_PATH;
+    activeMainView = 'terminal';
+    activeMainFilePath = null;
+    previewReturnView = 'terminal';
+    previewReturnFilePath = null;
     lastSentContent = '';
     lastSentTabPath = null;
     tempTabCounter = 0;
@@ -943,7 +1080,7 @@ function makeEditorTabDraggable(tabEl, path) {
   });
   tabEl.addEventListener('dragend', () => {
     tabEl.classList.remove('dragging');
-    editorTabBar.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('drag-over'));
+    tabEl.parentElement?.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('drag-over'));
     draggedEditorTab = null;
   });
   tabEl.addEventListener('dragover', (e) => {
@@ -963,14 +1100,18 @@ function makeEditorTabDraggable(tabEl, path) {
     e.preventDefault();
     tabEl.classList.remove('drag-over');
     if (!draggedEditorTab || draggedEditorTab === tabEl) return;
-    editorTabBar.insertBefore(draggedEditorTab, tabEl);
+    if (draggedEditorTab.parentElement === tabEl.parentElement) {
+      tabEl.parentElement.insertBefore(draggedEditorTab, tabEl);
+    }
   });
 }
 
 function initScratchTab() {
   const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab scratch active';
-  tabEl.innerHTML = `<span class="editor-tab-name">scratch</span>`;
+  tabEl.className = 'editor-tab composer-tab active';
+  tabEl.innerHTML = `${tabIcon('scratch')}<span class="editor-tab-name">scratch</span>`;
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'true');
   tabEl.dataset.path = SCRATCH_PATH;
 
   tabEl.addEventListener('click', () => dispatch('switch_tab', { filePath: SCRATCH_PATH }));
@@ -995,6 +1136,7 @@ function initScratchTab() {
   };
   openFiles.set(SCRATCH_PATH, scratchData);
   activeFilePath = SCRATCH_PATH;
+  activeComposerPath = SCRATCH_PATH;
   showEditorPane();
 }
 
@@ -1004,22 +1146,24 @@ function createTempTab() {
   const name = `temp-${tempTabCounter}`;
 
   const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab scratch';
-  tabEl.innerHTML = `<span class="editor-tab-name">${name}</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.className = 'editor-tab composer-tab';
+  tabEl.innerHTML = `${tabIcon('scratch')}<span class="editor-tab-name">${name}</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'false');
   tabEl.dataset.path = tempPath;
 
   tabEl.addEventListener('click', (e) => {
     if (e.target.classList.contains('editor-tab-close')) {
-      dispatch('close_tab', { filePath: tempPath });
+      dispatch('close_tab', { filePath: tabEl.dataset.path });
     } else {
-      dispatch('switch_tab', { filePath: tempPath });
+      dispatch('switch_tab', { filePath: tabEl.dataset.path });
     }
   });
 
   tabEl.addEventListener('auxclick', (e) => {
     if (e.button === 1) {
       e.preventDefault();
-      dispatch('close_tab', { filePath: tempPath });
+      dispatch('close_tab', { filePath: tabEl.dataset.path });
     }
   });
 
@@ -1082,19 +1226,19 @@ function joinPath(base, sub) {
 }
 
 const MD_CSS = `
-body { margin:0; padding:24px; color:#c9d1d9; background:#0d1117; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; font-size:14px; line-height:1.6; }
-a { color:#58a6ff; }
-h1,h2,h3,h4,h5,h6 { color:#f0f6fc; margin-top:24px; margin-bottom:16px; line-height:1.25; }
-h1 { font-size:2em; border-bottom:1px solid #21262d; padding-bottom:.3em; }
-h2 { font-size:1.5em; border-bottom:1px solid #21262d; padding-bottom:.3em; }
-code { background:#161b22; padding:.2em .4em; border-radius:6px; font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:85%; }
-pre { background:#161b22; padding:16px; border-radius:6px; overflow:auto; }
+body { margin:0; padding:24px; color:#c8ccd4; background:#1c1f24; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; font-size:13px; line-height:1.6; }
+a { color:#4d8480; }
+h1,h2,h3,h4,h5,h6 { color:#f0f2f5; margin-top:24px; margin-bottom:16px; line-height:1.25; }
+h1 { font-size:2em; border-bottom:1px solid #2e333b; padding-bottom:.3em; }
+h2 { font-size:1.5em; border-bottom:1px solid #2e333b; padding-bottom:.3em; }
+code { background:#23272e; padding:.2em .4em; border-radius:6px; font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:85%; }
+pre { background:#23272e; padding:16px; border-radius:6px; overflow:auto; }
 pre code { background:transparent; padding:0; font-size:100%; }
-blockquote { border-left:4px solid #30363d; color:#8b949e; margin:0; padding:0 16px; }
+blockquote { border-left:4px solid #2e333b; color:#6b7280; margin:0; padding:0 16px; }
 table { border-collapse:collapse; }
-th,td { border:1px solid #30363d; padding:6px 13px; }
+th,td { border:1px solid #2e333b; padding:6px 13px; }
 img { max-width:100%; }
-hr { border:0; border-top:1px solid #21262d; }
+hr { border:0; border-top:1px solid #2e333b; }
 `;
 
 async function openFileInPreview(filePath, name, options = {}) {
@@ -1103,7 +1247,10 @@ async function openFileInPreview(filePath, name, options = {}) {
   const allowOs = options.allowOs !== false;
   const previewPath = options.previewPath || makePreviewPath(projectId, filePath);
   if (shouldOpenInOsByName(name)) {
-    if (allowOs) await window.api.openInOs(filePath);
+    if (allowOs) {
+      await window.api.openInOs(filePath);
+      showToast({ key: `open-os:${filePath}`, message: 'Opened with the default app', detail: name });
+    }
     return { shown: false, previewPath: null, reason: 'file type is not supported by the preview' };
   }
   if (previewFiles.has(previewPath)) {
@@ -1127,7 +1274,10 @@ async function openFileInPreview(filePath, name, options = {}) {
       return { shown: false, previewPath: null, reason: result.error || 'failed to read file' };
     }
     if (result.isBinary) {
-      if (allowOs) await window.api.openInOs(filePath);
+      if (allowOs) {
+        await window.api.openInOs(filePath);
+        showToast({ key: `open-os:${filePath}`, message: 'Opened binary with the default app', detail: name });
+      }
       return { shown: false, previewPath: null, reason: 'binary file cannot be previewed' };
     }
     initialContent = result.content;
@@ -1144,8 +1294,10 @@ async function openFileInPreview(filePath, name, options = {}) {
   };
 
   const tabEl = document.createElement('div');
-  tabEl.className = 'preview-tab';
-  tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.className = 'preview-tab main-tab';
+  tabEl.innerHTML = `${tabIcon('preview')}<span class="editor-tab-name">${escapeHtml(name)}</span><span class="tab-notification"></span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'false');
   tabEl.dataset.path = previewPath;
   // A6: tooltip with full path
   tabEl.title = filePath;
@@ -1172,7 +1324,7 @@ async function openFileInPreview(filePath, name, options = {}) {
     showTabContextMenu(e.clientX, e.clientY, { kind: 'preview', previewPath, filePath });
   });
 
-  previewTabBar.appendChild(tabEl);
+  previewTabBar.insertBefore(tabEl, newTabBtn);
   fileData.tabEl = tabEl;
   previewFiles.set(previewPath, fileData);
 
@@ -1201,6 +1353,65 @@ async function openFileInPreview(filePath, name, options = {}) {
       ? 'preview tab created without activation'
       : 'preview tab created in another project',
   };
+}
+
+async function openBrowserUrl(value) {
+  const url = normalizeLocalBrowserUrl(value);
+  if (!url) {
+    showToast({
+      key: 'browser-url-error',
+      message: 'Only local HTTP URLs can be opened',
+      detail: 'Use localhost, 127.0.0.1, or [::1]',
+      type: 'error',
+      persistent: true,
+    });
+    return;
+  }
+
+  const projectId = activeEditorProjectId;
+  const previewPath = `browser:${projectId || 'global'}:${url}`;
+  if (previewFiles.has(previewPath)) {
+    await switchPreviewTab(previewPath);
+    return;
+  }
+
+  const name = getBrowserTabLabel(url);
+  const fileData = {
+    path: url,
+    name,
+    tabEl: null,
+    isPreview: true,
+    isBrowser: true,
+    previewPath,
+    projectId,
+  };
+  const tabEl = document.createElement('div');
+  tabEl.className = 'preview-tab main-tab browser-tab';
+  tabEl.innerHTML = `${tabIcon('browser')}<span class="editor-tab-name">${escapeHtml(name)}</span><span class="tab-notification"></span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'false');
+  tabEl.dataset.path = previewPath;
+  tabEl.title = url;
+  tabEl.addEventListener('click', (event) => {
+    if (event.target.classList.contains('editor-tab-close')) dispatch('close_tab', { filePath: previewPath });
+    else dispatch('switch_tab', { filePath: previewPath });
+  });
+  tabEl.addEventListener('auxclick', (event) => {
+    if (event.button === 1) {
+      event.preventDefault();
+      dispatch('close_tab', { filePath: previewPath });
+    }
+  });
+  tabEl.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showTabContextMenu(event.clientX, event.clientY, { kind: 'browser', previewPath, filePath: url });
+  });
+
+  tabBar.insertBefore(tabEl, newTabBtn);
+  fileData.tabEl = tabEl;
+  previewFiles.set(previewPath, fileData);
+  await switchPreviewTab(previewPath);
 }
 
 let pendingPreviewLoad = null;
@@ -1279,7 +1490,10 @@ async function readPreviewText(f, allowOs = true) {
   const result = await window.api.readFile(f.path);
   if (!result.success || !isActivePreview(f)) return null;
   if (result.isBinary) {
-    if (allowOs) await window.api.openInOs(f.path);
+    if (allowOs) {
+      await window.api.openInOs(f.path);
+      showToast({ key: `open-os:${f.path}`, message: 'Opened binary with the default app', detail: f.name });
+    }
     if (isActivePreview(f)) closePreviewTab(f.previewPath);
     return null;
   }
@@ -1311,6 +1525,11 @@ body { padding:0; }
 }
 
 async function loadPreviewContent(f, reveal = null, allowOs = true) {
+  if (f.isBrowser) {
+    if (!isActivePreview(f)) return false;
+    previewWebview.src = f.path;
+    return true;
+  }
   if (isImage(f.name)) {
     if (!isActivePreview(f)) return false;
     previewWebview.src = toFileUrl(f.path);
@@ -1350,29 +1569,26 @@ async function loadPreviewContent(f, reveal = null, allowOs = true) {
   }
 }
 
-function clearPreviewContent() {
-  previewWebview.src = 'about:blank';
-}
-
 function showPreviewPane() {
-  previewPane.classList.remove('hidden');
-  vsplitter3.classList.remove('hidden');
+  showMainSurface('preview');
 }
 
 function hidePreviewPane() {
-  previewPane.classList.add('hidden');
-  vsplitter3.classList.add('hidden');
-  clearPreviewContent();
+  showMainSurface(activeMainFilePath ? 'file' : 'terminal');
 }
 
 function switchPreviewTab(previewPath, { preserveAttention = false, reveal = null } = {}) {
   const f = previewFiles.get(previewPath);
   if (!isPreviewForProject(f, activeEditorProjectId)) return Promise.resolve(false);
 
-  previewFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
-  f.tabEl.classList.add('active');
+  if (activeMainView !== 'preview') {
+    previewReturnView = activeMainView;
+    previewReturnFilePath = activeMainFilePath;
+  }
+  activateMainTab(f.tabEl);
   f.tabEl.classList.remove('notified');
   activePreviewPath = previewPath;
+  activeMainView = 'preview';
   showPreviewPane();
   if (!preserveAttention) {
     activeSurface = 'preview';
@@ -1387,7 +1603,7 @@ function closePreviewTab(previewPath) {
   const f = previewFiles.get(previewPath);
   if (!f) return;
 
-  const wasPreviewFocused = activeSurface === 'preview';
+  const wasPreviewVisible = activeMainView === 'preview';
   const projectId = f.projectId;
   f.tabEl.remove();
   previewFiles.delete(previewPath);
@@ -1395,15 +1611,22 @@ function closePreviewTab(previewPath) {
   if (activePreviewPath === previewPath) {
     const nextPath = getNextPreviewForProject(previewFiles, projectId, previewPath);
     if (nextPath) {
-      switchPreviewTab(nextPath);
-      if (!wasPreviewFocused) {
-        switchEditorTab(activeFilePath || SCRATCH_PATH);
-      }
+      if (wasPreviewVisible) switchPreviewTab(nextPath);
+      else activePreviewPath = nextPath;
     } else {
       activePreviewPath = null;
       activeSurface = 'editor';
-      hidePreviewPane();
-      switchEditorTab(activeFilePath || SCRATCH_PATH);
+      if (!wasPreviewVisible) {
+        // A background preview can close without moving the human's current main tab.
+      } else if (previewReturnView === 'file' && previewReturnFilePath && openFiles.has(previewReturnFilePath)) {
+        switchEditorTab(previewReturnFilePath, { focus: false });
+      } else if (activeTabId !== null && tabs.has(activeTabId)) {
+        switchTab(activeTabId, { focus: false });
+      } else {
+        showMainSurface('terminal');
+      }
+      previewReturnView = 'terminal';
+      previewReturnFilePath = null;
     }
   }
 }
@@ -1412,6 +1635,7 @@ async function openFileInEditor(filePath, name) {
   const projectId = activeEditorProjectId;
   if (shouldOpenInOsByName(name)) {
     await window.api.openInOs(filePath);
+    showToast({ key: `open-os:${filePath}`, message: 'Opened with the default app', detail: name });
     return;
   }
   if (openFiles.has(filePath)) {
@@ -1424,6 +1648,7 @@ async function openFileInEditor(filePath, name) {
   if (activeEditorProjectId !== projectId) return;
   if (result.isBinary) {
     await window.api.openInOs(filePath);
+    showToast({ key: `open-os:${filePath}`, message: 'Opened binary with the default app', detail: name });
     return;
   }
 
@@ -1438,8 +1663,10 @@ async function openFileInEditor(filePath, name) {
   };
 
   const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab';
-  tabEl.innerHTML = `<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-dirty hidden">*</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.className = 'editor-tab main-tab';
+  tabEl.innerHTML = `${tabIcon('file')}<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-dirty hidden">*</span><span class="editor-tab-close">\u00d7</span>`;
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'false');
   tabEl.dataset.path = filePath;
   // A6: tooltip with full path
   tabEl.title = filePath;
@@ -1467,76 +1694,95 @@ async function openFileInEditor(filePath, name) {
   });
 
   makeEditorTabDraggable(tabEl, filePath);
-  editorTabBar.insertBefore(tabEl, newScratchTabBtn);
+  tabBar.insertBefore(tabEl, newTabBtn);
   fileData.tabEl = tabEl;
   openFiles.set(filePath, fileData);
 
   switchEditorTab(filePath);
 }
 
-function switchEditorTab(filePath) {
+function switchEditorTab(filePath, { focus = true } = {}) {
   // Preview tabs are handled by switchPreviewTab
-  if (filePath && filePath.startsWith('preview:')) {
+  if (previewFiles.has(filePath)) {
     switchPreviewTab(filePath);
     return;
   }
   const f = openFiles.get(filePath);
   if (!f) return;
 
-  openFiles.forEach((fd) => fd.tabEl.classList.remove('active'));
-  f.tabEl.classList.add('active');
   activeFilePath = filePath;
   activeSurface = 'editor';
   setState({ activeFilePath: filePath, isPreview: false });
-  applyEditorSurface(f);
-
-  editorTextarea.classList.remove('hidden');
-  editorTextarea.value = f.content;
   if (f.isScratch) {
+    selectComposerTab(f, { focus });
     setState({ scratchContent: f.content });
+    return;
   }
-  if (!f.isScratch) updateEditorDirty(filePath);
-  editorTextarea.focus();
+
+  activateMainTab(f.tabEl);
+  activeMainFilePath = filePath;
+  activeMainView = 'file';
+  showMainSurface('file');
+  fileEditorTextarea.value = f.content;
+  updateEditorDirty(filePath);
+  if (focus) fileEditorTextarea.focus();
   // Recalculate cursor/selection for the newly focused file
+  updateEditorCursorState();
+}
+
+function selectComposerTab(file, { focus = true } = {}) {
+  if (!file?.isScratch) return;
+  openFiles.forEach((candidate) => {
+    if (candidate.isScratch) setTabSelected(candidate.tabEl, candidate === file);
+  });
+  activeComposerPath = file.path;
+  activeFilePath = file.path;
+  activeSurface = 'editor';
+  editorTextarea.value = file.content;
+  setState({ activeFilePath: file.path, isPreview: false, scratchContent: file.content });
+  if (focus) editorTextarea.focus();
   updateEditorCursorState();
 }
 
 function closeEditorTab(filePath) {
   // Preview tabs are handled by closePreviewTab
-  if (filePath && filePath.startsWith('preview:')) {
+  if (previewFiles.has(filePath)) {
     closePreviewTab(filePath);
     return;
   }
   const f = openFiles.get(filePath);
   if (!f || (f.isScratch && !f.isTemp)) return;
+  const wasMainFile = !f.isScratch && activeMainView === 'file' && activeMainFilePath === filePath;
 
   f.tabEl.remove();
   openFiles.delete(filePath);
 
-  if (activeFilePath === filePath) {
+  if (f.isScratch && activeComposerPath === filePath) {
+    activeComposerPath = SCRATCH_PATH;
     switchEditorTab(SCRATCH_PATH);
+  } else if (wasMainFile) {
+    activeMainFilePath = null;
+    if (activeTabId !== null && tabs.has(activeTabId)) {
+      switchTab(activeTabId, { focus: false });
+    } else {
+      showMainSurface('terminal');
+      switchEditorTab(activeComposerPath, { focus: false });
+    }
+  } else if (activeFilePath === filePath) {
+    switchEditorTab(activeComposerPath, { focus: false });
   }
+  if (activeMainFilePath === filePath) activeMainFilePath = null;
 }
 
 function showEditorPane() {
   editorPane.classList.remove('hidden');
-  editorPane.classList.remove('central');
-  terminalPane.classList.remove('hidden');
   splitter.classList.remove('hidden');
-  const defaultHeight = Math.max(200, Math.floor(window.innerHeight * 0.4));
-  editorPane.style.height = `${savedScratchEditorHeight || defaultHeight}px`;
+  if (savedScratchEditorHeight) editorPane.style.height = `${savedScratchEditorHeight}px`;
   requestAnimationFrame(handleResize);
 }
 
 function showMainEditorSurface() {
-  if (!editorPane.classList.contains('central') && editorPane.offsetHeight > 0) {
-    savedScratchEditorHeight = editorPane.offsetHeight;
-  }
-  terminalPane.classList.add('hidden');
-  splitter.classList.add('hidden');
-  editorPane.classList.remove('hidden');
-  editorPane.classList.add('central');
-  editorPane.style.height = '';
+  showMainSurface('file');
 }
 
 function applyEditorSurface(file) {
@@ -1544,13 +1790,12 @@ function applyEditorSurface(file) {
     showEditorPane();
   } else {
     showMainEditorSurface();
+    fileEditorTextarea.value = file.content;
   }
 }
 
 function hideEditorPane() {
   editorPane.classList.add('hidden');
-  editorPane.classList.remove('central');
-  terminalPane.classList.remove('hidden');
   splitter.classList.add('hidden');
   requestAnimationFrame(handleResize);
 }
@@ -1567,11 +1812,7 @@ function updateEditorDirty(filePath) {
 }
 
 function appendToScratch(text) {
-  let targetPath = SCRATCH_PATH;
-  const active = openFiles.get(activeFilePath);
-  if (active && active.isScratch) {
-    targetPath = activeFilePath;
-  }
+  const targetPath = openFiles.has(activeComposerPath) ? activeComposerPath : SCRATCH_PATH;
   const target = openFiles.get(targetPath);
   if (!target) return;
   const sep = target.content && !target.content.endsWith('\n') ? '\n' : '';
@@ -1579,29 +1820,35 @@ function appendToScratch(text) {
   if (target.isScratch) {
     setState({ scratchContent: target.content });
   }
-  if (activeFilePath === targetPath) {
-    editorTextarea.value = target.content;
-    editorTextarea.scrollTop = editorTextarea.scrollHeight;
-  }
+  editorTextarea.value = target.content;
+  editorTextarea.scrollTop = editorTextarea.scrollHeight;
   switchEditorTab(targetPath);
 }
 
-function updateActiveEditorContent(content) {
-  if (!activeFilePath) return;
-  const f = openFiles.get(activeFilePath);
+function updateEditorContent(filePath, content) {
+  if (!filePath) return;
+  const f = openFiles.get(filePath);
   if (f) {
     f.content = content;
     if (f.isScratch) {
       setState({ scratchContent: f.content });
     } else if (!f.isScratch) {
-      updateEditorDirty(activeFilePath);
+      updateEditorDirty(filePath);
     }
     updateEditorCursorState();
   }
 }
 
 editorTextarea.addEventListener('input', () => {
-  dispatch('update_editor_content', { content: editorTextarea.value });
+  dispatch('update_editor_content', { filePath: activeComposerPath, content: editorTextarea.value });
+});
+editorTextarea.addEventListener('focus', () => {
+  const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+  if (composer) selectComposerTab(composer, { focus: false });
+});
+
+fileEditorTextarea.addEventListener('input', () => {
+  dispatch('update_editor_content', { filePath: activeMainFilePath, content: fileEditorTextarea.value });
 });
 
 // Update cursor/selection state for get_focus
@@ -1611,11 +1858,12 @@ function updateEditorCursorState() {
     setState({ cursorLine: null, selection: null });
     return;
   }
-  const value = editorTextarea.value;
-  const pos = editorTextarea.selectionStart;
+  const input = f.isScratch ? editorTextarea : fileEditorTextarea;
+  const value = input.value;
+  const pos = input.selectionStart;
   const line = value.substring(0, pos).split('\n').length;
-  const selStart = editorTextarea.selectionStart;
-  const selEnd = editorTextarea.selectionEnd;
+  const selStart = input.selectionStart;
+  const selEnd = input.selectionEnd;
   let selection = null;
   if (selEnd > selStart) {
     const startLine = value.substring(0, selStart).split('\n').length;
@@ -1628,6 +1876,17 @@ function updateEditorCursorState() {
 editorTextarea.addEventListener('keyup', () => dispatch('update_editor_selection'));
 editorTextarea.addEventListener('click', () => dispatch('update_editor_selection'));
 editorTextarea.addEventListener('select', () => dispatch('update_editor_selection'));
+fileEditorTextarea.addEventListener('keyup', () => dispatch('update_editor_selection'));
+fileEditorTextarea.addEventListener('click', () => dispatch('update_editor_selection'));
+fileEditorTextarea.addEventListener('select', () => dispatch('update_editor_selection'));
+
+function insertIndent(input) {
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  input.value = input.value.substring(0, start) + '  ' + input.value.substring(end);
+  input.selectionStart = input.selectionEnd = start + 2;
+  input.dispatchEvent(new Event('input'));
+}
 
 editorTextarea.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 's') {
@@ -1649,11 +1908,18 @@ editorTextarea.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Tab') {
     e.preventDefault();
-    const start = editorTextarea.selectionStart;
-    const end = editorTextarea.selectionEnd;
-    editorTextarea.value = editorTextarea.value.substring(0, start) + '  ' + editorTextarea.value.substring(end);
-    editorTextarea.selectionStart = editorTextarea.selectionEnd = start + 2;
-    editorTextarea.dispatchEvent(new Event('input'));
+    insertIndent(editorTextarea);
+  }
+});
+
+fileEditorTextarea.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    dispatch('save_active_file');
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    insertIndent(fileEditorTextarea);
   }
 });
 
@@ -1681,7 +1947,10 @@ async function saveActiveFile() {
     f.isScratch = false;
     f.isTemp = false;
     f.originalContent = f.content;
-    f.tabEl.classList.remove('scratch');
+    f.tabEl.classList.remove('composer-tab');
+    f.tabEl.classList.add('main-tab');
+    const icon = f.tabEl.querySelector('.tab-icon');
+    if (icon) icon.outerHTML = tabIcon('file');
     f.tabEl.querySelector('.editor-tab-name').textContent = newName;
     f.tabEl.dataset.path = savePath;
     // Re-bind click handlers to new path
@@ -1700,8 +1969,13 @@ async function saveActiveFile() {
     f.tabEl.insertBefore(dirtyEl, closeEl);
     openFiles.set(savePath, f);
     activeFilePath = savePath;
+    activeComposerPath = SCRATCH_PATH;
+    activeMainFilePath = savePath;
+    tabBar.insertBefore(f.tabEl, newTabBtn);
+    const scratch = openFiles.get(SCRATCH_PATH);
+    if (scratch) selectComposerTab(scratch, { focus: false });
     setState({ activeFilePath: savePath, isPreview: false, scratchContent: getState().scratchContent });
-    applyEditorSurface(f);
+    switchEditorTab(savePath);
     updateEditorDirty(savePath);
     // Refresh file tree to show the new file
     if (project) await loadFileTree(project.path);
@@ -1720,11 +1994,13 @@ async function saveActiveFile() {
 
 // 3.1 push: build a compact context block from current focus state
 function getSelectionRange() {
-  const start = editorTextarea.selectionStart;
-  const end = editorTextarea.selectionEnd;
+  const f = openFiles.get(activeFilePath);
+  const input = f?.isScratch ? editorTextarea : fileEditorTextarea;
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
   if (start === end) return null;
-  const before = editorTextarea.value.substring(0, start);
-  const selected = editorTextarea.value.substring(start, end);
+  const before = input.value.substring(0, start);
+  const selected = input.value.substring(start, end);
   const startLine = before.split('\n').length;
   const endLine = startLine + selected.split('\n').length - 1;
   return { startLine, endLine };
@@ -1761,7 +2037,7 @@ function sendToTerminal(text, tabId) {
 
   const hasExplicitText = typeof text === 'string';
   const focusState = getState();
-  const f = openFiles.get(activeFilePath);
+  const f = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
   if (!f && !hasExplicitText) return;
 
   const selectedText = f
@@ -1778,7 +2054,7 @@ function sendToTerminal(text, tabId) {
       activeFilePath: attention.filePath,
       isPreview: attention.isPreview,
       selectedText,
-      selectionRange: focusState.isPreview ? focusState.selection : (f ? getSelectionRange() : null),
+      selectionRange: focusState.selection,
     });
     if (ctx) {
       contentToSend = contentToSend + '\n' + ctx;
@@ -1809,10 +2085,18 @@ function sendToTerminal(text, tabId) {
 
   if (f?.isScratch && !hasExplicitText) {
     lastSentContent = f.content;
-    lastSentTabPath = activeFilePath;
+    lastSentTabPath = activeComposerPath;
     f.content = '';
     editorTextarea.value = '';
     setState({ scratchContent: '', cursorLine: null, selection: null });
+    showToast({
+      key: 'send-to-terminal',
+      message: `Sent to ${t.label}`,
+      detail: pushFocusCheckbox.checked ? 'context attached' : '',
+      duration: 4000,
+      actionLabel: 'Undo',
+      onAction: () => dispatch('undo_last_send'),
+    });
   }
 }
 
@@ -1824,7 +2108,7 @@ function undoLastSend() {
   if (target.isScratch) {
     setState({ scratchContent: target.content });
   }
-  if (activeFilePath === (lastSentTabPath || SCRATCH_PATH)) {
+  if (activeComposerPath === (lastSentTabPath || SCRATCH_PATH)) {
     editorTextarea.value = target.content;
   }
   lastSentContent = '';
@@ -1837,12 +2121,13 @@ pushFocusCheckbox.addEventListener('change', () => saveLayout());
 
 function updateSendTarget() {
   if (activeTabId === null) {
-    sendTarget.textContent = '→ no terminal';
+    sendTarget.innerHTML = `${tabIcon('terminal')}<span>no terminal</span>`;
     sendBtn.disabled = true;
   } else {
     const t = tabs.get(activeTabId);
     if (t) {
-      sendTarget.textContent = `→ ${t.label}`;
+      sendTarget.innerHTML = `${tabIcon('terminal')}<span>${escapeHtml(t.label)}</span>`;
+      sendTarget.title = `Send destination: ${t.label}`;
       sendBtn.disabled = false;
     }
   }
@@ -1886,9 +2171,9 @@ document.addEventListener('mouseup', () => {
 
 async function createTerminal(command, cwd, projectId, savedLabel) {
   const terminal = new Terminal({
-    fontSize: 14,
-    fontFamily: 'Consolas, "Courier New", monospace',
-    theme: { background: '#1e1e1e', foreground: '#cccccc' },
+    fontSize: 13,
+    fontFamily: '"Cascadia Mono", Consolas, monospace',
+    theme: { background: '#1c1f24', foreground: '#c8ccd4', cursor: '#f0f2f5', selectionBackground: '#2e333b' },
     cursorBlink: true,
   });
 
@@ -1953,8 +2238,10 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
   const tabId = ++tabCounter;
   const label = savedLabel || command.replace('.exe', '');
   const tabEl = document.createElement('div');
-  tabEl.className = 'tab';
-  tabEl.innerHTML = `<span class="tab-status idle"></span><span class="tab-label">${escapeHtml(label)}</span><span class="tab-close">\u00d7</span>`;
+  tabEl.className = 'tab main-tab';
+  tabEl.innerHTML = `${tabIcon('terminal')}<span class="tab-status idle"></span><span class="tab-label">${escapeHtml(label)}</span><span class="tab-close">\u00d7</span>`;
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'false');
   tabEl.dataset.id = tabId;
 
   tabEl.addEventListener('click', (e) => {
@@ -2053,7 +2340,14 @@ function showProjectTabs(projectId) {
   }
 
   if (restoreId !== undefined && tabs.has(restoreId)) {
-    switchTab(restoreId);
+    if (activeMainView === 'terminal') {
+      switchTab(restoreId);
+    } else {
+      activeTabId = restoreId;
+      projectActiveTab.set(projectId, restoreId);
+      setState({ activeTerminalTabId: restoreId });
+      updateSendTarget();
+    }
   } else {
     activeTabId = null;
     setState({ activeTerminalTabId: null });
@@ -2061,19 +2355,27 @@ function showProjectTabs(projectId) {
   }
 }
 
-function switchTab(tabId) {
+function switchTab(tabId, { focus = true } = {}) {
   const t = tabs.get(tabId);
   if (!t) return;
 
   // Hide all terminal elements (across all projects)
   tabs.forEach((td) => {
     td.termEl.style.display = 'none';
-    td.tabElement.classList.remove('active');
+    setTabSelected(td.tabElement, false);
   });
 
   t.termEl.style.display = 'block';
-  t.tabElement.classList.add('active');
+  activateMainTab(t.tabElement);
+  showMainSurface('terminal');
   activeTabId = tabId;
+  activeMainView = 'terminal';
+  activeSurface = 'editor';
+  const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+  if (composer) {
+    activeFilePath = composer.path;
+    setState({ activeFilePath: composer.path, isPreview: false, scratchContent: composer.content });
+  }
   projectActiveTab.set(t.projectId, tabId);
   setState({ activeTerminalTabId: tabId });
   updateSendTarget();
@@ -2084,7 +2386,7 @@ function switchTab(tabId) {
     const shouldFollow = t.pinnedToBottom;
     if (!resizeTerminalToContainer(t)) return;
     t.pinnedToBottom = shouldFollow;
-    t.terminal.focus();
+    if (focus) t.terminal.focus();
     if (shouldFollow) t.terminal.scrollToBottom();
   });
 }
@@ -2126,6 +2428,8 @@ function closeTerminal(tabId) {
       activeTabId = null;
       projectActiveTab.delete(projectId);
       setState({ activeTerminalTabId: null });
+      activateMainTab(null);
+      showMainSurface('terminal');
       updateSendTarget();
     }
   }
@@ -2199,6 +2503,16 @@ async function buildTerminalMenu() {
     });
     newTabMenu.appendChild(item);
   });
+  const browserItem = document.createElement('div');
+  browserItem.className = 'dropdown-item dropdown-item-browser';
+  browserItem.textContent = 'Open localhost…';
+  browserItem.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    newTabMenu.classList.add('hidden');
+    const url = await showPrompt('Open Local URL', 'localhost URL:', 'http://localhost:3000');
+    if (url) dispatch('open_browser', { url });
+  });
+  newTabMenu.appendChild(browserItem);
 }
 buildTerminalMenu();
 
@@ -2218,6 +2532,7 @@ document.addEventListener('keydown', async (e) => {
     const filepath = await window.api.clipboardSaveImage(p.path);
     if (filepath) {
       dispatch('append_to_scratch', { text: filepath });
+      showToast({ key: 'screenshot-saved', message: 'Screenshot saved', detail: filepath });
     }
   }
 });
@@ -2407,6 +2722,7 @@ previewPane.addEventListener('dragover', (e) => {
 });
 previewPane.addEventListener('drop', (e) => {
   e.preventDefault();
+  e.stopPropagation();
   const paths = getDroppedFilePaths(e);
   for (const p of paths) {
     const name = p.split(/[\\/]/).pop();
@@ -2424,7 +2740,7 @@ mainPane.addEventListener('dragover', (e) => {
 });
 mainPane.addEventListener('drop', (e) => {
   // Don't intercept if dropping on textarea or terminal (they have their own handlers)
-  if (e.target === editorTextarea || e.target.closest('#terminal-container')) return;
+  if (e.target === editorTextarea || e.target === fileEditorTextarea || e.target.closest('#terminal-container')) return;
   e.preventDefault();
   const paths = getDroppedFilePaths(e);
   for (const p of paths) {
@@ -2444,15 +2760,7 @@ editorTextarea.addEventListener('drop', (e) => {
   e.preventDefault();
   const paths = getDroppedFilePaths(e);
   if (paths.length > 0) {
-    const activeFile = openFiles.get(activeFilePath);
-    if (activeFile?.isScratch) {
-      dispatch('append_to_scratch', { text: paths.join('\n') });
-    } else {
-      for (const filePath of paths) {
-        const name = filePath.split(/[\\/]/).pop();
-        dispatch('open_preview', { path: filePath, name });
-      }
-    }
+    dispatch('append_to_scratch', { text: paths.join('\n') });
   }
 });
 
@@ -2577,42 +2885,6 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight, onResizeE
   });
 }
 
-function makePreviewSplitter(splitterEl, mainEl, previewEl, minMain, minPreview) {
-  let dragging = false;
-  let startX = 0;
-  let startPreviewWidth = 0;
-  let availableWidth = 0;
-
-  splitterEl.addEventListener('mousedown', (e) => {
-    dragging = true;
-    startX = e.clientX;
-    startPreviewWidth = previewEl.offsetWidth;
-    availableWidth = mainEl.offsetWidth + startPreviewWidth;
-    document.body.style.cursor = 'ew-resize';
-    e.preventDefault();
-  });
-
-  document.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    const delta = e.clientX - startX;
-    const newWidth = calculatePreviewWidth({
-      startPreviewWidth,
-      delta,
-      availableWidth,
-      minMain,
-      minPreview,
-    });
-    previewEl.style.width = newWidth + 'px';
-    handleResize();
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    document.body.style.cursor = '';
-  });
-}
-
 makeVSplitter(vsplitter1, sidebar, fileTreePane, 120, 300, (width) => {
   savedSidebarWidth = width;
   saveCollapseState();
@@ -2621,7 +2893,6 @@ makeVSplitter(vsplitter2, fileTreePane, document.getElementById('main-pane'), 12
   savedFileTreeWidth = width;
   saveCollapseState();
 });
-makePreviewSplitter(vsplitter3, document.getElementById('main-pane'), document.getElementById('preview-pane'), 200, 150);
 
 // ============================================================
 // Status bar
@@ -2670,6 +2941,10 @@ register('open_preview', ({ path, name }) => {
   return openFileInPreview(path, name);
 });
 
+register('open_browser', ({ url }) => {
+  return openBrowserUrl(url);
+});
+
 // close_tab: close an editor tab
 register('close_tab', ({ filePath }) => {
   closeEditorTab(filePath);
@@ -2688,8 +2963,8 @@ register('append_to_scratch', ({ text }) => {
   appendToScratch(text);
 });
 
-register('update_editor_content', ({ content }) => {
-  updateActiveEditorContent(content);
+register('update_editor_content', ({ filePath, content }) => {
+  updateEditorContent(filePath || activeFilePath, content);
 });
 
 register('update_editor_selection', () => {
@@ -2706,12 +2981,6 @@ register('undo_last_send', () => {
 
 // focus_terminal: switch to a terminal tab
 register('focus_terminal', ({ tabId }) => {
-  // A central file editor intentionally hides the terminal surface. An
-  // explicit focus request must therefore restore the scratch/terminal
-  // layout before selecting the requested terminal tab.
-  if (terminalPane.classList.contains('hidden') && openFiles.has(SCRATCH_PATH)) {
-    switchEditorTab(SCRATCH_PATH);
-  }
   switchTab(tabId);
 });
 
@@ -2849,6 +3118,9 @@ register('preview_reveal', async ({ previewPath, line, endLine }) => {
   }
   if (isImage(preview.name)) {
     return { revealed: false, reason: 'line reveal is not supported for images' };
+  }
+  if (preview.isBrowser) {
+    return { revealed: false, reason: 'line reveal is not supported for browser tabs' };
   }
   const revealed = await loadPreviewContent(preview, { line, endLine: endLine || line }, false);
   if (!revealed) return { revealed: false, reason: 'file could not be rendered' };

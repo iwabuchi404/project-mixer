@@ -5,9 +5,15 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; frame-src file: data:; object-src 'none'">
   <title>Project Mixer</title>
   <link rel="stylesheet" href="dist/xterm.css">
+  <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div id="title-bar">
+    <span class="title-bar-mark">PM</span>
+    <span class="title-bar-title">Project Mixer</span>
+    <span id="title-bar-context"></span>
+  </div>
   <div id="app">
     <div id="sidebar-restore-bar" class="restore-bar hidden">
       <button id="sidebar-restore-btn" title="Restore Projects (Ctrl+B)">&#x25B6;</button>
@@ -43,33 +49,36 @@
     </div>
     <div id="vsplitter-2" class="vsplitter"></div>
     <div id="main-pane">
-      <div id="terminal-pane">
-        <div id="tab-bar">
-          <button id="new-tab-btn">+ Terminal</button>
-        </div>
-        <div id="terminal-container"></div>
+      <div id="main-tab-bar" class="tabbar" role="tablist" aria-label="Main views">
+        <button id="new-tab-btn" class="tab-add" title="New terminal">+</button>
       </div>
-      <div id="splitter" class="hidden"></div>
-      <div id="editor-pane" class="hidden">
-        <div id="editor-tab-bar"></div>
+      <div id="main-surface">
+        <div id="terminal-pane" class="main-surface-pane">
+          <div id="terminal-container"></div>
+        </div>
+        <div id="file-editor-pane" class="main-surface-pane hidden">
+          <textarea id="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
+        </div>
+        <div id="preview-pane" class="main-surface-pane hidden">
+          <div id="preview-content">
+            <webview id="preview-webview" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
+          </div>
+        </div>
+      </div>
+      <div id="splitter"></div>
+      <div id="editor-pane">
+        <div id="editor-tab-bar" class="composer-tabbar"></div>
         <div id="editor-content">
           <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
         </div>
         <div id="send-bar">
-          <span id="send-target">→ no terminal</span>
+          <span id="send-target">no terminal</span>
           <label id="push-focus-toggle" title="Append current file/selection context to the message">
             <input type="checkbox" id="push-focus-checkbox" checked>
             <span>context</span>
           </label>
           <button id="send-btn" title="Send to terminal (Ctrl+Enter)">Send</button>
         </div>
-      </div>
-    </div>
-    <div id="vsplitter-3" class="vsplitter hidden"></div>
-    <div id="preview-pane" class="hidden">
-      <div id="preview-tab-bar"></div>
-      <div id="preview-content">
-        <webview id="preview-webview" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
       </div>
     </div>
   </div>
@@ -115,7 +124,7 @@
   <div id="prompt-modal" class="modal hidden">
     <div class="modal-content">
       <h3 id="prompt-title">New File</h3>
-      <p id="prompt-label" style="font-size:12px;color:#888;margin-bottom:8px;"></p>
+      <p id="prompt-label"></p>
       <input type="text" id="prompt-input" placeholder="name">
       <div class="modal-buttons">
         <button id="prompt-cancel-btn">Cancel</button>
@@ -123,6 +132,8 @@
       </div>
     </div>
   </div>
+  <div id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div id="error-region" aria-live="assertive"></div>
   <script src="dist/renderer.bundle.js"></script>
 </body>
 </html>
