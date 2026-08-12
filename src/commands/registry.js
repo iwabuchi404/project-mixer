@@ -4,6 +4,7 @@
 // the point — the discipline is.
 
 import { COMMAND_TYPES } from './types.js';
+import { COMMAND_SCHEMAS } from './schemas.js';
 
 const handlers = new Map();
 const trace = [];
@@ -35,7 +36,7 @@ export function register(name, handler) {
     throw new Error(`[commands] Unknown command: ${name}`);
   }
   if (handlers.has(name)) {
-    console.warn(`[commands] Overwriting existing handler: ${name}`);
+    throw new Error(`[commands] Duplicate handler registration: ${name}`);
   }
   handlers.set(name, handler);
 }
@@ -46,8 +47,16 @@ export function dispatch(name, args = {}) {
   }
   const handler = handlers.get(name);
   if (!handler) {
-    console.error(`[commands] No handler registered for: ${name}`);
-    return undefined;
+    throw new Error(`[commands] No handler registered for: ${name}`);
+  }
+  const schema = COMMAND_SCHEMAS[name];
+  if (schema) {
+    const validation = schema.safeParse(args);
+    if (!validation.success) {
+      const issue = validation.error.issues[0];
+      const path = issue.path.length > 0 ? ` at '${issue.path.join('.')}'` : '';
+      throw new Error(`[commands] Invalid args for ${name}${path}: ${issue.message}`);
+    }
   }
   const started = {
     id: ++traceCounter,

@@ -1,10 +1,10 @@
 // src/store/index.js
 // Focus state store: the single source of truth for "what the human is
-// looking at right now". Updated via commands, read by get_focus.
+// looking at right now" and agent attention state (badges, waiting).
 //
-// Phase 1 scope: only the state needed by get_focus is centralized here.
-// Other UI state (terminal send modes, tree expansion, etc.) stays in
-// renderer.js as before and migrates incrementally.
+// R2 scope: badge and waiting state are centralized here so that project
+// list re-renders no longer drop them. Runtime handles (DOM, Terminal,
+// FitAddon, Promise) stay in renderer-side registries, not here.
 
 const subscribers = new Set();
 
@@ -23,6 +23,12 @@ const state = {
 
   // Scratch (human→AI input channel)
   scratchContent: '',
+
+  // R2: agent attention state — previously DOM-only, now authoritative here.
+  // projectBadges: { [projectId]: string } — badge kind, or null/undefined for none.
+  projectBadges: {},
+  // waitingTabs: { [tabId]: { projectId: string, waiting: boolean } }
+  waitingTabs: {},
 };
 
 export function getState() {
@@ -55,6 +61,26 @@ export function getProjectScratchContent(openFiles, activeFilePath, scratchPath)
     ? activeFile
     : openFiles.get(scratchPath);
   return scratchFile?.content || '';
+}
+
+// R2: selectors for badge and waiting state.
+
+export function getProjectBadge(projectId) {
+  return state.projectBadges[projectId] || null;
+}
+
+export function getWaitingSummary() {
+  const summary = {};
+  for (const info of Object.values(state.waitingTabs)) {
+    if (info && info.waiting) {
+      summary[info.projectId] = (summary[info.projectId] || 0) + 1;
+    }
+  }
+  return summary;
+}
+
+export function isTabWaiting(tabId) {
+  return Boolean(state.waitingTabs[tabId]?.waiting);
 }
 
 // Build the get_focus response from current state + project lookup

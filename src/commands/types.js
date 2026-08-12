@@ -56,7 +56,7 @@ export const COMMAND_TYPES = {
     returns: 'void',
   },
   create_terminal: {
-    args: { command: 'string', cwd: 'string?', projectId: 'string?', label: 'string?' },
+    args: { command: 'string?', cwd: 'string?', projectId: 'string?', label: 'string?' },
     returns: 'number',
   },
   close_terminal: {

@@ -8,7 +8,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import sharedScrollbarCss from './scrollbars.css';
 import { register, dispatch } from './src/commands/registry.js';
-import { getState, setState, buildFocusState, getProjectScratchContent } from './src/store/index.js';
+import { getState, setState, buildFocusState, getProjectScratchContent, getProjectBadge, getWaitingSummary, isTabWaiting } from './src/store/index.js';
 import {
   clampLineRange,
   decidePreviewActivation,
@@ -191,6 +191,72 @@ function activateMainTab(tabEl) {
   tabBar.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === tabEl));
 }
 
+// R3: shared tab element factory. The 4 tab kinds (preview, browser,
+// editor-file, terminal) previously duplicated markup + event setup 4 times.
+// This factory keeps them consistent without a base class. The terminal and
+// webview mount strategies are NOT shared — callers still own those.
+//
+// kind: 'preview' | 'browser' | 'file' | 'terminal'
+// ident: { key: 'path' | 'id', value: string|number } — dataset key/value
+// label: visible tab name
+// closeSelector: CSS selector for the close button inside the tab
+// actions: { onSwitch(args), onClose(args), onContext(args, x, y) }
+// extraInner: optional extra HTML inserted after the icon (e.g. dirty marker)
+function createMainTab({ kind, ident, label, closeSelector, actions, extraInner = '' }) {
+  const tabEl = document.createElement('div');
+  const classByKind = {
+    preview: 'preview-tab main-tab',
+    browser: 'preview-tab main-tab browser-tab',
+    file: 'editor-tab main-tab',
+    terminal: 'tab main-tab',
+  };
+  tabEl.className = classByKind[kind] || 'main-tab';
+  tabEl.setAttribute('role', 'tab');
+  tabEl.setAttribute('aria-selected', 'false');
+  tabEl.dataset[ident.key] = ident.value;
+
+  const statusInner = kind === 'terminal'
+    ? '<span class="tab-status idle"></span>'
+    : '';
+  const notificationInner = (kind === 'preview' || kind === 'browser')
+    ? '<span class="tab-notification"></span>'
+    : '';
+  const dirtyInner = kind === 'file'
+    ? '<span class="editor-tab-dirty hidden">*</span>'
+    : '';
+  const labelClass = kind === 'terminal' ? 'tab-label' : 'editor-tab-name';
+  const closeClass = kind === 'terminal' ? 'tab-close' : 'editor-tab-close';
+
+  tabEl.innerHTML =
+    `${tabIcon(kind)}` +
+    `${statusInner}` +
+    `${extraInner}` +
+    `<span class="${labelClass}">${escapeHtml(label)}</span>` +
+    `${dirtyInner}` +
+    `${notificationInner}` +
+    `<span class="${closeClass}">\u00d7</span>`;
+
+  tabEl.addEventListener('click', (e) => {
+    if (e.target.classList.contains(closeClass.slice(1))) {
+      actions.onClose(ident.value);
+    } else {
+      actions.onSwitch(ident.value);
+    }
+  });
+  tabEl.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      actions.onClose(ident.value);
+    }
+  });
+  tabEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    actions.onContext(ident.value, e.clientX, e.clientY);
+  });
+  return tabEl;
+}
+
 function showMainSurface(kind) {
   if (mainSurface.dataset.surface === 'preview' && kind !== 'preview') {
     queueVisiblePreviewScrollCapture();
@@ -330,7 +396,11 @@ window.api.onPtyExit(({ id, exitCode }) => {
 });
 
 // Hook-based waiting indicator (Claude Code Notification/Stop, Codex notify)
-window.api.onHookNotify(({ type, cwd, ptyId, waiting }) => {
+// R1: strict routing — only deliver to the tab whose PTY matches. When the
+// main process cannot identify a unique PTY (no match or ambiguous cwd),
+// show a persistent unattributed notice instead of fanning out to the
+// active project's agent tabs.
+window.api.onHookNotify(({ type, cwd, ptyId, ambiguous, unattributed, waiting }) => {
   // Match by ptyId (from cwd matching in main process)
   if (ptyId !== null && ptyId !== undefined) {
     for (const [tabId, t] of tabs) {
@@ -344,20 +414,20 @@ window.api.onHookNotify(({ type, cwd, ptyId, waiting }) => {
         return;
       }
     }
+    // ptyId was provided but no tab has it — the PTY may have been closed.
+    // Fall through to unattributed notice.
   }
-  // Fallback: match by projectId if cwd doesn't match a specific PTY
-  if (activeProjectId) {
-    for (const [tabId, t] of tabs) {
-      if (t.projectId === activeProjectId && (t.command === 'claude' || t.command === 'codex')) {
-        const wasWaiting = t.waiting;
-        t.waiting = waiting;
-        if (t.waiting !== wasWaiting) {
-          updateTabStatus(tabId);
-          updateProjectStatus(t.projectId);
-        }
-      }
-    }
-  }
+  // Unattributed or ambiguous: show a persistent notice instead of
+  // guessing which tab should receive it.
+  const label = ambiguous ? 'ambiguous cwd' : 'no matching terminal';
+  const cwdDetail = cwd ? `cwd: ${cwd}` : 'cwd: unknown';
+  showToast({
+    key: `hook-unattributed-${type}`,
+    message: `Agent notification (${type || 'unknown'}) — ${label}`,
+    detail: cwdDetail,
+    type: 'warn',
+    persistent: true,
+  });
 });
 
 // ============================================================
@@ -436,6 +506,15 @@ function renderProjectList() {
       saveProjectOrder();
     });
     projectList.appendChild(el);
+  }
+  // R2: re-apply badge and waiting status from the store so a re-render
+  // does not drop agent attention state that lives only in the store.
+  for (const id of projects.keys()) {
+    renderProjectBadge(id);
+  }
+  const waiting = getWaitingSummary();
+  for (const [pid, count] of Object.entries(waiting)) {
+    if (count > 0) updateProjectStatus(pid);
   }
 }
 
@@ -1637,36 +1716,18 @@ async function openFileInPreview(filePath, name, options = {}) {
     scrollPosition: { x: 0, y: 0 },
   };
 
-  const tabEl = document.createElement('div');
-  tabEl.className = 'preview-tab main-tab';
-  tabEl.innerHTML = `${tabIcon('preview')}<span class="editor-tab-name">${escapeHtml(name)}</span><span class="tab-notification"></span><span class="editor-tab-close">\u00d7</span>`;
-  tabEl.setAttribute('role', 'tab');
-  tabEl.setAttribute('aria-selected', 'false');
-  tabEl.dataset.path = previewPath;
+  const tabEl = createMainTab({
+    kind: 'preview',
+    ident: { key: 'path', value: previewPath },
+    label: name,
+    actions: {
+      onSwitch: () => dispatch('switch_tab', { filePath: previewPath }),
+      onClose: () => dispatch('close_tab', { filePath: previewPath }),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'preview', previewPath, filePath }),
+    },
+  });
   // A6: tooltip with full path
   tabEl.title = `Preview — ${filePath}`;
-
-  tabEl.addEventListener('click', (e) => {
-    if (e.target.classList.contains('editor-tab-close')) {
-      dispatch('close_tab', { filePath: previewPath });
-    } else {
-      dispatch('switch_tab', { filePath: previewPath });
-    }
-  });
-
-  tabEl.addEventListener('auxclick', (e) => {
-    if (e.button === 1) {
-      e.preventDefault();
-      dispatch('close_tab', { filePath: previewPath });
-    }
-  });
-
-  // A5: preview tab context menu
-  tabEl.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    showTabContextMenu(e.clientX, e.clientY, { kind: 'preview', previewPath, filePath });
-  });
 
   previewTabBar.insertBefore(tabEl, newTabBtn);
   fileData.tabEl = tabEl;
@@ -1730,28 +1791,17 @@ async function openBrowserUrl(value) {
     projectId,
     scrollPosition: { x: 0, y: 0 },
   };
-  const tabEl = document.createElement('div');
-  tabEl.className = 'preview-tab main-tab browser-tab';
-  tabEl.innerHTML = `${tabIcon('browser')}<span class="editor-tab-name">${escapeHtml(name)}</span><span class="tab-notification"></span><span class="editor-tab-close">\u00d7</span>`;
-  tabEl.setAttribute('role', 'tab');
-  tabEl.setAttribute('aria-selected', 'false');
-  tabEl.dataset.path = previewPath;
+  const tabEl = createMainTab({
+    kind: 'browser',
+    ident: { key: 'path', value: previewPath },
+    label: name,
+    actions: {
+      onSwitch: () => dispatch('switch_tab', { filePath: previewPath }),
+      onClose: () => dispatch('close_tab', { filePath: previewPath }),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'browser', previewPath, filePath: url }),
+    },
+  });
   tabEl.title = url;
-  tabEl.addEventListener('click', (event) => {
-    if (event.target.classList.contains('editor-tab-close')) dispatch('close_tab', { filePath: previewPath });
-    else dispatch('switch_tab', { filePath: previewPath });
-  });
-  tabEl.addEventListener('auxclick', (event) => {
-    if (event.button === 1) {
-      event.preventDefault();
-      dispatch('close_tab', { filePath: previewPath });
-    }
-  });
-  tabEl.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    showTabContextMenu(event.clientX, event.clientY, { kind: 'browser', previewPath, filePath: url });
-  });
 
   tabBar.insertBefore(tabEl, newTabBtn);
   fileData.tabEl = tabEl;
@@ -2121,36 +2171,18 @@ async function openFileInEditor(filePath, name) {
     projectId,
   };
 
-  const tabEl = document.createElement('div');
-  tabEl.className = 'editor-tab main-tab';
-  tabEl.innerHTML = `${tabIcon('file')}<span class="editor-tab-name">${escapeHtml(name)}</span><span class="editor-tab-dirty hidden">*</span><span class="editor-tab-close">\u00d7</span>`;
-  tabEl.setAttribute('role', 'tab');
-  tabEl.setAttribute('aria-selected', 'false');
-  tabEl.dataset.path = filePath;
+  const tabEl = createMainTab({
+    kind: 'file',
+    ident: { key: 'path', value: filePath },
+    label: name,
+    actions: {
+      onSwitch: () => dispatch('switch_tab', { filePath }),
+      onClose: () => dispatch('close_tab', { filePath }),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'editor-file', filePath }),
+    },
+  });
   // A6: tooltip with full path
   tabEl.title = `Edit — ${filePath}`;
-
-  tabEl.addEventListener('click', (e) => {
-    if (e.target.classList.contains('editor-tab-close')) {
-      dispatch('close_tab', { filePath });
-    } else {
-      dispatch('switch_tab', { filePath });
-    }
-  });
-
-  tabEl.addEventListener('auxclick', (e) => {
-    if (e.button === 1) {
-      e.preventDefault();
-      dispatch('close_tab', { filePath });
-    }
-  });
-
-  // A5: editor file tab context menu
-  tabEl.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    showTabContextMenu(e.clientX, e.clientY, { kind: 'editor-file', filePath });
-  });
 
   makeEditorTabDraggable(tabEl, filePath);
   tabBar.insertBefore(tabEl, newTabBtn);
@@ -2723,33 +2755,15 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
 
   const tabId = ++tabCounter;
   const label = savedLabel || command.replace('.exe', '');
-  const tabEl = document.createElement('div');
-  tabEl.className = 'tab main-tab';
-  tabEl.innerHTML = `${tabIcon('terminal')}<span class="tab-status idle"></span><span class="tab-label">${escapeHtml(label)}</span><span class="tab-close">\u00d7</span>`;
-  tabEl.setAttribute('role', 'tab');
-  tabEl.setAttribute('aria-selected', 'false');
-  tabEl.dataset.id = tabId;
-
-  tabEl.addEventListener('click', (e) => {
-    if (e.target.classList.contains('tab-close')) {
-      dispatch('close_terminal', { tabId });
-    } else {
-      dispatch('focus_terminal', { tabId });
-    }
-  });
-
-  tabEl.addEventListener('auxclick', (e) => {
-    if (e.button === 1) {
-      e.preventDefault();
-      dispatch('close_terminal', { tabId });
-    }
-  });
-
-  // A5: terminal tab context menu
-  tabEl.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    showTabContextMenu(e.clientX, e.clientY, { kind: 'terminal', tabId });
+  const tabEl = createMainTab({
+    kind: 'terminal',
+    ident: { key: 'id', value: tabId },
+    label,
+    actions: {
+      onSwitch: () => dispatch('focus_terminal', { tabId }),
+      onClose: () => dispatch('close_terminal', { tabId }),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'terminal', tabId }),
+    },
   });
 
   tabEl.draggable = true;
@@ -2900,6 +2914,11 @@ function closeTerminal(tabId) {
   t.termEl.remove();
   t.tabElement.remove();
   tabs.delete(tabId);
+  // R2: remove waiting state from the store so it does not persist after
+  // the tab is gone.
+  const waitingTabs = { ...getState().waitingTabs };
+  delete waitingTabs[tabId];
+  setState({ waitingTabs });
   updateProjectStatus(projectId);
 
   if (activeTabId === tabId) {
@@ -2925,6 +2944,13 @@ function closeTerminal(tabId) {
 function updateTabStatus(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
+  // R2: sync waiting state to the store so it survives re-renders.
+  const waitingTabs = { ...getState().waitingTabs };
+  const prev = waitingTabs[tabId];
+  if (!prev || prev.waiting !== t.waiting || prev.projectId !== t.projectId) {
+    waitingTabs[tabId] = { projectId: t.projectId, waiting: t.waiting };
+    setState({ waitingTabs });
+  }
   const statusEl = t.tabElement.querySelector('.tab-status');
   if (statusEl) {
     statusEl.className = 'tab-status ' + (t.waiting ? 'waiting' : 'idle');
@@ -2933,12 +2959,13 @@ function updateTabStatus(tabId) {
 
 function updateProjectStatus(projectId) {
   if (!projectId) return;
-  const anyWaiting = Array.from(tabs.values()).some(t => t.projectId === projectId && t.waiting);
-  const el = projectList.querySelector(`.project-item .project-status`);
+  // R2: derive waiting summary from the store (authoritative) instead of
+  // scanning the tabs Map directly. The store is updated by updateTabStatus.
+  const waiting = getWaitingSummary();
+  const anyWaiting = (waiting[projectId] || 0) > 0;
   const items = projectList.querySelectorAll('.project-item');
   for (const item of items) {
-    const removeBtn = item.querySelector('.project-remove');
-    if (removeBtn && removeBtn.dataset.id === projectId) {
+    if (item.dataset.projectId === projectId) {
       const statusEl = item.querySelector('.project-status');
       if (statusEl) {
         statusEl.className = 'project-status ' + (anyWaiting ? 'waiting' : 'idle');
@@ -3591,18 +3618,32 @@ register('toggle_sidebar', () => {
 // 3.4 show_file: external UI control commands
 // ============================================================
 
-// project_set_badge: show a notification dot on a project in the sidebar
+// project_set_badge: show a notification dot on a project in the sidebar.
+// R2: badge state is authoritative in the store; the DOM is derived from it.
+// This survives project list re-renders that previously dropped badges.
 register('project_set_badge', ({ projectId, kind }) => {
+  const badges = { ...getState().projectBadges };
+  if (kind === 'clear' || !kind) {
+    delete badges[projectId];
+  } else {
+    badges[projectId] = kind;
+  }
+  setState({ projectBadges: badges });
+  renderProjectBadge(projectId);
+});
+
+function renderProjectBadge(projectId) {
   const item = projectList.querySelector(`.project-item[data-project-id="${projectId}"]`);
   if (!item) return;
   const badge = item.querySelector('.project-badge');
   if (!badge) return;
-  if (kind === 'clear' || !kind) {
-    badge.classList.remove('active');
-  } else {
+  const kind = getProjectBadge(projectId);
+  if (kind) {
     badge.classList.add('active');
+  } else {
+    badge.classList.remove('active');
   }
-});
+}
 
 // tab_activate: switch to an existing tab by filePath
 register('tab_activate', ({ filePath }) => {

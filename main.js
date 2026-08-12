@@ -11,6 +11,7 @@ const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
+const { readConfig, writeConfig, validateProjects, validateLayout, ConfigParseError } = require('./src/main/config-service.cjs');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -46,16 +47,56 @@ function ensureConfigDir() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 }
 
-function loadJson(file, fallback) {
+// R4: config reads/writes go through config-service. On corrupt config,
+// readConfig throws ConfigParseError instead of silently returning the
+// fallback — this prevents overwriting corrupt data with defaults.
+// layout.json is allowed to be missing (returns null fallback); a corrupt
+// layout is non-fatal and logged, but projects.json corruption stops startup.
+function loadProjectsConfig() {
   try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf-8'));
-  } catch (e) { console.error('loadJson error:', e); }
-  return fallback;
+    const data = readConfig(projectsFile, []);
+    const validation = validateProjects(data);
+    if (!validation.ok) {
+      throw new ConfigParseError(projectsFile, new Error(validation.message));
+    }
+    return validation.value;
+  } catch (e) {
+    if (e instanceof ConfigParseError) {
+      console.error(`[config] ${e.message}`);
+      throw e;
+    }
+    throw e;
+  }
 }
 
-function saveJson(file, data) {
+function loadLayoutConfig() {
+  try {
+    const data = readConfig(layoutFile, null);
+    const validation = validateLayout(data);
+    if (!validation.ok) {
+      console.error(`[config] layout.json invalid: ${validation.message}`);
+      return null;
+    }
+    return validation.value;
+  } catch (e) {
+    // A corrupt layout is non-fatal — log and use null rather than blocking
+    // startup. The user can still work; layout resets to defaults.
+    if (e instanceof ConfigParseError) {
+      console.error(`[config] ${e.message} — continuing with default layout`);
+      return null;
+    }
+    throw e;
+  }
+}
+
+function saveProjectsConfig(projects) {
   ensureConfigDir();
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf-8');
+  writeConfig(projectsFile, projects);
+}
+
+function saveLayoutConfig(layout) {
+  ensureConfigDir();
+  writeConfig(layoutFile, layout);
 }
 
 // --- Port discovery (Phase 0.2) ---
@@ -104,11 +145,17 @@ function createWindow() {
   setupApplicationMenu();
 }
 
-// A8: Application menu — calls renderer dispatch for existing commands
+// A8: Application menu — calls renderer dispatch for existing commands.
+// R1: errors are logged and the promise is returned so callers can handle
+// failures. The old .catch(() => {}) silently swallowed dispatch errors.
 function dispatchToRenderer(name, args = {}) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.executeJavaScript(`window.__pmDispatch && window.__pmDispatch(${JSON.stringify(name)}, ${JSON.stringify(args)})`)
-    .catch(() => {});
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve();
+  return mainWindow.webContents.executeJavaScript(
+    `window.__pmDispatch && window.__pmDispatch(${JSON.stringify(name)}, ${JSON.stringify(args)})`,
+  ).catch((error) => {
+    console.error(`[main] dispatchToRenderer(${name}) failed:`, error);
+    throw error;
+  });
 }
 
 function setupApplicationMenu() {
@@ -248,6 +295,22 @@ ipcMain.handle('menu:popup', (event, { x, y } = {}) => {
 });
 
 app.whenReady().then(() => {
+  // R4: startup guard — if projects.json is corrupt, stop startup and show
+  // an error dialog instead of overwriting the corrupt file with defaults.
+  // Per R1 decision #2, the app does not start in a read-only mode.
+  try {
+    loadProjectsConfig();
+  } catch (e) {
+    if (e instanceof ConfigParseError) {
+      dialog.showErrorBox(
+        'Project Mixer — corrupt config',
+        `${e.message}\n\nThe file was not overwritten. Please repair or remove it and relaunch.`,
+      );
+      app.quit();
+      return;
+    }
+    throw e;
+  }
   createWindow();
   startHookServer();
   // Start MCP server (Phase 1.3) — port written to port.json for discovery
@@ -410,6 +473,10 @@ ipcMain.handle('mem:get', async () => {
 
 ipcMain.handle('command:check', async (event, { commands }) => {
   const result = {};
+  // The --version fallback is restricted to known agent commands that may
+  // be installed as shell functions or aliases not discoverable by where/which.
+  // Allowing arbitrary commands here would let hook data execute any binary.
+  const VERSION_FALLBACK_ALLOWED = new Set(['claude', 'codex']);
   for (const cmd of commands) {
     try {
       if (os.platform() === 'win32') {
@@ -419,18 +486,22 @@ ipcMain.handle('command:check', async (event, { commands }) => {
       }
       result[cmd] = true;
     } catch (e) {
-      // Fallback: try running the command with --version
-      // (handles shell functions/aliases not found by where/which)
-      try {
-        if (os.platform() === 'win32') {
-          execSync(`pwsh.exe -NoProfile -Command "${cmd} --version"`, { stdio: 'ignore', timeout: 10000 });
-        } else {
-          execSync(`${cmd} --version`, { stdio: 'ignore', timeout: 10000 });
+      // Fallback: try running the command with --version, but only for
+      // known agent commands (claude, codex) that may be shell functions.
+      if (VERSION_FALLBACK_ALLOWED.has(cmd)) {
+        try {
+          if (os.platform() === 'win32') {
+            execSync(`pwsh.exe -NoProfile -Command "${cmd} --version"`, { stdio: 'ignore', timeout: 10000 });
+          } else {
+            execSync(`${cmd} --version`, { stdio: 'ignore', timeout: 10000 });
+          }
+          result[cmd] = true;
+          continue;
+        } catch (e2) {
+          // fall through to false
         }
-        result[cmd] = true;
-      } catch (e2) {
-        result[cmd] = false;
       }
+      result[cmd] = false;
     }
   }
   return result;
@@ -470,15 +541,24 @@ function handleHookNotification(data) {
   const cwd = data.cwd || data.working_directory || '';
   const waiting = /notification|approval|waiting|input/i.test(eventType);
 
-  // Find matching PTY by cwd
+  // Strict routing: match PTY by cwd. If multiple PTYs share the same cwd,
+  // do not pick one — deliver as unattributed instead. This prevents
+  // notifications from reaching the wrong tab when two agents run in the
+  // same directory.
   let matchedPtyId = null;
+  let ambiguous = false;
   if (cwd) {
     const normalizedCwd = path.resolve(cwd).toLowerCase();
+    const matches = [];
     for (const [id, p] of ptys) {
       if (path.resolve(p.cwd).toLowerCase() === normalizedCwd) {
-        matchedPtyId = id;
-        break;
+        matches.push(id);
       }
+    }
+    if (matches.length === 1) {
+      matchedPtyId = matches[0];
+    } else if (matches.length > 1) {
+      ambiguous = true;
     }
   }
 
@@ -486,6 +566,8 @@ function handleHookNotification(data) {
     type: eventType,
     cwd,
     ptyId: matchedPtyId,
+    ambiguous,
+    unattributed: matchedPtyId === null,
     waiting,
   });
 }
@@ -493,26 +575,32 @@ function handleHookNotification(data) {
 // --- Project management ---
 
 ipcMain.handle('project:list', async () => {
-  return loadJson(projectsFile, []);
+  try {
+    return loadProjectsConfig();
+  } catch (e) {
+    // R4: corrupt projects.json — return empty rather than crashing the
+    // renderer. The startup guard below prevents reaching here on launch.
+    return [];
+  }
 });
 
 ipcMain.handle('project:add', async (event, { name, path: projPath }) => {
-  const projects = loadJson(projectsFile, []);
+  const projects = loadProjectsConfig();
   const id = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   projects.push({ id, name, path: projPath });
-  saveJson(projectsFile, projects);
+  saveProjectsConfig(projects);
   return projects;
 });
 
 ipcMain.handle('project:remove', async (event, { id }) => {
-  let projects = loadJson(projectsFile, []);
+  let projects = loadProjectsConfig();
   projects = projects.filter(p => p.id !== id);
-  saveJson(projectsFile, projects);
+  saveProjectsConfig(projects);
   return projects;
 });
 
 ipcMain.handle('project:reorder', async (event, { orderedIds }) => {
-  let projects = loadJson(projectsFile, []);
+  let projects = loadProjectsConfig();
   const map = new Map(projects.map(p => [p.id, p]));
   const reordered = orderedIds
     .map(id => map.get(id))
@@ -521,7 +609,7 @@ ipcMain.handle('project:reorder', async (event, { orderedIds }) => {
   for (const p of projects) {
     if (!orderedIds.includes(p.id)) reordered.push(p);
   }
-  saveJson(projectsFile, reordered);
+  saveProjectsConfig(reordered);
   return reordered;
 });
 
@@ -601,12 +689,12 @@ ipcMain.handle('clipboard:writeText', async (event, { text }) => {
 // --- Layout persistence ---
 
 ipcMain.handle('layout:save', async (event, { layout }) => {
-  saveJson(layoutFile, layout);
+  saveLayoutConfig(layout);
   return true;
 });
 
 ipcMain.handle('layout:load', async () => {
-  return loadJson(layoutFile, null);
+  return loadLayoutConfig();
 });
 
 // --- Folder dialog ---
@@ -695,42 +783,24 @@ ipcMain.handle('hook:notify', async (event, { type, projectId, tabId, waiting })
 // --- Hook config auto-generation ---
 
 // Hook script reads the port from PROJECT_MIXER_PORT_FILE env var (inherited
-// from the PTY that Claude Code runs in), falling back to scanning port.json
-// files in known userData directories. This ensures each PM instance receives
-// hooks only from PTYs it spawned, even when multiple profiles share a project.
+// from the PTY that Claude Code runs in). The old fallback that scanned
+// userData directories for port.json was removed in R1 — it could deliver
+// notifications to the wrong PM instance when dev and installed profiles
+// share a project. Each PTY must use the env var set by its spawning PM.
 const HOOK_SCRIPT = `#!/usr/bin/env node
 // Project Mixer hook - sends notification to local HTTP server
 // Port is discovered via PROJECT_MIXER_PORT_FILE env var (set by PM's PTY).
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
-const os = require('os');
+
+const portFile = process.env.PROJECT_MIXER_PORT_FILE;
+if (!portFile) { process.exit(0); }
 
 let port = null;
-
-// 1. Try env var (most reliable — set by the PM instance that spawned this PTY)
-const portFile = process.env.PROJECT_MIXER_PORT_FILE;
-if (portFile) {
-  try {
-    const data = JSON.parse(fs.readFileSync(portFile, 'utf-8'));
-    port = data.port;
-  } catch (e) {}
-}
-
-// 2. Fallback: scan userData directories for port.json
-if (!port) {
-  const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-  const dirs = [
-    path.join(appData, 'Project Mixer', 'project-mixer'),
-    path.join(appData, 'Project Mixer Dev', 'project-mixer'),
-  ];
-  for (const dir of dirs) {
-    try {
-      const data = JSON.parse(fs.readFileSync(path.join(dir, 'port.json'), 'utf-8'));
-      if (data.port) { port = data.port; break; }
-    } catch (e) {}
-  }
-}
+try {
+  const data = JSON.parse(fs.readFileSync(portFile, 'utf-8'));
+  port = data.port;
+} catch (e) {}
 
 if (!port) { process.exit(0); }
 
