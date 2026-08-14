@@ -229,15 +229,15 @@ function createMainTab({ kind, ident, label, closeSelector, actions, extraInner 
 
   tabEl.innerHTML =
     `${tabIcon(kind)}` +
-    `${statusInner}` +
     `${extraInner}` +
     `<span class="${labelClass}">${escapeHtml(label)}</span>` +
     `${dirtyInner}` +
+    `${statusInner}` +
     `${notificationInner}` +
     `<span class="${closeClass}">\u00d7</span>`;
 
   tabEl.addEventListener('click', (e) => {
-    if (e.target.classList.contains(closeClass.slice(1))) {
+    if (e.target.classList.contains(closeClass)) {
       actions.onClose(ident.value);
     } else {
       actions.onSwitch(ident.value);
@@ -2606,6 +2606,8 @@ function sendToTerminal(text, tabId) {
       actionLabel: 'Undo',
       onAction: () => dispatch('undo_last_send'),
     });
+    // Move focus to the receiving terminal so the user can immediately interact.
+    switchTab(activeTabId);
   }
 }
 
@@ -2897,9 +2899,16 @@ function resizeTerminalToContainer(t) {
 
   const oldCols = t.terminal.cols;
   const oldRows = t.terminal.rows;
+  // Preserve the user's scroll position when not following the bottom.
+  // fit() reflows rows and can shift the viewport; restore the top line.
+  const savedBaseY = t.pinnedToBottom ? null : t.terminal.buffer.active.baseY;
   t.fitAddon.fit();
   if (t.terminal.cols !== oldCols || t.terminal.rows !== oldRows) {
     window.api.ptyResize(t.ptyId, t.terminal.cols, t.terminal.rows);
+  }
+  if (savedBaseY !== null) {
+    const delta = savedBaseY - t.terminal.buffer.active.baseY;
+    if (delta !== 0) t.terminal.scrollLines(delta);
   }
   return true;
 }
@@ -3334,6 +3343,7 @@ editorTextarea.addEventListener('drop', (e) => {
   const paths = getDroppedFilePaths(e);
   if (paths.length > 0) {
     dispatch('append_to_scratch', { text: paths.join('\n') });
+    editorTextarea.focus();
   }
 });
 
@@ -3352,6 +3362,9 @@ terminalContainer.addEventListener('drop', (e) => {
     if (t) {
       const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, t.command));
       t.terminal.paste(quotedPaths.join(' '));
+      // Focus the terminal only when it is already the visible surface,
+      // so dropping on a hidden terminal does not yank the user's view.
+      if (mainSurface.dataset.surface === 'terminal') t.terminal.focus();
     }
   }
 });

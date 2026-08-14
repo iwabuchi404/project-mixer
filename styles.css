@@ -290,6 +290,11 @@ textarea:focus-visible,
   margin-left: auto;
 }
 
+.tab-status,
+.tab-notification {
+  margin-left: auto;
+}
+
 .project-status.waiting,
 .tab-status.waiting,
 .project-badge.active,
