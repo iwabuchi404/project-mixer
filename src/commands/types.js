@@ -105,4 +105,38 @@ export const COMMAND_TYPES = {
     args: { projectId: 'string', kind: 'string' },
     returns: 'void',
   },
+  agent_notification_received: {
+    args: {
+      tabId: 'number',
+      projectId: 'string?',
+      kind: 'turn_started | needs_attention | turn_completed | turn_failed',
+      eventType: 'string',
+      source: 'string',
+      reason: 'string?',
+      title: 'string?',
+      message: 'string?',
+      sessionId: 'string?',
+    },
+    returns: 'void',
+  },
+  agent_notification_seen: {
+    args: { tabId: 'number' },
+    returns: 'void',
+  },
+  terminal_set_waiting: {
+    args: { tabId: 'number', projectId: 'string?', waiting: 'boolean', cause: 'string?' },
+    returns: 'void',
+  },
+  terminal_clear_attention: {
+    args: { tabId: 'number' },
+    returns: 'void',
+  },
+  agent_session_bound: {
+    args: { tabId: 'number', provider: 'string', sessionId: 'string', status: 'string?' },
+    returns: 'void',
+  },
+  agent_session_unbound: {
+    args: { tabId: 'number' },
+    returns: 'void',
+  },
 };

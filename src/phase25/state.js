@@ -17,6 +17,30 @@ export function isTerminalPinnedToBottom(buffer) {
   return !!buffer && buffer.viewportY >= buffer.baseY;
 }
 
+export function captureTerminalFollowToken(state) {
+  if (!state?.pinnedToBottom) return null;
+  return state.outputFollowRevision ?? 0;
+}
+
+export function invalidateTerminalFollow(state) {
+  if (!state) return;
+  state.outputFollowRevision = (state.outputFollowRevision ?? 0) + 1;
+}
+
+export function updateTerminalScrollPosition(state, buffer) {
+  if (!state) return false;
+  if (!state.userScrollActive) return !!state.pinnedToBottom;
+  const pinnedToBottom = isTerminalPinnedToBottom(buffer);
+  state.pinnedToBottom = pinnedToBottom;
+  return pinnedToBottom;
+}
+
+export function shouldFollowTerminalOutput(state, followToken) {
+  return followToken !== null
+    && !!state?.pinnedToBottom
+    && (state.outputFollowRevision ?? 0) === followToken;
+}
+
 export function quotePathForCommand(filePath, command = '') {
   const normalizedCommand = command.toLowerCase().replace(/\.exe$/, '');
 

@@ -304,6 +304,20 @@ textarea:focus-visible,
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--attn) 18%, transparent);
 }
 
+.project-status.notified,
+.tab-status.notified {
+  display: inline-block;
+  background: var(--g-5);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--g-5) 14%, transparent);
+}
+
+.project-status.failed,
+.tab-status.failed {
+  display: inline-block;
+  background: var(--err);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 16%, transparent);
+}
+
 .project-remove,
 .tab-close,
 .editor-tab-close {

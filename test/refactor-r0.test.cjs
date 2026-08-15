@@ -117,11 +117,11 @@ test('R0/KEEP: COMMAND_TYPES declares every command the renderer dispatches', ()
 
 test('R1/FIXED: handleHookNotification detects ambiguous cwd and sends unattributed', () => {
   const main = read('main.js');
-  // R1: strict routing collects all matches and flags ambiguity.
-  assert.match(main, /const matches = \[\]/);
-  assert.match(main, /matches\.length === 1/);
-  assert.match(main, /ambiguous = true/);
-  assert.match(main, /unattributed: matchedPtyId === null/);
+  assert.match(main, /resolveNotificationTarget\(notification, ptys\)/);
+  const service = read('src/main/agent-notification-service.cjs');
+  assert.match(service, /matches\.length === 1/);
+  assert.match(service, /ambiguous: matches\.length > 1/);
+  assert.match(service, /unattributed: true/);
 });
 
 test('R1/FIXED: renderer does not fan out unmatched notifications to activeProjectId tabs', () => {
@@ -241,7 +241,7 @@ test('R0/KEEP: store.getState returns a shallow copy, not the internal state', a
 test('R0/KEEP: store state contains only serializable values', async () => {
   // The refactoring plan rule #4: DOM/Terminal/Promise must not live in the
   // store. Pin the current serializable shape so R2 does not accidentally
-  // introduce runtime handles. R2 added projectBadges and waitingTabs as
+  // introduce runtime handles. R2 added projectBadges and terminalAttention as
   // plain objects — these are serializable.
   const store = await importEsm('src/store/index.js');
   const s = store.getState();
@@ -303,17 +303,15 @@ test('R2/FIXED: project_set_badge handler updates store state, not just DOM', ()
 });
 
 test('R2/FIXED: waiting state lives in the store, not only on the tabs Map', () => {
-  // R2: the store holds a waitingTabs map. updateTabStatus syncs to it,
-  // updateProjectStatus reads from it, and closeTerminal cleans it up.
+  // R2: the store holds one terminalAttention map for waiting and unread state.
   const renderer = read('renderer.js');
-  assert.match(renderer, /setState\(\{ waitingTabs \}\)/);
-  assert.match(renderer, /getWaitingSummary\(\)/);
-  // closeTerminal must remove the tab from the store's waitingTabs.
-  assert.match(renderer, /delete waitingTabs\[tabId\]/);
+  assert.match(renderer, /setState\(\{ terminalAttention \}\)/);
+  assert.match(renderer, /getTerminalAttentionSummary\(\)/);
+  assert.match(renderer, /terminal_clear_attention/);
   const store = read('src/store/index.js');
-  assert.match(store, /waitingTabs/);
-  assert.match(store, /getWaitingSummary/);
-  assert.match(store, /isTabWaiting/);
+  assert.match(store, /terminalAttention/);
+  assert.match(store, /getTerminalAttentionSummary/);
+  assert.match(store, /getTabAttention/);
 });
 
 // ---------------------------------------------------------------------------

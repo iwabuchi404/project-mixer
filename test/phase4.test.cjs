@@ -207,6 +207,18 @@ test('toast effects deduplicate and agent notices remain badges', () => {
   assert.match(renderer, /project_set_badge/);
 });
 
+test('input-waiting events create persistent OS notifications with tab-scoped cleanup', () => {
+  const renderer = read('renderer.js');
+  assert.doesNotMatch(renderer, /Notification\.isSupported/);
+  assert.match(renderer, /const visibleOsNotifications = new Map\(\)/);
+  assert.match(renderer, /requireInteraction:\s*kind === 'needs_attention'/);
+  assert.match(renderer, /tag:\s*`agent-attention-\$\{tabId\}`/);
+  assert.match(renderer, /function closeOsNotification\(tabId\)/);
+  assert.match(renderer, /if \(wasWaiting && !isWaiting\) closeOsNotification\(tabId\)/);
+  assert.match(renderer, /const bodyParts = \[detailTitle, message\]/);
+  assert.match(renderer, /bodyParts\.join\(' — '\) \|\| fallbackBody/);
+});
+
 test('packaged app includes tokens and the hidden title bar', () => {
   const pkg = JSON.parse(read('package.json'));
   assert.ok(pkg.build.files.includes('tokens.css'));

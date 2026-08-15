@@ -12,6 +12,8 @@ const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/laun
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, ConfigParseError } = require('./src/main/config-service.cjs');
+const { normalizeAgentNotification, resolveNotificationTarget } = require('./src/main/agent-notification-service.cjs');
+const { DevinSessionMonitor } = require('./src/main/devin-session-monitor.cjs');
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -35,6 +37,7 @@ const MCP_BASE_PORT = IS_DEV ? 47852 : 47822;
 let HOOK_PORT = null; // set only after the hook server is listening
 let MCP_PORT = null; // set only after the MCP server is listening
 let mcpControl = null;
+let devinMonitor = null;
 let resolveMcpReady;
 const mcpReady = new Promise((resolve) => { resolveMcpReady = resolve; });
 
@@ -295,6 +298,13 @@ ipcMain.handle('menu:popup', (event, { x, y } = {}) => {
 });
 
 app.whenReady().then(() => {
+  // Windows toast notifications require an AppUserModelID so the notification
+  // shows the correct app name and icon. Without this, Windows falls back to
+  // a generic "Electron" label. Must be set before any Notification is shown.
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.projectmixer.app');
+  }
+
   // R4: startup guard — if projects.json is corrupt, stop startup and show
   // an error dialog instead of overwriting the corrupt file with defaults.
   // Per R1 decision #2, the app does not start in a read-only mode.
@@ -312,6 +322,13 @@ app.whenReady().then(() => {
     throw e;
   }
   createWindow();
+  devinMonitor = new DevinSessionMonitor({
+    token: process.env.DEVIN_API_TOKEN,
+    orgId: process.env.DEVIN_ORG_ID,
+    baseUrl: process.env.DEVIN_API_BASE_URL,
+    onLifecycleEvent: forwardAgentLifecycleEvent,
+    onError: forwardDevinMonitorError,
+  });
   startHookServer();
   // Start MCP server (Phase 1.3) — port written to port.json for discovery
   mcpControl = startMcpServer(MCP_BASE_PORT, async (commandName, args = {}, sessionContext = null) => {
@@ -355,6 +372,7 @@ app.on('window-all-closed', () => {
     if (p.mcpToken) void mcpControl?.revokeSession(p.mcpToken);
   });
   ptys.clear();
+  devinMonitor?.dispose();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -411,6 +429,7 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
         ...process.env,
         TERM: 'xterm-256color',
         PROJECT_MIXER_PORT_FILE: portFile,
+        PROJECT_MIXER_PTY_ID: String(id),
         // 3.5: inject a per-PTY MCP URL so agents discover only their session.
         ...(mcpUrl ? { PM_MCP_URL: mcpUrl } : {}),
       },
@@ -431,6 +450,7 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
       mainWindow.webContents.send('pty:exit', { id, exitCode, signal });
     }
     ptys.delete(id);
+    devinMonitor?.unbind(id);
     void mcpControl?.revokeSession(mcpToken);
   });
 
@@ -453,8 +473,30 @@ ipcMain.handle('pty:kill', (event, { id }) => {
   if (p) {
     p.process.kill();
     ptys.delete(id);
+    devinMonitor?.unbind(id);
     if (p.mcpToken) void mcpControl?.revokeSession(p.mcpToken);
   }
+});
+
+ipcMain.handle('devin:bind', async (event, { ptyId, sessionId }) => {
+  const terminal = ptys.get(ptyId);
+  if (!terminal) return { ok: false, error: 'The terminal is no longer running.' };
+  const executable = path.basename(String(terminal.command || '')).replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
+  if (executable !== 'devin') {
+    return { ok: false, error: 'A Devin Cloud session can only be bound to a Devin terminal.' };
+  }
+  if (!devinMonitor) return { ok: false, error: 'The Devin monitor is unavailable.' };
+  return devinMonitor.bind({ ptyId, sessionId });
+});
+
+ipcMain.handle('devin:unbind', (event, { ptyId }) => ({
+  ok: Boolean(devinMonitor?.unbind(ptyId)),
+}));
+
+ipcMain.handle('window:focus', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
 });
 
 ipcMain.handle('mem:get', async () => {
@@ -535,41 +577,45 @@ function startHookServer() {
 
 function handleHookNotification(data) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  // Claude Code: hook_event_type = 'Notification' | 'Stop'
-  // Codex: event = 'agent-turn-complete' | 'approval-requested'
-  const eventType = data.hook_event_type || data.event || data.type || '';
-  const cwd = data.cwd || data.working_directory || '';
-  const waiting = /notification|approval|waiting|input/i.test(eventType);
-
-  // Strict routing: match PTY by cwd. If multiple PTYs share the same cwd,
-  // do not pick one — deliver as unattributed instead. This prevents
-  // notifications from reaching the wrong tab when two agents run in the
-  // same directory.
-  let matchedPtyId = null;
-  let ambiguous = false;
-  if (cwd) {
-    const normalizedCwd = path.resolve(cwd).toLowerCase();
-    const matches = [];
-    for (const [id, p] of ptys) {
-      if (path.resolve(p.cwd).toLowerCase() === normalizedCwd) {
-        matches.push(id);
-      }
-    }
-    if (matches.length === 1) {
-      matchedPtyId = matches[0];
-    } else if (matches.length > 1) {
-      ambiguous = true;
-    }
+  const notification = normalizeAgentNotification(data);
+  if (!notification) {
+    console.warn('[hook] Ignoring unsupported agent notification');
+    return;
   }
+  const target = resolveNotificationTarget(notification, ptys);
 
   mainWindow.webContents.send('hook:notify', {
-    type: eventType,
-    cwd,
-    ptyId: matchedPtyId,
-    ambiguous,
-    unattributed: matchedPtyId === null,
-    waiting,
+    type: notification.eventType,
+    source: notification.source,
+    kind: notification.kind,
+    reason: notification.reason,
+    title: notification.title,
+    message: notification.message,
+    cwd: notification.cwd,
+    ...target,
   });
+}
+
+function forwardAgentLifecycleEvent(notification) {
+  if (!mainWindow || mainWindow.isDestroyed() || !ptys.has(notification.ptyId)) return;
+  mainWindow.webContents.send('hook:notify', {
+    type: notification.eventType,
+    source: notification.source,
+    kind: notification.kind,
+    reason: notification.reason,
+    title: notification.title,
+    message: notification.message,
+    sessionId: notification.sessionId,
+    cwd: null,
+    ptyId: notification.ptyId,
+    ambiguous: false,
+    unattributed: false,
+  });
+}
+
+function forwardDevinMonitorError(error) {
+  if (!mainWindow || mainWindow.isDestroyed() || !ptys.has(error.ptyId)) return;
+  mainWindow.webContents.send('devin:monitor-error', error);
 }
 
 // --- Project management ---
@@ -770,16 +816,6 @@ ipcMain.handle('fs:createDir', async (event, { dirPath }) => {
   }
 });
 
-// --- Hook-based waiting indicator ---
-// Receives notifications from Claude Code/Codex hook scripts via HTTP or CLI.
-// The hook script calls: electron --hook-notify <json>
-// Or sends an HTTP POST to a local endpoint.
-
-ipcMain.handle('hook:notify', async (event, { type, projectId, tabId, waiting }) => {
-  mainWindow.webContents.send('hook:notify', { type, projectId, tabId, waiting });
-  return true;
-});
-
 // --- Hook config auto-generation ---
 
 // Hook script reads the port from PROJECT_MIXER_PORT_FILE env var (inherited
@@ -804,21 +840,51 @@ try {
 
 if (!port) { process.exit(0); }
 
-const payload = JSON.stringify({
-  hook_event_type: process.argv[2] || 'Notification',
-  cwd: process.cwd(),
-});
+const arg = process.argv[2] || '';
+const namedEvent = arg && !arg.startsWith('{');
+let argPayload = null;
+if (arg.startsWith('{')) {
+  try { argPayload = JSON.parse(arg); } catch (e) {}
+}
 
-const req = http.request({
-  hostname: '127.0.0.1',
-  port: port,
-  path: '/hook',
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-}, () => { process.exit(0); });
-req.on('error', () => { process.exit(0); });
-req.write(payload);
-req.end();
+function send(input = {}) {
+  const notification = {
+    ...input,
+    cwd: input.cwd || process.cwd(),
+    pty_id: Number(process.env.PROJECT_MIXER_PTY_ID) || undefined,
+    agent_source: input.agent_source || (namedEvent ? 'claude' : 'codex'),
+  };
+  if (!notification.hook_event_type && !notification.hook_event_name && !notification.event && !notification.type) {
+    notification.hook_event_type = arg || 'Notification';
+  }
+  const payload = JSON.stringify(notification);
+  const req = http.request({
+    hostname: '127.0.0.1',
+    port: port,
+    path: '/hook',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+  }, () => { process.stdout.write('{}\\n'); process.exit(0); });
+  req.on('error', () => { process.exit(0); });
+  req.write(payload);
+  req.end();
+}
+
+if (argPayload) {
+  send(argPayload);
+} else {
+  let stdin = '';
+  process.stdin.setEncoding('utf-8');
+  process.stdin.on('data', (chunk) => { stdin += chunk; });
+  process.stdin.on('end', () => {
+    let input = {};
+    if (stdin.trim()) {
+      try { input = JSON.parse(stdin); } catch (e) {}
+    }
+    send(input);
+  });
+  process.stdin.resume();
+}
 `;
 
 ipcMain.handle('hook:setup', async (event, { projectPath }) => {
@@ -873,10 +939,10 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
     results.push({ tool: 'claude', success: false, error: e.message });
   }
 
-  // Codex: ~/.codex/config.toml (append notify hook)
-  // Codex doesn't support per-project hooks well, so we skip for now
-  // The PTY pattern matching handles Codex as fallback
-  results.push({ tool: 'codex', success: true, note: 'Uses PTY pattern matching (no config needed)' });
+  // Codex supports user-level notify commands and trusted project hooks.
+  // Do not rewrite either automatically: changing notify would replace the
+  // user's command, while project hooks require an explicit trust review.
+  results.push({ tool: 'codex', success: true, note: 'Ready for Codex notify or trusted project hooks' });
 
   return results;
 });

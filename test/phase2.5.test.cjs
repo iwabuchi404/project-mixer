@@ -27,6 +27,39 @@ test('pinned-to-bottom follows the xterm active buffer positions', () => {
   assert.equal(phase25.isTerminalPinnedToBottom(null), false);
 });
 
+test('queued terminal output stops following after the user scrolls', () => {
+  const state = { pinnedToBottom: true, outputFollowRevision: 0, userScrollActive: false };
+  const followToken = phase25.captureTerminalFollowToken(state);
+
+  phase25.invalidateTerminalFollow(state);
+  state.userScrollActive = true;
+  phase25.updateTerminalScrollPosition(state, { viewportY: 12, baseY: 20 });
+
+  assert.equal(phase25.shouldFollowTerminalOutput(state, followToken), false);
+});
+
+test('old terminal output stays invalid after returning to the bottom', () => {
+  const state = { pinnedToBottom: true, outputFollowRevision: 0, userScrollActive: false };
+  const oldFollowToken = phase25.captureTerminalFollowToken(state);
+
+  phase25.invalidateTerminalFollow(state);
+  state.userScrollActive = true;
+  phase25.updateTerminalScrollPosition(state, { viewportY: 12, baseY: 20 });
+  phase25.updateTerminalScrollPosition(state, { viewportY: 20, baseY: 20 });
+
+  assert.equal(phase25.shouldFollowTerminalOutput(state, oldFollowToken), false);
+  const newFollowToken = phase25.captureTerminalFollowToken(state);
+  assert.equal(phase25.shouldFollowTerminalOutput(state, newFollowToken), true);
+});
+
+test('content-driven xterm scrolling does not change user follow intent', () => {
+  const state = { pinnedToBottom: true, outputFollowRevision: 0, userScrollActive: false };
+
+  phase25.updateTerminalScrollPosition(state, { viewportY: 0, baseY: 20 });
+
+  assert.equal(state.pinnedToBottom, true);
+});
+
 test('terminal drop paths are quoted for the active shell', () => {
   const windowsPath = String.raw`D:\My Project\O'Brien.txt`;
   assert.equal(

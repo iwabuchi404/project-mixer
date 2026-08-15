@@ -8,7 +8,9 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import sharedScrollbarCss from './scrollbars.css';
 import { register, dispatch } from './src/commands/registry.js';
-import { getState, setState, buildFocusState, getProjectScratchContent, getProjectBadge, getWaitingSummary, isTabWaiting } from './src/store/index.js';
+import { getState, setState, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
+import { clearTerminalAttention, markAgentNotificationSeen, receiveAgentNotification, setTerminalWaiting } from './src/notifications/state.mjs';
+import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
 import {
   clampLineRange,
   decidePreviewActivation,
@@ -21,11 +23,14 @@ import { PREVIEW_CSP } from './src/preview/security.js';
 import { getBrowserTabLabel, normalizeLocalBrowserUrl } from './src/ui/browser.mjs';
 import {
   INTERNAL_FILE_MIME,
+  captureTerminalFollowToken,
   captureExpandedPaneWidth,
   getEditorSurfaceKind,
-  isTerminalPinnedToBottom,
+  invalidateTerminalFollow,
   quotePathForCommand,
+  shouldFollowTerminalOutput,
   shouldOpenInOsByName,
+  updateTerminalScrollPosition,
 } from './src/phase25/state.js';
 
 // ============================================================
@@ -363,20 +368,35 @@ function detectWaiting(command, data) {
   return false;
 }
 
+function clearTerminalWaitingForUserInput(tabId) {
+  const terminal = tabs.get(tabId);
+  if (!terminal || !getTabAttention(tabId)?.waiting) return;
+  dispatch('terminal_set_waiting', {
+    tabId,
+    projectId: terminal.projectId,
+    waiting: false,
+    cause: 'input',
+  });
+}
+
 window.api.onPtyData(({ id, data }) => {
   for (const [tabId, t] of tabs) {
     if (t.ptyId === id) {
-      const shouldFollowOutput = t.pinnedToBottom;
+      const followToken = captureTerminalFollowToken(t);
       t.terminal.write(data, () => {
-        if (shouldFollowOutput && tabs.get(tabId) === t) {
+        if (tabs.get(tabId) === t && shouldFollowTerminalOutput(t, followToken)) {
           t.terminal.scrollToBottom();
         }
       });
-      const wasWaiting = t.waiting;
-      t.waiting = detectWaiting(t.command, data);
-      if (t.waiting !== wasWaiting) {
-        updateTabStatus(tabId);
-        updateProjectStatus(t.projectId);
+      // PTY output can SET waiting (e.g. detecting a prompt pattern) but
+      // must never CLEAR it. Tab switches trigger terminal resize → TUI
+      // redraw → detectWaiting returns false, which would spuriously clear
+      // the amber dot. Waiting is only cleared by real user input,
+      // an explicit UserPromptSubmit, PTY exit, or tab close.
+      const waiting = detectWaiting(t.command, data);
+      const currentWaiting = Boolean(getTabAttention(tabId)?.waiting);
+      if (waiting && !currentWaiting) {
+        dispatch('terminal_set_waiting', { tabId, projectId: t.projectId, waiting: true, cause: 'output' });
       }
       return;
     }
@@ -387,9 +407,8 @@ window.api.onPtyExit(({ id, exitCode }) => {
   for (const [tabId, t] of tabs) {
     if (t.ptyId === id) {
       t.terminal.write(`\r\n\x1b[90m[process exited with code ${exitCode}]\x1b[0m\r\n`);
-      t.waiting = false;
-      updateTabStatus(tabId);
-      updateProjectStatus(t.projectId);
+      dispatch('terminal_set_waiting', { tabId, projectId: t.projectId, waiting: false, cause: 'exit' });
+      dispatch('agent_session_unbound', { tabId });
       return;
     }
   }
@@ -400,17 +419,22 @@ window.api.onPtyExit(({ id, exitCode }) => {
 // main process cannot identify a unique PTY (no match or ambiguous cwd),
 // show a persistent unattributed notice instead of fanning out to the
 // active project's agent tabs.
-window.api.onHookNotify(({ type, cwd, ptyId, ambiguous, unattributed, waiting }) => {
+window.api.onHookNotify(({ type, source, kind, reason, title, message, sessionId, cwd, ptyId, ambiguous }) => {
   // Match by ptyId (from cwd matching in main process)
   if (ptyId !== null && ptyId !== undefined) {
     for (const [tabId, t] of tabs) {
       if (t.ptyId === ptyId) {
-        const wasWaiting = t.waiting;
-        t.waiting = waiting;
-        if (t.waiting !== wasWaiting) {
-          updateTabStatus(tabId);
-          updateProjectStatus(t.projectId);
-        }
+        dispatch('agent_notification_received', {
+          tabId,
+          projectId: t.projectId,
+          kind,
+          eventType: type,
+          source,
+          reason,
+          title,
+          message,
+          sessionId,
+        });
         return;
       }
     }
@@ -512,9 +536,9 @@ function renderProjectList() {
   for (const id of projects.keys()) {
     renderProjectBadge(id);
   }
-  const waiting = getWaitingSummary();
-  for (const [pid, count] of Object.entries(waiting)) {
-    if (count > 0) updateProjectStatus(pid);
+  const attention = getTerminalAttentionSummary();
+  for (const [pid, summary] of Object.entries(attention)) {
+    if (summary.waiting > 0 || summary.unread > 0 || summary.failed > 0) updateProjectStatus(pid);
   }
 }
 
@@ -873,6 +897,7 @@ function insertPathToTerminal(filePath) {
   const t = tabs.get(activeTabId);
   if (t) {
     window.api.ptyWrite(t.ptyId, filePath);
+    clearTerminalWaitingForUserInput(activeTabId);
   }
 }
 
@@ -882,6 +907,7 @@ function insertNameToTerminal(filePath) {
   if (t) {
     const name = filePath.split(/[\\/]/).pop();
     window.api.ptyWrite(t.ptyId, name);
+    clearTerminalWaitingForUserInput(activeTabId);
   }
 }
 
@@ -973,12 +999,22 @@ function hideTabContextMenu() {
 
 function buildTabMenuItems(target) {
   switch (target.kind) {
-    case 'terminal':
-      return [
+    case 'terminal': {
+      const terminal = tabs.get(target.tabId);
+      const binding = getTerminalAgentBinding(target.tabId);
+      const isDevin = isDevinCommand(terminal?.command);
+      const items = [
         { action: 'rename', label: 'Rename Tab' },
-        { action: 'copy-cwd', label: 'Copy cwd' },
-        { action: 'close', label: 'Close', danger: true },
       ];
+      if (isDevin) {
+        items.push(binding
+          ? { action: 'unbind-devin', label: 'Unbind Devin Cloud Session' }
+          : { action: 'bind-devin', label: 'Bind Devin Cloud Session…' });
+      }
+      items.push({ action: 'copy-cwd', label: 'Copy cwd' });
+      items.push({ action: 'close', label: 'Close', danger: true });
+      return items;
+    }
     case 'preview':
     case 'editor-file':
       return [
@@ -1021,8 +1057,54 @@ tabContextMenu.addEventListener('click', (e) => {
     }
   } else if (action === 'rename') {
     if (t.kind === 'terminal') renameTerminalTab(t.tabId);
+  } else if (action === 'bind-devin') {
+    void bindDevinSession(t.tabId);
+  } else if (action === 'unbind-devin') {
+    void unbindDevinSession(t.tabId);
   }
 });
+
+function isDevinCommand(command) {
+  const executable = String(command || '').split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
+  return executable === 'devin';
+}
+
+async function bindDevinSession(tabId) {
+  const terminal = tabs.get(tabId);
+  if (!terminal) return;
+  const current = getTerminalAgentBinding(tabId);
+  const sessionId = await showPrompt(
+    'Connect Devin Notifications',
+    'Devin Cloud session ID (devin-...) or session URL:',
+    current?.sessionId || '',
+  );
+  if (!sessionId) return;
+  const result = await window.api.devinBind(terminal.ptyId, sessionId);
+  if (!result?.ok) {
+    showToast({
+      key: `devin-bind-${tabId}`,
+      message: 'Could not bind Devin session',
+      detail: result?.error || 'Unknown error',
+      type: 'error',
+      persistent: true,
+    });
+    return;
+  }
+  dispatch('agent_session_bound', { tabId, ...result.binding });
+  showToast({
+    key: `devin-bound-${tabId}`,
+    message: 'Devin Cloud session connected',
+    detail: result.binding.sessionId,
+  });
+}
+
+async function unbindDevinSession(tabId) {
+  const terminal = tabs.get(tabId);
+  if (!terminal) return;
+  await window.api.devinUnbind(terminal.ptyId);
+  dispatch('agent_session_unbound', { tabId });
+  showToast({ key: `devin-unbound-${tabId}`, message: 'Devin Cloud session disconnected' });
+}
 
 document.addEventListener('click', () => hideTabContextMenu());
 document.addEventListener('click', () => previewContextMenu.classList.add('hidden'));
@@ -2591,6 +2673,7 @@ function sendToTerminal(text, tabId) {
     t.terminal.paste(contentToSend);
     window.api.ptyWrite(t.ptyId, '\r');
   }
+  clearTerminalWaitingForUserInput(activeTabId);
 
   if (f?.isScratch && !hasExplicitText) {
     lastSentContent = f.content;
@@ -2745,14 +2828,6 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
 
   terminal.onData((data) => {
     window.api.ptyWrite(ptyId, data);
-    for (const [tid, td] of tabs) {
-      if (td.ptyId === ptyId && td.waiting) {
-        td.waiting = false;
-        updateTabStatus(tid);
-        updateProjectStatus(td.projectId);
-        break;
-      }
-    }
   });
 
   const tabId = ++tabCounter;
@@ -2767,6 +2842,7 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
       onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'terminal', tabId }),
     },
   });
+  tabEl.dataset.ptyId = String(ptyId);
 
   tabEl.draggable = true;
   tabEl.addEventListener('dragstart', (e) => {
@@ -2802,16 +2878,89 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
 
   tabBar.insertBefore(tabEl, newTabBtn);
 
-  tabs.set(tabId, { id: tabId, projectId, terminal, fitAddon, ptyId, termEl, tabElement: tabEl, command, label, cwd, waiting: false, pinnedToBottom: true });
+  tabs.set(tabId, {
+    id: tabId,
+    projectId,
+    terminal,
+    fitAddon,
+    ptyId,
+    termEl,
+    tabElement: tabEl,
+    command,
+    label,
+    cwd,
+    pinnedToBottom: true,
+    outputFollowRevision: 0,
+    userScrollActive: false,
+  });
 
-  // A2: Use xterm's buffer-level event; DOM scroll events on the viewport do
-  // not bubble to termEl.
+  // xterm onData also carries terminal-generated protocol replies such as
+  // focus-in (ESC [ I). Treat only actual keyboard, paste, and composition
+  // events as user input so opening a focused TUI tab cannot clear waiting.
+  terminal.onKey(({ key, domEvent }) => {
+    const isCopyShortcut = domEvent.ctrlKey && domEvent.shiftKey
+      && (domEvent.key === 'C' || domEvent.key === 'c');
+    if (key && !isCopyShortcut) clearTerminalWaitingForUserInput(tabId);
+  });
+  termEl.addEventListener('paste', () => clearTerminalWaitingForUserInput(tabId), true);
+  termEl.addEventListener('compositionend', (event) => {
+    if (event.data) clearTerminalWaitingForUserInput(tabId);
+  }, true);
+
+  // Devin 3000.4.16 emits the same semantic terminal notification as OSC 9
+  // and OSC 777. Register both and deduplicate them in the adapter.
+  registerDevinTerminalNotifications(terminal, command, (notification) => {
+    dispatch('agent_notification_received', {
+      tabId,
+      projectId,
+      ...notification,
+    });
+  });
+
+  function finishUserScroll() {
+    requestAnimationFrame(() => {
+      const current = tabs.get(tabId);
+      if (!current) return;
+      updateTerminalScrollPosition(current, terminal.buffer.active);
+      current.userScrollActive = false;
+    });
+  }
+
+  // xterm's scroll event also fires for content-driven movement. Only use it
+  // while a wheel or scrollbar interaction proves that the user is scrolling.
   terminal.onScroll(() => {
     const current = tabs.get(tabId);
-    if (current) {
-      current.pinnedToBottom = isTerminalPinnedToBottom(terminal.buffer.active);
-    }
+    if (current) updateTerminalScrollPosition(current, terminal.buffer.active);
   });
+
+  // Invalidate already queued write callbacks before xterm processes a user
+  // scroll. Without this, an older callback can pull the viewport back down.
+  termEl.addEventListener('wheel', (event) => {
+    const current = tabs.get(tabId);
+    if (!current) return;
+    invalidateTerminalFollow(current);
+    current.userScrollActive = true;
+    if (event.deltaY < 0) current.pinnedToBottom = false;
+    finishUserScroll();
+  }, { capture: true, passive: true });
+
+  termEl.addEventListener('pointerdown', (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest('.xterm-viewport')) return;
+    const current = tabs.get(tabId);
+    if (!current) return;
+    invalidateTerminalFollow(current);
+    current.userScrollActive = true;
+    current.pinnedToBottom = false;
+
+    const finishPointerScroll = (pointerEvent) => {
+      if (pointerEvent.pointerId !== event.pointerId) return;
+      window.removeEventListener('pointerup', finishPointerScroll, true);
+      window.removeEventListener('pointercancel', finishPointerScroll, true);
+      finishUserScroll();
+    };
+    window.addEventListener('pointerup', finishPointerScroll, true);
+    window.addEventListener('pointercancel', finishPointerScroll, true);
+  }, true);
 
   // Only switch to new tab if it belongs to the active project
   if (projectId === activeProjectId) {
@@ -2880,6 +3029,11 @@ function switchTab(tabId, { focus = true } = {}) {
   }
   projectActiveTab.set(t.projectId, tabId);
   setState({ activeTerminalTabId: tabId });
+  // Completion notices become read when opened. Input-waiting notices are
+  // intentionally not "seen" because they remain actionable until input.
+  if (!getTabAttention(tabId)?.waiting) {
+    dispatch('agent_notification_seen', { tabId });
+  }
   updateSendTarget();
 
   // Wait until display/layout changes have settled before measuring.
@@ -2918,17 +3072,14 @@ function closeTerminal(tabId) {
   if (!t) return;
 
   const projectId = t.projectId;
+  void window.api.devinUnbind(t.ptyId);
   window.api.ptyKill(t.ptyId);
   t.terminal.dispose();
   t.termEl.remove();
   t.tabElement.remove();
+  dispatch('agent_session_unbound', { tabId });
   tabs.delete(tabId);
-  // R2: remove waiting state from the store so it does not persist after
-  // the tab is gone.
-  const waitingTabs = { ...getState().waitingTabs };
-  delete waitingTabs[tabId];
-  setState({ waitingTabs });
-  updateProjectStatus(projectId);
+  dispatch('terminal_clear_attention', { tabId });
 
   if (activeTabId === tabId) {
     // Find next tab in the same project
@@ -2953,31 +3104,43 @@ function closeTerminal(tabId) {
 function updateTabStatus(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
-  // R2: sync waiting state to the store so it survives re-renders.
-  const waitingTabs = { ...getState().waitingTabs };
-  const prev = waitingTabs[tabId];
-  if (!prev || prev.waiting !== t.waiting || prev.projectId !== t.projectId) {
-    waitingTabs[tabId] = { projectId: t.projectId, waiting: t.waiting };
-    setState({ waitingTabs });
-  }
+  const attention = getTabAttention(tabId);
   const statusEl = t.tabElement.querySelector('.tab-status');
   if (statusEl) {
-    statusEl.className = 'tab-status ' + (t.waiting ? 'waiting' : 'idle');
+    const status = attention?.kind === 'turn_failed'
+      ? 'failed'
+      : attention?.waiting
+        ? 'waiting'
+        : attention?.unread
+          ? 'notified'
+          : 'idle';
+    statusEl.className = `tab-status ${status}`;
+    statusEl.title = attention?.waiting
+      ? attention.reason === 'approval' ? 'Agent is waiting for approval' : 'Agent is waiting for input'
+      : attention?.kind === 'turn_failed'
+        ? 'Agent failed'
+      : attention?.unread
+        ? 'Agent finished'
+        : '';
   }
 }
 
 function updateProjectStatus(projectId) {
   if (!projectId) return;
-  // R2: derive waiting summary from the store (authoritative) instead of
-  // scanning the tabs Map directly. The store is updated by updateTabStatus.
-  const waiting = getWaitingSummary();
-  const anyWaiting = (waiting[projectId] || 0) > 0;
+  const summary = getTerminalAttentionSummary()[projectId] || { waiting: 0, unread: 0, failed: 0 };
   const items = projectList.querySelectorAll('.project-item');
   for (const item of items) {
     if (item.dataset.projectId === projectId) {
       const statusEl = item.querySelector('.project-status');
       if (statusEl) {
-        statusEl.className = 'project-status ' + (anyWaiting ? 'waiting' : 'idle');
+        statusEl.className = 'project-status ' + (summary.failed > 0 ? 'failed' : summary.waiting > 0 ? 'waiting' : summary.unread > 0 ? 'notified' : 'idle');
+        statusEl.title = summary.failed > 0
+          ? `${summary.failed} failed agent notification${summary.failed === 1 ? '' : 's'}`
+          : summary.waiting > 0
+          ? `${summary.waiting} agent${summary.waiting === 1 ? '' : 's'} waiting for input`
+          : summary.unread > 0
+            ? `${summary.unread} completed agent notification${summary.unread === 1 ? '' : 's'}`
+            : '';
       }
       return;
     }
@@ -3362,6 +3525,7 @@ terminalContainer.addEventListener('drop', (e) => {
     if (t) {
       const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, t.command));
       t.terminal.paste(quotedPaths.join(' '));
+      clearTerminalWaitingForUserInput(activeTabId);
       // Focus the terminal only when it is already the visible surface,
       // so dropping on a hidden terminal does not yank the user's view.
       if (mainSurface.dataset.surface === 'terminal') t.terminal.focus();
@@ -3643,6 +3807,192 @@ register('project_set_badge', ({ projectId, kind }) => {
   }
   setState({ projectBadges: badges });
   renderProjectBadge(projectId);
+});
+
+// ============================================================
+// OS notification (Windows toast / macOS Notification Center)
+// ============================================================
+//
+// Shown for needs_attention (input-waiting) and turn_failed events.
+// turn_completed is excluded to avoid noise. Clicking the notification
+// focuses the PM window and switches to the relevant terminal tab.
+
+const visibleOsNotifications = new Map();
+
+function closeOsNotification(tabId) {
+  const notification = visibleOsNotifications.get(tabId);
+  if (!notification) return;
+  visibleOsNotifications.delete(tabId);
+  notification.close();
+}
+
+function showOsNotification({ tabId, projectId, kind, source, reason, title: detailTitle, message, eventType }) {
+  if (typeof Notification !== 'function') return;
+
+  const project = projects.get(projectId);
+  const projectName = project?.name || 'Unknown project';
+  const agentLabel = source ? source.charAt(0).toUpperCase() + source.slice(1) : 'Agent';
+  let title, fallbackBody;
+  if (kind === 'needs_attention') {
+    title = `${agentLabel} needs input`;
+    fallbackBody = reason === 'approval' ? 'Approval required' : 'Waiting for input';
+  } else {
+    title = `${agentLabel} failed`;
+    fallbackBody = eventType || 'An error occurred';
+  }
+  title += ` — ${projectName}`;
+  const bodyParts = [detailTitle, message]
+    .filter((part, index, parts) => part && parts.indexOf(part) === index);
+  const body = bodyParts.join(' — ') || fallbackBody;
+
+  closeOsNotification(tabId);
+  let notification;
+  try {
+    notification = new Notification(title, {
+      body,
+      silent: false,
+      requireInteraction: kind === 'needs_attention',
+      tag: `agent-attention-${tabId}`,
+    });
+  } catch (error) {
+    console.warn('[notifications] Failed to show OS notification:', error);
+    return;
+  }
+  visibleOsNotifications.set(tabId, notification);
+  notification.onclose = () => {
+    if (visibleOsNotifications.get(tabId) === notification) {
+      visibleOsNotifications.delete(tabId);
+    }
+  };
+  notification.onerror = (error) => {
+    if (visibleOsNotifications.get(tabId) === notification) {
+      visibleOsNotifications.delete(tabId);
+    }
+    console.warn('[notifications] OS notification error:', error);
+  };
+  notification.onclick = () => {
+    window.api.focusWindow();
+    if (projectId !== activeProjectId) {
+      dispatch('select_project', { projectId });
+    }
+    // Wait for project switch to settle before switching tab.
+    requestAnimationFrame(() => {
+      const tab = tabs.get(tabId);
+      if (tab && tab.projectId === projectId) {
+        switchTab(tabId);
+      }
+    });
+  };
+}
+
+window.api.onDevinMonitorError(({ ptyId, sessionId, message }) => {
+  const tab = Array.from(tabs.values()).find((candidate) => candidate.ptyId === ptyId);
+  if (!tab) return;
+  showToast({
+    key: `devin-monitor-${sessionId}`,
+    message: 'Devin session monitoring paused',
+    detail: message,
+    type: 'warn',
+    persistent: true,
+  });
+});
+
+register('agent_notification_received', ({ tabId, projectId, kind, eventType, source, reason, title, message, sessionId }) => {
+  if (!tabs.has(tabId)) return;
+  const unread = activeMainView !== 'terminal' || activeTabId !== tabId || activeProjectId !== projectId;
+  const wasWaiting = Boolean(getTabAttention(tabId)?.waiting);
+  const terminalAttention = receiveAgentNotification(getState().terminalAttention, {
+    tabId,
+    projectId,
+    kind,
+    eventType,
+    source,
+    reason,
+    title,
+    message,
+    sessionId,
+    unread,
+  });
+  setState({ terminalAttention });
+  if (wasWaiting && !terminalAttention[tabId]?.waiting) closeOsNotification(tabId);
+  updateTabStatus(tabId);
+  updateProjectStatus(projectId);
+  if (source === 'devin' && sessionId) {
+    const current = getTerminalAgentBinding(tabId);
+    if (current?.sessionId === sessionId) {
+      dispatch('agent_session_bound', { tabId, ...current, status: eventType });
+    }
+  }
+  if (kind === 'turn_failed') {
+    showToast({
+      key: `agent-failed-${source}-${sessionId || tabId}`,
+      message: `${source} agent failed`,
+      detail: eventType,
+      type: 'error',
+      persistent: true,
+    });
+  }
+  // OS notification for input-waiting and failure events.
+  // Completion (turn_completed) is intentionally excluded to avoid noise.
+  if (kind === 'needs_attention' || kind === 'turn_failed') {
+    showOsNotification({ tabId, projectId, kind, source, reason, title, message, eventType });
+  }
+});
+
+register('agent_notification_seen', ({ tabId }) => {
+  const tab = tabs.get(tabId);
+  const terminalAttention = markAgentNotificationSeen(getState().terminalAttention, tabId);
+  if (terminalAttention !== getState().terminalAttention) setState({ terminalAttention });
+  updateTabStatus(tabId);
+  if (tab) updateProjectStatus(tab.projectId);
+});
+
+register('terminal_set_waiting', ({ tabId, projectId, waiting, cause }) => {
+  const wasWaiting = Boolean(getTabAttention(tabId)?.waiting);
+  const terminalAttention = setTerminalWaiting(getState().terminalAttention, { tabId, projectId, waiting, cause });
+  setState({ terminalAttention });
+  const isWaiting = Boolean(terminalAttention[tabId]?.waiting);
+  if (wasWaiting && !isWaiting) closeOsNotification(tabId);
+  if (!wasWaiting && isWaiting) {
+    const tab = tabs.get(tabId);
+    showOsNotification({
+      tabId,
+      projectId,
+      kind: 'needs_attention',
+      source: tab?.command || 'terminal',
+      reason: 'input',
+      eventType: 'terminal_waiting',
+    });
+  }
+  updateTabStatus(tabId);
+  updateProjectStatus(projectId);
+});
+
+register('terminal_clear_attention', ({ tabId }) => {
+  const tab = tabs.get(tabId);
+  const projectId = tab?.projectId || getTabAttention(tabId)?.projectId;
+  const terminalAttention = clearTerminalAttention(getState().terminalAttention, tabId);
+  if (terminalAttention !== getState().terminalAttention) setState({ terminalAttention });
+  closeOsNotification(tabId);
+  if (projectId) updateProjectStatus(projectId);
+});
+
+register('agent_session_bound', ({ tabId, provider, sessionId, status }) => {
+  if (!tabs.has(tabId)) return;
+  const terminalAgentBindings = {
+    ...getState().terminalAgentBindings,
+    [tabId]: { provider, sessionId, status: status || null },
+  };
+  setState({ terminalAgentBindings });
+  tabs.get(tabId).tabElement.title = `${provider}: ${sessionId}${status ? ` (${status})` : ''}`;
+});
+
+register('agent_session_unbound', ({ tabId }) => {
+  const terminalAgentBindings = { ...getState().terminalAgentBindings };
+  delete terminalAgentBindings[tabId];
+  setState({ terminalAgentBindings });
+  const terminal = tabs.get(tabId);
+  if (terminal) terminal.tabElement.removeAttribute('title');
 });
 
 function renderProjectBadge(projectId) {

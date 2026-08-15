@@ -53,10 +53,16 @@ contextBridge.exposeInMainWorld('api', {
   // Hook-based waiting indicator
   onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),
   hookSetup: (projectPath) => ipcRenderer.invoke('hook:setup', { projectPath }),
+  devinBind: (ptyId, sessionId) => ipcRenderer.invoke('devin:bind', { ptyId, sessionId }),
+  devinUnbind: (ptyId) => ipcRenderer.invoke('devin:unbind', { ptyId }),
+  onDevinMonitorError: (callback) => ipcRenderer.on('devin:monitor-error', (_event, data) => callback(data)),
 
   // Command availability check
   commandCheck: (commands) => ipcRenderer.invoke('command:check', { commands }),
 
   // A3: Drag & drop file path resolution (Electron 31+ replacement for File.path)
   getPathForFile: (file) => webUtils.getPathForFile(file),
+
+  // Window focus (for OS notification click)
+  focusWindow: () => ipcRenderer.invoke('window:focus'),
 });

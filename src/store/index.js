@@ -2,9 +2,11 @@
 // Focus state store: the single source of truth for "what the human is
 // looking at right now" and agent attention state (badges, waiting).
 //
-// R2 scope: badge and waiting state are centralized here so that project
+// R2 scope: badge and terminal attention state are centralized here so that project
 // list re-renders no longer drop them. Runtime handles (DOM, Terminal,
 // FitAddon, Promise) stay in renderer-side registries, not here.
+
+import { summarizeTerminalAttention } from '../notifications/state.mjs';
 
 const subscribers = new Set();
 
@@ -27,8 +29,11 @@ const state = {
   // R2: agent attention state — previously DOM-only, now authoritative here.
   // projectBadges: { [projectId]: string } — badge kind, or null/undefined for none.
   projectBadges: {},
-  // waitingTabs: { [tabId]: { projectId: string, waiting: boolean } }
-  waitingTabs: {},
+  // terminalAttention: { [tabId]: { projectId, waiting, unread, kind, eventType, source, reason, title, message, sessionId } }
+  terminalAttention: {},
+  // Explicit external-session identity. API credentials never enter this store.
+  // terminalAgentBindings: { [tabId]: { provider, sessionId, status } }
+  terminalAgentBindings: {},
 };
 
 export function getState() {
@@ -69,18 +74,16 @@ export function getProjectBadge(projectId) {
   return state.projectBadges[projectId] || null;
 }
 
-export function getWaitingSummary() {
-  const summary = {};
-  for (const info of Object.values(state.waitingTabs)) {
-    if (info && info.waiting) {
-      summary[info.projectId] = (summary[info.projectId] || 0) + 1;
-    }
-  }
-  return summary;
+export function getTabAttention(tabId) {
+  return state.terminalAttention[tabId] || null;
 }
 
-export function isTabWaiting(tabId) {
-  return Boolean(state.waitingTabs[tabId]?.waiting);
+export function getTerminalAttentionSummary() {
+  return summarizeTerminalAttention(state.terminalAttention);
+}
+
+export function getTerminalAgentBinding(tabId) {
+  return state.terminalAgentBindings[tabId] || null;
 }
 
 // Build the get_focus response from current state + project lookup
