@@ -160,6 +160,117 @@ textarea:focus-visible,
   text-transform: uppercase;
 }
 
+#tree-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  border-bottom: 1px solid var(--g-2);
+  background: var(--g-1);
+  flex: 0 0 auto;
+}
+
+#tree-filter-bar.hidden {
+  display: none;
+}
+
+#tree-filter-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+#tree-filter-input {
+  width: 100%;
+  padding: 4px var(--s-2) 4px var(--s-2);
+  padding-right: 24px;
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  outline: none;
+}
+
+#tree-filter-input:focus {
+  border-color: var(--g-4);
+}
+
+#tree-filter-input::placeholder {
+  color: var(--g-3);
+}
+
+#tree-filter-clear-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--g-3);
+  cursor: pointer;
+  border-radius: var(--r-1);
+  padding: 0;
+}
+
+#tree-filter-clear-btn:hover {
+  color: var(--g-5);
+  background: var(--g-2);
+}
+
+#tree-filter-clear-btn svg {
+  width: 10px;
+  height: 10px;
+}
+
+#tree-filter-clear-btn.hidden {
+  display: none;
+}
+
+#tree-filter-close-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--g-3);
+  cursor: pointer;
+  border-radius: var(--r-1);
+}
+
+#tree-filter-close-btn:hover {
+  color: var(--g-5);
+  background: var(--g-2);
+}
+
+#tree-filter-close-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.tree-filter-empty {
+  padding: var(--s-3) var(--s-2);
+  color: var(--g-3);
+  font-size: var(--t-xs);
+  text-align: center;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
 #file-tree-title,
 .project-name,
 .tree-name,
@@ -262,6 +373,7 @@ textarea:focus-visible,
 .tree-icon svg,
 .tab-icon svg,
 #file-tree-header button svg,
+#tree-filter-bar button svg,
 #scratch-title svg,
 #scratch-collapse-btn svg {
   width: 14px;
@@ -554,6 +666,117 @@ textarea:focus-visible,
   visibility: hidden;
   opacity: 0;
   pointer-events: none;
+}
+
+/* Phase 5 S2: Search tab */
+#search-content {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--g-1);
+}
+
+#search-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--g-2);
+  flex: 0 0 auto;
+}
+
+#search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px var(--s-2);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  outline: none;
+}
+
+#search-input:focus {
+  border-color: var(--g-4);
+}
+
+#search-case-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--t-xs);
+  color: var(--g-4);
+}
+
+#search-case-toggle input {
+  margin: 0;
+}
+
+#search-status {
+  flex: 0 0 auto;
+  color: var(--g-3);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+
+#search-results {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: var(--s-1) 0;
+}
+
+.search-result-file {
+  padding: var(--s-1) var(--s-3);
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  background: var(--g-1);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--g-2);
+}
+
+.search-result-item {
+  display: flex;
+  gap: var(--s-2);
+  padding: 2px var(--s-3);
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: var(--t-xs);
+  color: var(--g-5);
+  transition: background var(--move);
+}
+
+.search-result-item:hover {
+  background: var(--g-2);
+}
+
+.search-result-line {
+  flex: 0 0 auto;
+  color: var(--g-3);
+  min-width: 3em;
+  text-align: right;
+}
+
+.search-result-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono, monospace);
+}
+
+.search-result-empty {
+  padding: var(--s-4) var(--s-3);
+  color: var(--g-3);
+  font-size: var(--t-sm);
+  text-align: center;
 }
 
 #terminal-container,

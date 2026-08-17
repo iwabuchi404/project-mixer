@@ -4,10 +4,12 @@
 
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import sharedScrollbarCss from './scrollbars.css';
 import { register, dispatch } from './src/commands/registry.js';
+import { BINDINGS, validateBindings, matchBinding, keyToString, evaluateWhen } from './src/keybindings/registry.js';
 import { getState, setState, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
 import { clearTerminalAttention, markAgentNotificationSeen, receiveAgentNotification, setTerminalWaiting } from './src/notifications/state.mjs';
 import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
@@ -110,6 +112,11 @@ const projectConfirmBtn = document.getElementById('project-confirm-btn');
 const fileTree = document.getElementById('file-tree');
 const fileTreeHeader = document.getElementById('file-tree-header');
 const fileTreeTitle = document.getElementById('file-tree-title');
+const treeFilterInput = document.getElementById('tree-filter-input');
+const treeFilterBar = document.getElementById('tree-filter-bar');
+const treeSearchBtn = document.getElementById('tree-search-btn');
+const treeFilterCloseBtn = document.getElementById('tree-filter-close-btn');
+const treeFilterClearBtn = document.getElementById('tree-filter-clear-btn');
 const navigationPane = document.getElementById('navigation-pane');
 const tabBar = document.getElementById('main-tab-bar');
 const mainSurface = document.getElementById('main-surface');
@@ -122,6 +129,11 @@ const fileEditorPane = document.getElementById('file-editor-pane');
 const fileEditorTextarea = document.getElementById('file-editor-textarea');
 const previewWebview = document.getElementById('preview-webview');
 const previewPane = document.getElementById('preview-pane');
+const searchPane = document.getElementById('search-pane');
+const searchInput = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+const searchStatus = document.getElementById('search-status');
+const searchCaseCheckbox = document.getElementById('search-case-checkbox');
 const previewTabBar = tabBar;
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
@@ -175,6 +187,7 @@ const TAB_ICONS = {
   preview: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 8s2.2-4 6.2-4 6.2 4 6.2 4-2.2 4-6.2 4-6.2-4-6.2-4Z"/><circle cx="8" cy="8" r="1.8"/></svg>',
   browser: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2.5 8h11M8 2c1.7 1.6 2.6 3.6 2.6 6S9.7 12.4 8 14M8 2C6.3 3.6 5.4 5.6 5.4 8s.9 4.4 2.6 6"/></svg>',
   scratch: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10M4 10l6.8-6.8 2 2L6 12H4z"/></svg>',
+  search: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>',
 };
 
 const TREE_ICONS = {
@@ -214,6 +227,7 @@ function createMainTab({ kind, ident, label, closeSelector, actions, extraInner 
     browser: 'preview-tab main-tab browser-tab',
     file: 'editor-tab main-tab',
     terminal: 'tab main-tab',
+    search: 'search-tab main-tab',
   };
   tabEl.className = classByKind[kind] || 'main-tab';
   tabEl.setAttribute('role', 'tab');
@@ -269,6 +283,7 @@ function showMainSurface(kind) {
   terminalPane.classList.toggle('hidden', kind !== 'terminal');
   fileEditorPane.classList.toggle('hidden', kind !== 'file');
   previewPane.classList.toggle('hidden', kind !== 'preview');
+  searchPane.classList.toggle('hidden', kind !== 'search');
   mainSurface.dataset.surface = kind;
   requestAnimationFrame(handleResize);
 }
@@ -592,6 +607,8 @@ async function selectProject(projectId) {
     fileTreeTitle.textContent = p.name;
     // プロジェクトを跨ぐと展開状態は無意味になるので捨てる
     await loadFileTree(p.path, { preserveState: false });
+    // Phase 5 S1: build tree index for filtering (async, non-blocking).
+    buildTreeIndex(p.path);
     window.api.hookSetup(p.path);
   }
   showProjectTabs(projectId);
@@ -688,6 +705,16 @@ projectPathInput.addEventListener('keydown', (e) => {
 // 作り直されるため、DOM 側に状態を持たせると毎回失われる。
 const expandedTreePaths = new Set();
 
+// Phase 5 S1: Tree filter state.
+// treeIndex holds the flat recursive file listing from fs:indexTree.
+// treeFilterActive tracks whether the filter is currently applied.
+// savedExpansionState preserves the pre-filter expansion state for restoration.
+let treeIndex = null; // { files, count, durationMs, truncated }
+let treeFilterActive = false;
+let savedExpansionState = null; // Set of expanded paths before filter
+let filterTimeout = null;
+let filterVisiblePaths = null; // Set of paths visible in current filter
+
 async function loadFileTree(dirPath, { preserveState = true } = {}) {
   const previousScroll = fileTree.scrollTop;
   const previousSelection = preserveState ? focusedTreeEntry?.path || null : null;
@@ -737,6 +764,221 @@ function cssEscape(value) {
   return window.CSS?.escape ? window.CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
 }
 
+// ============================================================
+// Phase 5 S1: Tree filter
+// ============================================================
+
+// Build (or rebuild) the tree index for the current project.
+// Called on project selection, tree reload, and file/folder create/delete.
+async function buildTreeIndex(dirPath) {
+  if (!dirPath) return;
+  try {
+    treeIndex = await window.api.indexTree(dirPath);
+  } catch (e) {
+    console.error('[tree-filter] indexTree failed:', e);
+    treeIndex = null;
+  }
+}
+
+// Apply a filter query to the file tree.
+// Matches file names with partial (substring) matching.
+// Folders that contain matching descendants are shown expanded.
+function applyTreeFilter(query) {
+  if (!query || !query.trim() || !treeIndex) {
+    clearTreeFilter();
+    return;
+  }
+  const lower = query.toLowerCase().trim();
+
+  // Find matching files (substring match on name, not path).
+  const matchingFiles = treeIndex.files.filter(
+    (f) => !f.isDirectory && f.name.toLowerCase().includes(lower),
+  );
+
+  if (matchingFiles.length === 0) {
+    // Show empty tree with a "no results" message.
+    if (!treeFilterActive) {
+      savedExpansionState = new Set(expandedTreePaths);
+      treeFilterActive = true;
+    }
+    expandedTreePaths.clear();
+    fileTree.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'tree-filter-empty';
+    empty.textContent = 'No matching files';
+    fileTree.appendChild(empty);
+    return;
+  }
+
+  // Collect all paths that need to be visible:
+  // matching files + all their ancestor directories.
+  const visiblePaths = new Set();
+  for (const m of matchingFiles) {
+    visiblePaths.add(m.path);
+    let p = m.parentPath;
+    while (p) {
+      visiblePaths.add(p);
+      const parent = treeIndex.files.find((f) => f.path === p);
+      p = parent?.parentPath || null;
+    }
+  }
+  filterVisiblePaths = visiblePaths;
+
+  // Save expansion state on first filter activation.
+  if (!treeFilterActive) {
+    savedExpansionState = new Set(expandedTreePaths);
+    treeFilterActive = true;
+  }
+
+  // Render filtered tree: all visible paths are shown expanded.
+  expandedTreePaths.clear();
+  for (const p of visiblePaths) expandedTreePaths.add(p);
+
+  fileTree.innerHTML = '';
+  fileTree.setAttribute('role', 'tree');
+  fileTree.setAttribute('aria-label', 'Project files (filtered)');
+
+  // Build a parent->children map from the index for efficient rendering.
+  const childrenMap = new Map(); // parentPath -> [entries]
+  for (const f of treeIndex.files) {
+    if (!visiblePaths.has(f.path)) continue;
+    const parent = f.parentPath || null;
+    if (!childrenMap.has(parent)) childrenMap.set(parent, []);
+    childrenMap.get(parent).push(f);
+  }
+
+  // Render top-level entries (parentPath === null).
+  renderFilteredChildren(null, 0, childrenMap, visiblePaths);
+}
+
+function renderFilteredChildren(parentPath, depth, childrenMap, visiblePaths) {
+  const children = childrenMap.get(parentPath) || [];
+  for (const entry of children) {
+    const item = createTreeItem(entry, depth);
+    fileTree.appendChild(item);
+    if (entry.isDirectory) {
+      // Mark as expanded and render children inline.
+      item.dataset.expanded = 'true';
+      item.setAttribute('aria-expanded', 'true');
+      const childContainer = document.createElement('div');
+      childContainer.className = 'tree-children';
+      const childEntries = childrenMap.get(entry.path) || [];
+      for (const child of childEntries) {
+        const childItem = createTreeItem(child, depth + 1);
+        childContainer.appendChild(childItem);
+        if (child.isDirectory) {
+          // Recursively render nested children.
+          childItem.dataset.expanded = 'true';
+          childItem.setAttribute('aria-expanded', 'true');
+          const nested = document.createElement('div');
+          nested.className = 'tree-children';
+          const nestedEntries = childrenMap.get(child.path) || [];
+          for (const nc of nestedEntries) {
+            const ncItem = createTreeItem(nc, depth + 2);
+            nested.appendChild(ncItem);
+          }
+          childContainer.appendChild(nested);
+        }
+      }
+      fileTree.appendChild(childContainer);
+    }
+  }
+}
+
+// Clear the filter and restore the normal lazy-loading tree.
+function clearTreeFilter() {
+  if (!treeFilterActive) return;
+  treeFilterActive = false;
+  filterVisiblePaths = null;
+  expandedTreePaths.clear();
+  if (savedExpansionState) {
+    for (const p of savedExpansionState) expandedTreePaths.add(p);
+    savedExpansionState = null;
+  }
+  // Reload the tree with restored expansion state.
+  const project = projects.get(activeProjectId);
+  if (project) loadFileTree(project.path);
+}
+
+// Return the set of paths visible in the current filter.
+// Used by expandEntry to show only filtered children when opening folders.
+function getVisiblePathsForFilter() {
+  return filterVisiblePaths || new Set();
+}
+
+// Toggle the filter bar visibility.
+function toggleTreeFilter() {
+  if (treeFilterBar.classList.contains('hidden')) {
+    treeFilterBar.classList.remove('hidden');
+    treeFilterInput.focus();
+    treeFilterInput.select();
+  } else {
+    closeTreeFilter();
+  }
+}
+
+// Close the filter bar and clear the filter.
+function closeTreeFilter() {
+  treeFilterBar.classList.add('hidden');
+  treeFilterInput.value = '';
+  treeFilterClearBtn.classList.add('hidden');
+  clearTreeFilter();
+}
+
+// Clear the filter input but keep the bar open.
+function clearFilterInput() {
+  treeFilterInput.value = '';
+  treeFilterClearBtn.classList.add('hidden');
+  clearTreeFilter();
+  treeFilterInput.focus();
+}
+
+// Debounced filter input handler.
+if (treeFilterInput) {
+  treeFilterInput.addEventListener('input', () => {
+    // Show/hide clear button based on input content.
+    if (treeFilterInput.value) {
+      treeFilterClearBtn.classList.remove('hidden');
+    } else {
+      treeFilterClearBtn.classList.add('hidden');
+    }
+    clearTimeout(filterTimeout);
+    filterTimeout = setTimeout(() => {
+      applyTreeFilter(treeFilterInput.value);
+    }, 80);
+  });
+  // Escape in the filter input clears it.
+  treeFilterInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTreeFilter();
+      fileTree.focus();
+    }
+  });
+}
+
+// Search button toggles the filter bar.
+if (treeSearchBtn) {
+  treeSearchBtn.addEventListener('click', () => {
+    toggleTreeFilter();
+  });
+}
+
+// Close button in the filter bar.
+if (treeFilterCloseBtn) {
+  treeFilterCloseBtn.addEventListener('click', () => {
+    closeTreeFilter();
+  });
+}
+
+// Clear button inside the input.
+if (treeFilterClearBtn) {
+  treeFilterClearBtn.addEventListener('click', () => {
+    clearFilterInput();
+  });
+}
+
 let focusedTreeEntry = null;
 
 function selectTreeEntry(el, entry, { focus = true } = {}) {
@@ -763,7 +1005,10 @@ function getTreeCreateParent(projectPath) {
 
 treeReloadBtn.addEventListener('click', async () => {
   const project = projects.get(activeProjectId);
-  if (project) await loadFileTree(project.path);
+  if (project) {
+    await loadFileTree(project.path);
+    buildTreeIndex(project.path);
+  }
 });
 
 treeNewFileBtn.addEventListener('click', async () => {
@@ -781,6 +1026,7 @@ treeNewFileBtn.addEventListener('click', async () => {
   // 作成先が畳まれていると結果が見えないので開いておく
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
   await loadFileTree(project.path);
+  buildTreeIndex(project.path);
   openFileInEditor(filePath, name.split(/[\\/]/).pop());
 });
 
@@ -798,6 +1044,7 @@ treeNewFolderBtn.addEventListener('click', async () => {
   }
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
   await loadFileTree(project.path);
+  buildTreeIndex(project.path);
 });
 
 function createTreeItem(entry, depth) {
@@ -821,7 +1068,18 @@ function createTreeItem(entry, depth) {
     el.dataset.expanded = 'true';
     el.setAttribute('aria-expanded', 'true');
     expandedTreePaths.add(entry.path);
-    const children = await window.api.readDir(entry.path);
+
+    let children;
+    if (treeFilterActive && treeIndex) {
+      // フィルタ中はインデックスからフィルタ済みの子を取得する。
+      // readDir を使うと未フィルタの全子要素で上書きされてしまう。
+      const visiblePaths = getVisiblePathsForFilter();
+      children = treeIndex.files.filter(
+        (f) => f.parentPath === entry.path && visiblePaths.has(f.path),
+      );
+    } else {
+      children = await window.api.readDir(entry.path);
+    }
     const container = document.createElement('div');
     container.className = 'tree-children';
     container.setAttribute('role', 'group');
@@ -1027,6 +1285,10 @@ function buildTabMenuItems(target) {
         { action: 'copy-path', label: 'Copy URL' },
         { action: 'close', label: 'Close', danger: true },
       ];
+    case 'search':
+      return [
+        { action: 'close', label: 'Close', danger: true },
+      ];
     default:
       return [];
   }
@@ -1042,6 +1304,7 @@ tabContextMenu.addEventListener('click', (e) => {
     if (t.kind === 'terminal') dispatch('close_terminal', { tabId: t.tabId });
     else if (t.kind === 'preview' || t.kind === 'browser') closePreviewTab(t.previewPath);
     else if (t.kind === 'editor-file') closeEditorTab(t.filePath);
+    else if (t.kind === 'search') closeSearchTab();
   } else if (action === 'copy-path') {
     if (t.filePath) {
       window.api.clipboardWriteText(t.filePath);
@@ -1163,7 +1426,10 @@ deleteConfirmBtn.addEventListener('click', async () => {
   }
   // Refresh file tree
   const project = projects.get(activeProjectId);
-  if (project) await loadFileTree(project.path);
+  if (project) {
+    await loadFileTree(project.path);
+    buildTreeIndex(project.path);
+  }
 });
 
 // ============================================================
@@ -2533,23 +2799,7 @@ function insertIndent(input) {
 }
 
 editorTextarea.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key === 's') {
-    e.preventDefault();
-    dispatch('save_active_file');
-  }
-  if (e.ctrlKey && e.key === 'Enter') {
-    e.preventDefault();
-    dispatch('send_to_terminal', {});
-  }
-  if (e.ctrlKey && e.key === 'i') {
-    e.preventDefault();
-    dispatch('switch_tab', { filePath: SCRATCH_PATH });
-    editorTextarea.focus();
-  }
-  if (e.ctrlKey && e.key === 'z' && e.shiftKey) {
-    e.preventDefault();
-    dispatch('undo_last_send');
-  }
+  // Tab indentation is text input behavior, not a keybinding.
   if (e.key === 'Tab') {
     e.preventDefault();
     insertIndent(editorTextarea);
@@ -2557,10 +2807,7 @@ editorTextarea.addEventListener('keydown', (e) => {
 });
 
 fileEditorTextarea.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key === 's') {
-    e.preventDefault();
-    dispatch('save_active_file');
-  }
+  // Tab indentation is text input behavior, not a keybinding.
   if (e.key === 'Tab') {
     e.preventDefault();
     insertIndent(fileEditorTextarea);
@@ -2772,6 +3019,87 @@ document.addEventListener('mouseup', () => {
 // Terminal management
 // ============================================================
 
+// File path patterns for link detection in terminal output.
+// Matches absolute paths (Windows drive letter or POSIX /) and relative
+// paths that contain a dot in the filename (to reduce false positives).
+// Optional :line or :line:col suffix is captured.
+const FILE_PATH_RE = /(?:[A-Za-z]:[\\/][^\s'"<>|*?]+|\/[^\s'"<>|*?]+|[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-][^\s'"<>|*?]*)(?::(\d+))?(?::(\d+))?/g;
+
+// Extensions that are better opened in preview rather than the text editor.
+const PREVIEW_EXTENSIONS = new Set([
+  '.md', '.markdown', '.html', '.htm', '.png', '.jpg', '.jpeg', '.gif',
+  '.webp', '.svg', '.bmp', '.ico',
+]);
+
+function resolveFilePath(candidate, cwd) {
+  // Normalize backslashes to forward slashes for consistent handling.
+  let p = candidate.replace(/\\/g, '/');
+  // Absolute Windows path (D:/...) or POSIX absolute path (/...)
+  if (/^[A-Za-z]:\//.test(p) || p.startsWith('/')) {
+    return candidate;
+  }
+  // Relative path — resolve against the terminal's cwd.
+  if (!cwd) return null;
+  const base = cwd.replace(/\\/g, '/').replace(/\/$/, '');
+  return `${base}/${candidate}`;
+}
+
+function registerFilePathLinkProvider(terminal, { cwd, projectId }) {
+  terminal.registerLinkProvider({
+    provideLinks: (bufferLineNumber, callback) => {
+      const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
+      if (!line) {
+        callback([]);
+        return;
+      }
+      const text = line.translateToString(true);
+      const links = [];
+      FILE_PATH_RE.lastIndex = 0;
+      let match;
+      while ((match = FILE_PATH_RE.exec(text)) !== null) {
+        const [fullMatch, lineNum, colNum] = match;
+        // Filter: require at least one path separator or drive prefix,
+        // and a dot in the last segment (reduces false positives on
+        // plain words like "foo" or "test").
+        const lastSlash = Math.max(fullMatch.lastIndexOf('/'), fullMatch.lastIndexOf('\\'));
+        const lastSegment = fullMatch.slice(lastSlash + 1).replace(/:\d+$/, '').replace(/:\d+$/, '');
+        if (!lastSegment.includes('.')) continue;
+        if (!fullMatch.includes('/') && !fullMatch.includes('\\')) continue;
+
+        const startCol = match.index + 1; // xterm uses 1-based columns
+        const endCol = startCol + fullMatch.length;
+        const resolved = resolveFilePath(fullMatch, cwd);
+        if (!resolved) continue;
+
+        links.push({
+          range: { start: { x: startCol, y: bufferLineNumber }, end: { x: endCol, y: bufferLineNumber } },
+          text: fullMatch,
+          activate: (_event, _text) => {
+            openTerminalLinkFile(resolved, lineNum, colNum, projectId);
+          },
+          hover: () => {},
+          leave: () => {},
+        });
+      }
+      callback(links);
+    },
+  });
+}
+
+function openTerminalLinkFile(filePath, lineNum, colNum, projectId) {
+  const name = filePath.split(/[/\\]/).pop();
+  const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
+  // Switch to the owning project if different from active.
+  if (projectId && projectId !== activeProjectId) {
+    dispatch('select_project', { projectId });
+  }
+  if (PREVIEW_EXTENSIONS.has(ext)) {
+    dispatch('open_preview', { path: filePath, name });
+  } else {
+    dispatch('open_file', { path: filePath, name });
+  }
+}
+
 async function createTerminal(command, cwd, projectId, savedLabel) {
   const terminal = new Terminal({
     fontSize: 13,
@@ -2782,6 +3110,18 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
 
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
+
+  // Web links addon: makes URLs in terminal output clickable.
+  // Custom handler routes localhost URLs to PM's browser tab and
+  // external URLs to the OS default browser.
+  terminal.loadAddon(new WebLinksAddon((event, uri) => {
+    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(uri);
+    if (isLocal) {
+      dispatch('open_browser', { url: uri });
+    } else {
+      window.api.openInOs(uri);
+    }
+  }));
 
   const termEl = document.createElement('div');
   termEl.className = 'terminal-instance';
@@ -2807,11 +3147,18 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
     e.stopPropagation();
     copyTerminalSelection();
   });
-  termEl.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
-      e.preventDefault();
-      copyTerminalSelection();
+
+  // Phase 5 S0: xterm key handling. PM only intercepts Ctrl+Shift+* keys
+  // in the terminal. All other keys (Ctrl+F, Ctrl+R, Ctrl+S, etc.) must
+  // reach the shell. The global document keydown handler dispatches the
+  // command; this handler just prevents xterm from consuming the key.
+  terminal.attachCustomKeyEventHandler((e) => {
+    if (e.ctrlKey && e.shiftKey) {
+      const ctx = new Set(['terminalFocus']);
+      const binding = matchBinding(e, ctx);
+      if (binding) return false; // don't pass to xterm/shell
     }
+    return true; // pass to shell
   });
 
   const cols = terminal.cols;
@@ -2916,6 +3263,11 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
       ...notification,
     });
   });
+
+  // File path link provider: detect file paths (absolute or relative) with
+  // optional line/column numbers in terminal output and make them clickable.
+  // Clicking opens the file in PM's editor or preview.
+  registerFilePathLinkProvider(terminal, { cwd, projectId });
 
   function finishUserScroll() {
     requestAnimationFrame(() => {
@@ -3248,24 +3600,52 @@ menuBackdrop.addEventListener('contextmenu', (e) => {
 // webview 上のクリックが renderer に届かない。webview がフォーカスを
 // 取った瞬間にメニューを閉じる。
 previewWebview.addEventListener('focus', closeOverlayMenus);
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeOverlayMenus();
-});
 window.addEventListener('blur', closeOverlayMenus);
 
 // ============================================================
-// Clipboard paste (Ctrl+V) -> save screenshot -> append path to scratch
+// Phase 5 S0: Global keybinding handler
 // ============================================================
+//
+// All keyboard shortcuts are centralized through the keybinding registry
+// (src/keybindings/registry.js). The registry uses `when` clauses to
+// determine which binding applies based on the current focus context.
+// Individual addEventListener('keydown') handlers for shortcuts have been
+// migrated here. Text input behavior (Tab indentation, Enter in modals)
+// remains in their respective element listeners.
 
-document.addEventListener('keydown', async (e) => {
-  if (e.ctrlKey && e.key === 'v' && activeTabId !== null) {
-    const p = projects.get(activeProjectId);
-    if (!p) return;
-    const filepath = await window.api.clipboardSaveImage(p.path);
-    if (filepath) {
-      dispatch('append_to_scratch', { text: filepath });
-      showToast({ key: 'screenshot-saved', message: 'Screenshot saved', detail: filepath });
-    }
+// Validate the binding table at startup. Throws if conflicts are found.
+validateBindings(BINDINGS);
+
+function getFocusContext() {
+  const ae = document.activeElement;
+  if (ae === editorTextarea) return new Set(['scratchFocus']);
+  if (ae === fileEditorTextarea) return new Set(['editorFocus']);
+  if (ae?.closest('#file-tree') || ae?.closest('#tree-filter-input')) return new Set(['treeFocus']);
+  if (ae === searchInput || ae?.closest('#search-pane')) return new Set(['searchFocus']);
+  if (activeMainView === 'terminal') return new Set(['terminalFocus']);
+  if (activeMainView === 'preview') return new Set(['previewFocus']);
+  if (activeMainView === 'file') return new Set(['editorFocus']);
+  return new Set();
+}
+
+document.addEventListener('keydown', (e) => {
+  // Don't intercept when typing in input fields that aren't part of the
+  // main editing surfaces (project name input, prompt modal, etc).
+  // Those have their own keydown handlers.
+  const ae = document.activeElement;
+  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== fileEditorTextarea) {
+    // Allow global bindings (Ctrl+B, Ctrl+Shift+F) even in inputs.
+    const key = keyToString(e);
+    const isGlobal = BINDINGS.some(b => b.key === key && (b.when === null || b.when === undefined || b.when === ''));
+    if (!isGlobal) return;
+  }
+
+  const ctx = getFocusContext();
+  const binding = matchBinding(e, ctx);
+  if (binding) {
+    e.preventDefault();
+    e.stopPropagation();
+    dispatch(binding.command, binding.args || {});
   }
 });
 
@@ -3416,14 +3796,6 @@ function toggleBothColumns() {
   }
   applyCollapseState();
 }
-
-// Ctrl+B: toggle both columns
-document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key === 'b') {
-    e.preventDefault();
-    toggleBothColumns();
-  }
-});
 
 loadCollapseState();
 
@@ -3760,6 +4132,58 @@ register('undo_last_send', () => {
 // focus_terminal: switch to a terminal tab
 register('focus_terminal', ({ tabId }) => {
   switchTab(tabId);
+});
+
+// ============================================================
+// Phase 5 S0: Keybinding commands
+// ============================================================
+
+register('focus_scratch', () => {
+  dispatch('switch_tab', { filePath: SCRATCH_PATH });
+  editorTextarea.focus();
+});
+
+register('terminal_copy', () => {
+  if (activeTabId === null) return;
+  const t = tabs.get(activeTabId);
+  if (!t) return;
+  const selection = t.terminal.getSelection();
+  if (selection) {
+    window.api.clipboardWriteText(selection);
+    t.terminal.clearSelection();
+  }
+});
+
+register('terminal_paste_image', async () => {
+  if (activeTabId === null) return;
+  const p = projects.get(activeProjectId);
+  if (!p) return;
+  const filepath = await window.api.clipboardSaveImage(p.path);
+  if (filepath) {
+    dispatch('append_to_scratch', { text: filepath });
+    showToast({ key: 'screenshot-saved', message: 'Screenshot saved', detail: filepath });
+  }
+});
+
+register('close_overlay_menus', () => {
+  closeOverlayMenus();
+});
+
+// Phase 5 S1/S2 stubs — implemented in S1/S2 sections.
+register('tree_filter_focus', () => {
+  if (treeFilterBar.classList.contains('hidden')) {
+    treeFilterBar.classList.remove('hidden');
+  }
+  treeFilterInput.focus();
+  treeFilterInput.select();
+});
+
+register('tree_filter_clear', () => {
+  closeTreeFilter();
+});
+
+register('search_text_open', () => {
+  openSearchTab();
 });
 
 register('create_terminal', ({ command, cwd, projectId, label } = {}) => {
@@ -4181,6 +4605,198 @@ register('get_focus', ({ $session: session = null } = {}) => {
   return focus;
 });
 
+// ============================================================
+// Phase 5 S2: Project text search (git grep / rg)
+// ============================================================
+
+let searchTabEl = null;
+let currentSearchId = null;
+let searchResultCount = 0;
+let searchTruncated = false;
+let searchFocusedResult = null; // { file, line } for keyboard navigation
+
+function openSearchTab() {
+  if (!searchTabEl) createSearchTab();
+  activateSearchTab();
+  searchInput.focus();
+  searchInput.select();
+}
+
+function createSearchTab() {
+  searchTabEl = createMainTab({
+    kind: 'search',
+    ident: { key: 'searchTab', value: 'search' },
+    label: 'Search',
+    closeSelector: 'editor-tab-close',
+    actions: {
+      onSwitch: () => activateSearchTab(),
+      onClose: () => closeSearchTab(),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'search' }),
+    },
+  });
+  tabBar.insertBefore(searchTabEl, newTabBtn);
+}
+
+function activateSearchTab() {
+  // Hide other main tabs' selection.
+  tabBar.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === searchTabEl));
+  showMainSurface('search');
+  activeMainView = 'search';
+  // Hide editor/preview tabs when search is active.
+  openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = 'none'; });
+  previewFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = 'none'; });
+}
+
+function closeSearchTab() {
+  if (!searchTabEl) return;
+  searchTabEl.remove();
+  searchTabEl = null;
+  // Switch back to terminal or editor.
+  if (activeTabId !== null) {
+    const t = tabs.get(activeTabId);
+    if (t) {
+      switchTab(activeTabId);
+      return;
+    }
+  }
+  // Fallback: show terminal surface.
+  showMainSurface('terminal');
+  activeMainView = 'terminal';
+}
+
+// Register the search_text command.
+register('search_text', async ({ query, cwd, caseSensitive }) => {
+  const project = projects.get(activeProjectId);
+  const searchCwd = cwd || project?.path;
+  if (!searchCwd || !query) return { searchId: null, error: 'missing query or cwd' };
+
+  // Reset results.
+  searchResults.innerHTML = '';
+  searchResultCount = 0;
+  searchTruncated = false;
+  searchStatus.textContent = 'Searching...';
+
+  const result = await window.api.searchText(searchCwd, query, { caseSensitive: !!caseSensitive });
+  if (result.error) {
+    searchStatus.textContent = result.error;
+    return result;
+  }
+  currentSearchId = result.searchId;
+  return result;
+});
+
+// Receive search results from main process.
+window.api.onSearchResult(({ searchId, result }) => {
+  if (searchId !== currentSearchId) return; // stale result
+  appendSearchResult(result);
+});
+
+window.api.onSearchDone(({ searchId, truncated, totalCount, error, cancelled }) => {
+  if (searchId !== currentSearchId) return;
+  if (cancelled) return;
+  if (error) {
+    searchStatus.textContent = `Error: ${error}`;
+    return;
+  }
+  searchTruncated = truncated;
+  if (searchResultCount === 0) {
+    searchResults.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'search-result-empty';
+    empty.textContent = 'No results found';
+    searchResults.appendChild(empty);
+  }
+  searchStatus.textContent = truncated
+    ? `${totalCount}+ results (truncated)`
+    : `${totalCount} result${totalCount === 1 ? '' : 's'}`;
+});
+
+function appendSearchResult(result) {
+  searchResultCount++;
+
+  // Group by file. Check if the last file header matches.
+  const lastFile = searchResults.querySelector('.search-result-file:last-of-type');
+  const relativePath = getRelativePath(result.file);
+
+  if (!lastFile || lastFile.dataset.path !== result.file) {
+    const fileHeader = document.createElement('div');
+    fileHeader.className = 'search-result-file';
+    fileHeader.dataset.path = result.file;
+    fileHeader.textContent = relativePath;
+    searchResults.appendChild(fileHeader);
+  }
+
+  const item = document.createElement('div');
+  item.className = 'search-result-item';
+  item.innerHTML =
+    `<span class="search-result-line">${result.line}</span>` +
+    `<span class="search-result-text">${escapeHtml(result.text)}</span>`;
+  item.addEventListener('click', () => {
+    openSearchResult(result);
+  });
+  searchResults.appendChild(item);
+}
+
+function getRelativePath(filePath) {
+  const project = projects.get(activeProjectId);
+  if (!project) return filePath;
+  const prefix = project.path;
+  if (filePath.startsWith(prefix)) {
+    const rel = filePath.slice(prefix.length).replace(/^[\\/]+/, '');
+    return rel || filePath;
+  }
+  return filePath;
+}
+
+async function openSearchResult(result) {
+  // Open the file in the preview/editor, then reveal the line.
+  const shown = await dispatch('preview_open', { path: result.file, reason: 'search' });
+  if (shown?.shown && result.line > 0) {
+    await dispatch('preview_reveal', { previewPath: shown.previewPath, line: result.line });
+  }
+}
+
+// Search input handler.
+if (searchInput) {
+  let searchTimeout;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    const query = searchInput.value.trim();
+    if (!query) {
+      searchResults.innerHTML = '';
+      searchStatus.textContent = '';
+      return;
+    }
+    searchTimeout = setTimeout(() => {
+      dispatch('search_text', {
+        query,
+        caseSensitive: searchCaseCheckbox?.checked || false,
+      });
+    }, 200);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      searchInput.value = '';
+      searchResults.innerHTML = '';
+      searchStatus.textContent = '';
+      // Return to previous view.
+      closeSearchTab();
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const query = searchInput.value.trim();
+      if (query) {
+        dispatch('search_text', {
+          query,
+          caseSensitive: searchCaseCheckbox?.checked || false,
+        });
+      }
+    }
+  });
+}
+
 // Expose dispatch to main process via executeJavaScript (for MCP get_focus)
 // Returns a JSON-serializable focus state
 window.__pmDispatch = (name, args = {}) => {
@@ -4200,6 +4816,7 @@ window.__pmGetPaneRect = (paneName) => {
     preview: 'preview-content',
     fileTree: 'file-tree',
     sidebar: 'sidebar',
+    search: 'search-content',
   };
   const id = map[paneName];
   if (!id) return null;

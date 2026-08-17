@@ -38,6 +38,9 @@
         <div id="file-tree-header">
           <span id="file-tree-title">Files</span>
           <div id="file-tree-actions">
+            <button id="tree-search-btn" title="Search Files" aria-label="Search Files">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
+            </button>
             <button id="tree-collapse-btn" title="Collapse Files">&#x25BC;</button>
             <button id="tree-reload-btn" title="Reload">&#x21BB;</button>
             <button id="tree-new-file-btn" title="New File" aria-label="New File">
@@ -47,6 +50,17 @@
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4h5l1.4 1.6h6.6V13h-13z"/><path d="M5.5 9h5M8 6.5v5"/></svg>
             </button>
           </div>
+        </div>
+        <div id="tree-filter-bar" class="hidden">
+          <div id="tree-filter-input-wrap">
+            <input id="tree-filter-input" type="text" placeholder="Filter files..." title="Filter files (press / in tree)" />
+            <button id="tree-filter-clear-btn" title="Clear" aria-label="Clear filter" class="hidden">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 3.5 9 9M12.5 3.5l-9 9"/></svg>
+            </button>
+          </div>
+          <button id="tree-filter-close-btn" title="Close filter" aria-label="Close filter">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 3.5 9 9M12.5 3.5l-9 9"/></svg>
+          </button>
         </div>
         <div id="file-tree"></div>
       </div>
@@ -69,6 +83,19 @@
         <div id="preview-pane" class="main-surface-pane hidden">
           <div id="preview-content">
             <webview id="preview-webview" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
+          </div>
+        </div>
+        <div id="search-pane" class="main-surface-pane hidden">
+          <div id="search-content">
+            <div id="search-header">
+              <input id="search-input" type="text" placeholder="Search in project..." title="Search in project (Ctrl+Shift+F)" />
+              <label id="search-case-toggle" title="Match case">
+                <input type="checkbox" id="search-case-checkbox">
+                <span>Aa</span>
+              </label>
+              <span id="search-status"></span>
+            </div>
+            <div id="search-results"></div>
           </div>
         </div>
       </div>

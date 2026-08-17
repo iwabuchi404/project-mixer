@@ -5,7 +5,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const http = require('http');
 const pty = require('node-pty');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
@@ -661,12 +661,15 @@ ipcMain.handle('project:reorder', async (event, { orderedIds }) => {
 
 // --- File tree ---
 
+const { isTreeIgnored } = require('./src/files/ignore-patterns.cjs');
+const { buildSearchCommand, parseSearchLine, resolveSearchPath } = require('./src/files/search-command.cjs');
+
 ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
   try {
     const entries = await fsp.readdir(dirPath, { withFileTypes: true });
     const result = [];
     for (const entry of entries) {
-      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      if (isTreeIgnored(entry.name)) continue;
       result.push({
         name: entry.name,
         path: path.join(dirPath, entry.name),
@@ -681,6 +684,166 @@ ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
   } catch (e) {
     return [];
   }
+});
+
+// Phase 5 S1: Recursive tree index for filtering.
+// Walks the directory tree recursively (skipping TREE_IGNORE entries)
+// and returns a flat list of all files and directories with depth/parent
+// information. Used by the tree filter to match files in unexpanded folders.
+ipcMain.handle('fs:indexTree', async (event, { dirPath }) => {
+  const start = Date.now();
+  const files = [];
+  const MAX_FILES = 50000;
+
+  async function walk(currentPath, depth, parentPath) {
+    if (files.length >= MAX_FILES) return;
+    let entries;
+    try {
+      entries = await fsp.readdir(currentPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    // Sort: directories first, then alphabetical.
+    const sorted = entries.slice().sort((a, b) => {
+      const aDir = a.isDirectory();
+      const bDir = b.isDirectory();
+      if (aDir !== bDir) return aDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const entry of sorted) {
+      if (isTreeIgnored(entry.name)) continue;
+      if (files.length >= MAX_FILES) break;
+      const entryPath = path.join(currentPath, entry.name);
+      const isDir = entry.isDirectory();
+      files.push({
+        path: entryPath,
+        name: entry.name,
+        isDirectory: isDir,
+        depth,
+        parentPath,
+      });
+      if (isDir) {
+        await walk(entryPath, depth + 1, entryPath);
+      }
+    }
+  }
+
+  try {
+    await walk(dirPath, 0, null);
+    const durationMs = Date.now() - start;
+    console.log(`[fs:indexTree] ${files.length} entries indexed in ${durationMs}ms for ${dirPath}`);
+    return { files, count: files.length, durationMs, truncated: files.length >= MAX_FILES };
+  } catch (e) {
+    return { files: [], count: 0, durationMs: Date.now() - start, truncated: false, error: e.message };
+  }
+});
+
+// ============================================================
+// Phase 5 S2: Project-local text search (git grep / rg)
+// ============================================================
+
+// Check if a command is available on the system.
+function checkCommandAvailable(cmd) {
+  try {
+    if (process.platform === 'win32') {
+      execSync(`where ${cmd}`, { stdio: 'ignore', timeout: 5000 });
+    } else {
+      execSync(`which ${cmd}`, { stdio: 'ignore', timeout: 5000 });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Active search processes, keyed by searchId. Used to cancel stale searches.
+const activeSearches = new Map();
+let searchIdCounter = 0;
+
+ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false }) => {
+  if (!query || !cwd) {
+    return { searchId: null, error: 'missing query or cwd' };
+  }
+
+  // Determine which search tool to use.
+  const hasRg = checkCommandAvailable('rg');
+  const hasGit = checkCommandAvailable('git');
+  if (!hasRg && !hasGit) {
+    return { searchId: null, error: 'neither rg nor git is available' };
+  }
+
+  const cmd = hasRg ? 'rg' : 'git';
+  const built = buildSearchCommand(cmd, query, caseSensitive);
+  if (!built) {
+    return { searchId: null, error: 'failed to build search command' };
+  }
+
+  const searchId = ++searchIdCounter;
+  const sender = event.sender;
+
+  // Cancel any previous active search from this sender.
+  for (const [id, proc] of activeSearches.entries()) {
+    if (proc.sender === sender) {
+      try { proc.process.kill(); } catch {}
+      activeSearches.delete(id);
+      sender.send('search:done', { searchId: id, cancelled: true });
+    }
+  }
+
+  const proc = spawn(built.cmd, built.args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  activeSearches.set(searchId, { process: proc, sender });
+
+  let resultCount = 0;
+  let truncated = false;
+  const MAX_RESULTS = 500;
+  let buffer = '';
+
+  proc.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep incomplete last line
+
+    for (const line of lines) {
+      if (!line) continue;
+      if (resultCount >= MAX_RESULTS) {
+        truncated = true;
+        continue;
+      }
+      const result = parseSearchLine(line, cwd);
+      if (result) {
+        resultCount++;
+        sender.send('search:result', { searchId, result });
+      }
+    }
+  });
+
+  proc.stderr.on('data', (chunk) => {
+    // Ignore stderr — rg/git grep errors are non-fatal (e.g. binary files).
+  });
+
+  proc.on('close', (code) => {
+    // Process any remaining buffer.
+    if (buffer && resultCount < MAX_RESULTS) {
+      const result = parseSearchLine(buffer, cwd);
+      if (result) {
+        resultCount++;
+        sender.send('search:result', { searchId, result });
+      }
+    }
+    sender.send('search:done', { searchId, truncated, totalCount: resultCount, exitCode: code });
+    activeSearches.delete(searchId);
+  });
+
+  proc.on('error', (err) => {
+    sender.send('search:done', { searchId, error: err.message, totalCount: resultCount });
+    activeSearches.delete(searchId);
+  });
+
+  return { searchId, command: built.cmd };
 });
 
 // --- File read/write ---

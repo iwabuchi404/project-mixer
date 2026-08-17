@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // File tree
   readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', { dirPath }),
+  indexTree: (dirPath) => ipcRenderer.invoke('fs:indexTree', { dirPath }),
   readFile: (filePath) => ipcRenderer.invoke('fs:readFile', { filePath }),
   writeFile: (filePath, content) => ipcRenderer.invoke('fs:writeFile', { filePath, content }),
 
@@ -49,6 +50,11 @@ contextBridge.exposeInMainWorld('api', {
   deleteFile: (filePath) => ipcRenderer.invoke('fs:deleteFile', { filePath }),
   createFile: (filePath) => ipcRenderer.invoke('fs:createFile', { filePath }),
   createDir: (dirPath) => ipcRenderer.invoke('fs:createDir', { dirPath }),
+
+  // Phase 5 S2: Project text search
+  searchText: (cwd, query, opts = {}) => ipcRenderer.invoke('search:text', { cwd, query, ...opts }),
+  onSearchResult: (callback) => ipcRenderer.on('search:result', (_event, data) => callback(data)),
+  onSearchDone: (callback) => ipcRenderer.on('search:done', (_event, data) => callback(data)),
 
   // Hook-based waiting indicator
   onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),

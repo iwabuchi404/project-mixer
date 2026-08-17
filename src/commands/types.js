@@ -139,4 +139,39 @@ export const COMMAND_TYPES = {
     args: { tabId: 'number' },
     returns: 'void',
   },
+  // Phase 5 S0: keybinding commands
+  focus_scratch: {
+    args: {},
+    returns: 'void',
+  },
+  terminal_copy: {
+    args: {},
+    returns: 'void',
+  },
+  terminal_paste_image: {
+    args: {},
+    returns: 'void',
+  },
+  close_overlay_menus: {
+    args: {},
+    returns: 'void',
+  },
+  // Phase 5 S1: tree filter
+  tree_filter_focus: {
+    args: {},
+    returns: 'void',
+  },
+  tree_filter_clear: {
+    args: {},
+    returns: 'void',
+  },
+  // Phase 5 S2: text search
+  search_text_open: {
+    args: {},
+    returns: 'void',
+  },
+  search_text: {
+    args: { query: 'string', cwd: 'string?', caseSensitive: 'boolean?' },
+    returns: 'SearchResult',
+  },
 };

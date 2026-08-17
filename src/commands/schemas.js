@@ -61,4 +61,15 @@ export const COMMAND_SCHEMAS = {
   terminal_clear_attention: p({ tabId: z.number() }),
   agent_session_bound: p({ tabId: z.number(), provider: z.string(), sessionId: z.string(), status: optStr }),
   agent_session_unbound: p({ tabId: z.number() }),
+  // Phase 5 S0: keybinding commands
+  focus_scratch: p({}),
+  terminal_copy: p({}),
+  terminal_paste_image: p({}),
+  close_overlay_menus: p({}),
+  // Phase 5 S1: tree filter
+  tree_filter_focus: p({}),
+  tree_filter_clear: p({}),
+  // Phase 5 S2: text search
+  search_text_open: p({}),
+  search_text: p({ query: z.string(), cwd: optStr, caseSensitive: optBool }),
 };
