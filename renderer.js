@@ -610,6 +610,16 @@ async function selectProject(projectId) {
     closeTreeFilter();
     treeIndex = null;
     filterVisiblePaths = null;
+    // Cancel any in-flight search and clear results so stale data
+    // from the previous project doesn't reappear when reopening Search.
+    searchGeneration++;
+    if (currentSearchId) {
+      window.api.cancelSearch(currentSearchId);
+      currentSearchId = null;
+    }
+    if (searchResults) searchResults.innerHTML = '';
+    if (searchStatus) searchStatus.textContent = '';
+    if (searchInput) searchInput.value = '';
     await loadFileTree(p.path, { preserveState: false });
     // Phase 5 S1: build tree index for filtering (async, non-blocking).
     buildTreeIndex(p.path);
@@ -917,22 +927,25 @@ function toggleTreeFilter() {
     treeFilterInput.select();
   } else {
     closeTreeFilter();
-  }
-}
-
-// Close the filter bar and clear the filter.
-function closeTreeFilter() {
-  treeFilterBar.classList.add('hidden');
-  treeFilterInput.value = '';
-  treeFilterClearBtn.classList.add('hidden');
-  if (treeFilterActive) {
-    clearTreeFilter();
+    // Reload the tree to show the full (unfiltered) view.
     const project = projects.get(activeProjectId);
     if (project) loadFileTree(project.path);
   }
 }
 
+// Close the filter bar and clear the filter state.
+// Does NOT reload the tree — callers are responsible for calling
+// loadFileTree() if they need the tree re-rendered. This prevents
+// double-rendering when the caller also calls loadFileTree().
+function closeTreeFilter() {
+  treeFilterBar.classList.add('hidden');
+  treeFilterInput.value = '';
+  treeFilterClearBtn.classList.add('hidden');
+  clearTreeFilter();
+}
+
 // Clear the filter input but keep the bar open.
+// Reloads the tree to show the full (unfiltered) view.
 function clearFilterInput() {
   treeFilterInput.value = '';
   treeFilterClearBtn.classList.add('hidden');
@@ -4259,6 +4272,9 @@ register('tree_filter_focus', () => {
 
 register('tree_filter_clear', () => {
   closeTreeFilter();
+  // Reload the tree to show the full (unfiltered) view.
+  const project = projects.get(activeProjectId);
+  if (project) loadFileTree(project.path);
   fileTree.focus();
 });
 
@@ -4267,7 +4283,11 @@ register('search_text_open', () => {
 });
 
 register('search_close', () => {
-  currentSearchId = null;
+  searchGeneration++;
+  if (currentSearchId) {
+    window.api.cancelSearch(currentSearchId);
+    currentSearchId = null;
+  }
   searchInput.value = '';
   searchResults.innerHTML = '';
   searchStatus.textContent = '';
@@ -4699,6 +4719,7 @@ register('get_focus', ({ $session: session = null } = {}) => {
 
 let searchTabEl = null;
 let currentSearchId = null;
+let searchGeneration = 0; // increments on each search start/clear to reject stale results
 let searchResultCount = 0;
 let searchTruncated = false;
 let searchFocusedResult = null; // { file, line } for keyboard navigation
@@ -4767,6 +4788,14 @@ register('search_text', async ({ query, cwd, caseSensitive }) => {
   const searchCwd = cwd || project?.path;
   if (!searchCwd || !query) return { searchId: null, error: 'missing query or cwd' };
 
+  // Cancel any in-flight search before starting a new one.
+  if (currentSearchId) {
+    window.api.cancelSearch(currentSearchId);
+  }
+
+  // Increment generation so stale results from previous searches are rejected.
+  const gen = ++searchGeneration;
+
   // Reset results.
   searchResults.innerHTML = '';
   searchResultCount = 0;
@@ -4775,6 +4804,12 @@ register('search_text', async ({ query, cwd, caseSensitive }) => {
   searchStatus.textContent = 'Searching...';
 
   const result = await window.api.searchText(searchCwd, query, { caseSensitive: !!caseSensitive });
+  // Check if a newer search was started or the query was cleared while awaiting.
+  if (gen !== searchGeneration) {
+    // Stale: cancel the search we just started and discard its result.
+    if (result.searchId) window.api.cancelSearch(result.searchId);
+    return result;
+  }
   if (result.error) {
     searchStatus.textContent = result.error;
     return result;
@@ -4793,7 +4828,8 @@ window.api.onSearchDone(({ searchId, truncated, totalCount, error, cancelled }) 
   if (searchId !== currentSearchId) return;
   if (cancelled) return;
   if (error) {
-    searchStatus.textContent = `Error: ${error}`;
+    searchResults.innerHTML = '';
+    searchStatus.textContent = `Search error: ${error}`;
     return;
   }
   searchTruncated = truncated;
@@ -4861,8 +4897,12 @@ if (searchInput) {
     clearTimeout(searchTimeout);
     const query = searchInput.value.trim();
     if (!query) {
-      // Invalidate current search so stale results are ignored.
-      currentSearchId = null;
+      // Invalidate current search: bump generation, cancel process, clear DOM.
+      searchGeneration++;
+      if (currentSearchId) {
+        window.api.cancelSearch(currentSearchId);
+        currentSearchId = null;
+      }
       searchResults.innerHTML = '';
       searchStatus.textContent = '';
       return;

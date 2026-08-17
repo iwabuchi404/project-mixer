@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Phase 5 S2: Project text search
   searchText: (cwd, query, opts = {}) => ipcRenderer.invoke('search:text', { cwd, query, ...opts }),
+  cancelSearch: (searchId) => ipcRenderer.invoke('search:cancel', { searchId }),
   onSearchResult: (callback) => ipcRenderer.on('search:result', (_event, data) => callback(data)),
   onSearchDone: (callback) => ipcRenderer.on('search:done', (_event, data) => callback(data)),
 

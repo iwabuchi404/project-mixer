@@ -157,45 +157,65 @@ const FOCUS_CONTEXTS = new Set([
   'scratchFocus', 'searchFocus', 'treeFilterFocus',
 ]);
 
+// All context names used in the binding table's `when` clauses.
+// Used to enumerate all possible context combinations for overlap checking.
+const ALL_CONTEXTS = [
+  'terminalFocus', 'editorFocus', 'previewFocus', 'treeFocus',
+  'scratchFocus', 'searchFocus', 'treeFilterFocus',
+  'findOpen', 'paletteOpen',
+];
+
+// Collect all context names referenced in a `when` expression.
+function collectContextNames(expr) {
+  const tokens = tokenizeWhen(expr);
+  const names = new Set();
+  for (const tok of tokens) {
+    if (tok.type === 'ident') names.add(tok.value);
+  }
+  return names;
+}
+
 // Check if two `when` clauses can both be true at the same time.
-// Two clauses overlap unless one requires a context that the other
-// forbids (positive in A and negative in B, or vice versa), or both
-// require different focus contexts (which are mutually exclusive).
+// Enumerates all possible context combinations over the union of contexts
+// referenced in both expressions. For each combination, evaluates both
+// expressions. If any combination makes both true, they overlap.
 //
-// State contexts (findOpen, paletteOpen) can coexist with anything,
-// so editorFocus vs findOpen correctly overlaps.
-//
-// Known limitation: disjunctions with negation (e.g. 'a || !b') are
-// treated as having both positive {a} and negative {b} constraints.
-// This is conservative — it may miss overlaps when the positive branch
-// is independently satisfiable. The current binding table does not use
-// this pattern. A complete fix would enumerate context combinations.
+// Focus contexts are mutually exclusive (only one can be true at a time),
+// so we only enumerate combinations where at most one focus context is true.
+// State contexts can be independently true or false.
 function whenOverlaps(a, b) {
   if (a === null || a === undefined || a === '') return true;
   if (b === null || b === undefined || b === '') return true;
-  const ca = extractConstraints(a);
-  const cb = extractConstraints(b);
-  // If A requires X true and B requires X false, they cannot overlap.
-  for (const p of ca.positive) {
-    if (cb.negative.has(p)) return false;
+  const namesA = collectContextNames(a);
+  const namesB = collectContextNames(b);
+  const allNames = [...new Set([...namesA, ...namesB])];
+  // Split into focus and state contexts.
+  const focusNames = allNames.filter((n) => FOCUS_CONTEXTS.has(n));
+  const stateNames = allNames.filter((n) => !FOCUS_CONTEXTS.has(n));
+  // Enumerate: one focus context true (or none), all state combinations.
+  // Case 1: no focus context is true (empty base set).
+  const combos = [new Set()];
+  // Case 2: each focus context true individually.
+  for (const f of focusNames) {
+    combos.push(new Set([f]));
   }
-  for (const p of cb.positive) {
-    if (ca.negative.has(p)) return false;
-  }
-  // Focus contexts are mutually exclusive — if both clauses require
-  // different focus contexts (and share none), they can't overlap.
-  const af = [...ca.positive].filter((p) => FOCUS_CONTEXTS.has(p));
-  const bf = [...cb.positive].filter((p) => FOCUS_CONTEXTS.has(p));
-  if (af.length > 0 && bf.length > 0) {
-    let sharedFocus = false;
-    for (const p of af) {
-      if (bf.includes(p)) { sharedFocus = true; break; }
+  // For each focus base, enumerate all state combinations.
+  const results = [];
+  for (const base of combos) {
+    const stateCount = stateNames.length;
+    for (let mask = 0; mask < (1 << stateCount); mask++) {
+      const ctx = new Set(base);
+      for (let i = 0; i < stateCount; i++) {
+        if (mask & (1 << i)) ctx.add(stateNames[i]);
+      }
+      results.push(ctx);
     }
-    if (!sharedFocus) return false;
   }
-  // State contexts can coexist with anything, so different state
-  // positives (or state vs focus) don't prevent overlap.
-  return true;
+  // Check if any combination makes both expressions true.
+  for (const ctx of results) {
+    if (evaluateWhen(a, ctx) && evaluateWhen(b, ctx)) return true;
+  }
+  return false;
 }
 
 export function detectConflicts(bindings) {

@@ -768,6 +768,19 @@ function checkCommandAvailable(cmd) {
 const activeSearches = new Map();
 let searchIdCounter = 0;
 
+// Cancel an in-flight search by searchId. Kills the process and sends
+// search:done with cancelled: true.
+ipcMain.handle('search:cancel', async (event, { searchId }) => {
+  const proc = activeSearches.get(searchId);
+  if (!proc) return { cancelled: false };
+  try { proc.process.kill(); } catch {}
+  activeSearches.delete(searchId);
+  if (!proc.sender.isDestroyed()) {
+    proc.sender.send('search:done', { searchId, cancelled: true });
+  }
+  return { cancelled: true };
+});
+
 ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false }) => {
   if (!query || !cwd) {
     return { searchId: null, error: 'missing query or cwd' };
@@ -837,20 +850,30 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
     }
   });
 
+  let stderrBuffer = '';
   proc.stderr.on('data', (chunk) => {
-    // Ignore stderr — rg/git grep errors are non-fatal (e.g. binary files).
+    stderrBuffer += chunk.toString();
   });
 
   proc.on('close', (code) => {
     activeSearches.delete(searchId);
     if (sender.isDestroyed()) return;
     // Process any remaining buffer.
-    if (buffer && resultCount < MAX_RESULTS) {
+    if (buffer && resultCount < MAX_RESULTS && !killed) {
       const result = parseSearchLine(buffer, cwd);
       if (result) {
         resultCount++;
         sender.send('search:result', { searchId, result });
       }
+    }
+    // Non-zero exit code with no results indicates an error (e.g. git grep
+    // in a non-Git directory returns 128, rg not found returns 127).
+    // Exit code 1 for rg/git grep means "no matches" which is not an error.
+    // Exit code 2 for rg means "invalid arguments" (shouldn't happen with -F).
+    if (code && code !== 1 && resultCount === 0 && !killed) {
+      const errMsg = stderrBuffer.trim() || `Search process exited with code ${code}`;
+      sender.send('search:done', { searchId, error: errMsg, totalCount: 0, exitCode: code });
+      return;
     }
     sender.send('search:done', { searchId, truncated, totalCount: resultCount, exitCode: code });
   });

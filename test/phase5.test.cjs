@@ -117,6 +117,18 @@ test('detectConflicts flags coexistable positive constraints', async () => {
   assert.equal(conflicts.length, 1);
 });
 
+test('detectConflicts catches || + && ! overlap', async () => {
+  const { detectConflicts } = await loadKb();
+  // treeFocus || treeFilterFocus and treeFocus && !treeFilterFocus
+  // both hold when treeFocus is true and treeFilterFocus is false.
+  const bindings = [
+    { key: 'Ctrl+K', command: 'a', when: 'treeFocus || treeFilterFocus' },
+    { key: 'Ctrl+K', command: 'b', when: 'treeFocus && !treeFilterFocus' },
+  ];
+  const conflicts = detectConflicts(bindings);
+  assert.equal(conflicts.length, 1);
+});
+
 test('detectConflicts flags global (null when) overlap with anything', async () => {
   const { detectConflicts } = await loadKb();
   const bindings = [
