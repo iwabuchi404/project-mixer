@@ -10,6 +10,7 @@
 //   scratchFocus  | findOpen     | paletteOpen  | searchFocus
 //
 // D24: searchFocus added for Phase 5 S2 search tab Escape handling.
+//      Used by search_close (positive) and close_overlay_menus (negative).
 //
 // Operators: && || ! only. No nested parentheses (keeps the parser small).
 
@@ -29,6 +30,7 @@ export const BINDINGS = [
   { key: 'Ctrl+Shift+F', command: 'search_text_open', when: null },
   { key: 'Slash', command: 'tree_filter_focus', when: 'treeFocus' },
   { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus' },
+  { key: 'Escape', command: 'search_close', when: 'searchFocus' },
 ];
 
 // --- Key normalization ---

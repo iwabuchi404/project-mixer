@@ -17,7 +17,7 @@ export const COMMAND_TYPES = {
   },
   open_preview: {
     args: { path: 'string', name: 'string' },
-    returns: 'void',
+    returns: '{ shown: boolean, previewPath: string|null, reason: string }',
   },
   open_browser: {
     args: { url: 'string' },
@@ -173,5 +173,9 @@ export const COMMAND_TYPES = {
   search_text: {
     args: { query: 'string', cwd: 'string?', caseSensitive: 'boolean?' },
     returns: 'SearchResult',
+  },
+  search_close: {
+    args: {},
+    returns: 'void',
   },
 };

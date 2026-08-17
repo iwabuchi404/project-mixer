@@ -72,4 +72,5 @@ export const COMMAND_SCHEMAS = {
   // Phase 5 S2: text search
   search_text_open: p({}),
   search_text: p({ query: z.string(), cwd: optStr, caseSensitive: optBool }),
+  search_close: p({}),
 };

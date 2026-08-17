@@ -718,6 +718,7 @@ let treeFilterActive = false;
 let savedExpansionState = null; // Set of expanded paths before filter
 let filterTimeout = null;
 let filterVisiblePaths = null; // Set of paths visible in current filter
+let treeIndexGeneration = 0; // increments on each build to reject stale results
 
 async function loadFileTree(dirPath, { preserveState = true } = {}) {
   const previousScroll = fileTree.scrollTop;
@@ -776,9 +777,14 @@ function cssEscape(value) {
 // Called on project selection, tree reload, and file/folder create/delete.
 async function buildTreeIndex(dirPath) {
   if (!dirPath) return;
+  const gen = ++treeIndexGeneration;
   try {
-    treeIndex = await window.api.indexTree(dirPath);
+    const result = await window.api.indexTree(dirPath);
+    // Reject stale results from a previous project switch.
+    if (gen !== treeIndexGeneration) return;
+    treeIndex = result;
   } catch (e) {
+    if (gen !== treeIndexGeneration) return;
     console.error('[tree-filter] indexTree failed:', e);
     treeIndex = null;
   }
@@ -1417,6 +1423,7 @@ deleteConfirmBtn.addEventListener('click', async () => {
   // Refresh file tree
   const project = projects.get(activeProjectId);
   if (project) {
+    if (treeFilterActive) clearTreeFilter();
     await loadFileTree(project.path);
     buildTreeIndex(project.path);
   }
@@ -3109,8 +3116,10 @@ function jumpEditorToLine(line) {
   }
   fileEditorTextarea.focus();
   fileEditorTextarea.setSelectionRange(offset, offset);
-  // Approximate scroll: line height ~ 18px.
-  fileEditorTextarea.scrollTop = Math.max(0, (line - 1) * 18);
+  // Measure actual line height from the textarea instead of hardcoding.
+  const computed = getComputedStyle(fileEditorTextarea);
+  const lineHeight = parseFloat(computed.lineHeight) || 18;
+  fileEditorTextarea.scrollTop = Math.max(0, (line - 1) * lineHeight);
 }
 
 async function createTerminal(command, cwd, projectId, savedLabel) {
@@ -3651,7 +3660,7 @@ document.addEventListener('keydown', (e) => {
   // main editing surfaces (project name input, prompt modal, etc).
   // Those have their own keydown handlers.
   const ae = document.activeElement;
-  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== fileEditorTextarea && ae !== treeFilterInput) {
+  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== fileEditorTextarea && ae !== treeFilterInput && ae !== searchInput) {
     // Allow global bindings (Ctrl+Shift+F) even in inputs.
     const key = keyToString(e);
     const isGlobal = BINDINGS.some(b => b.key === key && (b.when === null || b.when === undefined || b.when === ''));
@@ -4218,6 +4227,13 @@ register('search_text_open', () => {
   openSearchTab();
 });
 
+register('search_close', () => {
+  searchInput.value = '';
+  searchResults.innerHTML = '';
+  searchStatus.textContent = '';
+  closeSearchTab();
+});
+
 register('create_terminal', ({ command, cwd, projectId, label } = {}) => {
   // A8: メニューからの呼び出し用デフォルト。
   // 新規タブのドロップダウンはインストール済みのツールだけを出すため、
@@ -4646,6 +4662,7 @@ let currentSearchId = null;
 let searchResultCount = 0;
 let searchTruncated = false;
 let searchFocusedResult = null; // { file, line } for keyboard navigation
+let searchLastFile = null; // path of the last file header rendered
 
 function openSearchTab() {
   if (!searchTabEl) createSearchTab();
@@ -4709,6 +4726,7 @@ register('search_text', async ({ query, cwd, caseSensitive }) => {
   searchResults.innerHTML = '';
   searchResultCount = 0;
   searchTruncated = false;
+  searchLastFile = null;
   searchStatus.textContent = 'Searching...';
 
   const result = await window.api.searchText(searchCwd, query, { caseSensitive: !!caseSensitive });
@@ -4749,17 +4767,16 @@ window.api.onSearchDone(({ searchId, truncated, totalCount, error, cancelled }) 
 function appendSearchResult(result) {
   searchResultCount++;
 
-  // Group by file. Check if the last child is a header for the same file.
-  const lastChild = searchResults.lastElementChild;
-  const lastFile = lastChild?.classList.contains('search-result-file') ? lastChild : null;
+  // Group by file: only insert a header when the file changes.
   const relativePath = getRelativePath(result.file);
 
-  if (!lastFile || lastFile.dataset.path !== result.file) {
+  if (searchLastFile !== result.file) {
     const fileHeader = document.createElement('div');
     fileHeader.className = 'search-result-file';
     fileHeader.dataset.path = result.file;
     fileHeader.textContent = relativePath;
     searchResults.appendChild(fileHeader);
+    searchLastFile = result.file;
   }
 
   const item = document.createElement('div');
@@ -4811,15 +4828,7 @@ if (searchInput) {
     }, 200);
   });
   searchInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      searchInput.value = '';
-      searchResults.innerHTML = '';
-      searchStatus.textContent = '';
-      // Return to previous view.
-      closeSearchTab();
-    }
+    // Escape is handled by the keybinding registry (search_close, when: searchFocus).
     if (e.key === 'Enter') {
       e.preventDefault();
       const query = searchInput.value.trim();
