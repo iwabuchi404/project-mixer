@@ -606,8 +606,8 @@ async function selectProject(projectId) {
   if (p) {
     fileTreeTitle.textContent = p.name;
     // プロジェクトを跨ぐと展開状態は無意味になるので捨てる
-    // Clear filter state and tree index so stale data doesn't leak across projects.
-    if (treeFilterActive) clearTreeFilter();
+    // Close filter bar and clear state so stale data doesn't leak across projects.
+    closeTreeFilter();
     treeIndex = null;
     filterVisiblePaths = null;
     await loadFileTree(p.path, { preserveState: false });
@@ -885,7 +885,9 @@ function renderFilteredChildren(parentPath, depth, childrenMap, container) {
   }
 }
 
-// Clear the filter and restore the normal lazy-loading tree.
+// Clear the filter state. Does NOT reload the tree — callers are
+// responsible for calling loadFileTree() afterwards. This prevents
+// double-rendering when callers also call loadFileTree().
 function clearTreeFilter() {
   if (!treeFilterActive) return;
   treeFilterActive = false;
@@ -895,9 +897,6 @@ function clearTreeFilter() {
     for (const p of savedExpansionState) expandedTreePaths.add(p);
     savedExpansionState = null;
   }
-  // Reload the tree with restored expansion state.
-  const project = projects.get(activeProjectId);
-  if (project) loadFileTree(project.path);
 }
 
 // Return the set of paths visible in the current filter.
@@ -3056,24 +3055,30 @@ function registerFilePathLinkProvider(terminal, { cwd, projectId }) {
       let match;
       while ((match = FILE_PATH_RE.exec(text)) !== null) {
         const [fullMatch, lineNum, colNum] = match;
+        // Strip optional :line:col suffix to get the pure file path.
+        const pathOnly = fullMatch.replace(/:\d+$/, '').replace(/:\d+$/, '');
         // Filter: require at least one path separator or drive prefix,
         // and a dot in the last segment (reduces false positives on
         // plain words like "foo" or "test").
-        const lastSlash = Math.max(fullMatch.lastIndexOf('/'), fullMatch.lastIndexOf('\\'));
-        const lastSegment = fullMatch.slice(lastSlash + 1).replace(/:\d+$/, '').replace(/:\d+$/, '');
+        const lastSlash = Math.max(pathOnly.lastIndexOf('/'), pathOnly.lastIndexOf('\\'));
+        const lastSegment = pathOnly.slice(lastSlash + 1);
         if (!lastSegment.includes('.')) continue;
-        if (!fullMatch.includes('/') && !fullMatch.includes('\\')) continue;
+        if (!pathOnly.includes('/') && !pathOnly.includes('\\')) continue;
 
         const startCol = match.index + 1; // xterm uses 1-based columns
         const endCol = startCol + fullMatch.length;
-        const resolved = resolveFilePath(fullMatch, cwd);
+        const resolved = resolveFilePath(pathOnly, cwd);
         if (!resolved) continue;
 
         links.push({
           range: { start: { x: startCol, y: bufferLineNumber }, end: { x: endCol, y: bufferLineNumber } },
           text: fullMatch,
           activate: (_event, _text) => {
-            openTerminalLinkFile(resolved, lineNum, colNum, projectId);
+            // xterm's activate callback does not await or catch, so wrap
+            // the async call to prevent unhandled rejections.
+            openTerminalLinkFile(resolved, lineNum, colNum, projectId).catch((e) => {
+              console.error('[terminal-link] failed to open:', e);
+            });
           },
           hover: () => {},
           leave: () => {},
@@ -3642,8 +3647,14 @@ function getFocusContext() {
   const ae = document.activeElement;
   if (ae === editorTextarea) return new Set(['scratchFocus']);
   if (ae === fileEditorTextarea) return new Set(['editorFocus']);
-  if (ae?.closest('#file-tree') || ae?.closest('#tree-filter-input')) return new Set(['treeFocus']);
+  // treeFocus applies to the tree itself, not the filter input.
+  // When the filter input is focused, typing / should insert a character,
+  // not trigger tree_filter_focus.
+  if (ae?.closest('#file-tree') && ae !== treeFilterInput) return new Set(['treeFocus']);
   if (ae === searchInput || ae?.closest('#search-pane')) return new Set(['searchFocus']);
+  // When a terminal tab is active, treat as terminalFocus even if focus
+  // is on <body> (e.g. after closing a modal). This ensures Ctrl+B
+  // (!terminalFocus) correctly defers to the shell's tmux prefix.
   if (activeMainView === 'terminal') return new Set(['terminalFocus']);
   if (activeMainView === 'preview') return new Set(['previewFocus']);
   if (activeMainView === 'file') return new Set(['editorFocus']);
@@ -3685,7 +3696,12 @@ document.addEventListener('keydown', (e) => {
 // through to the browser's default behavior.
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key === 'v') {
-    dispatch('terminal_paste_image');
+    // Only handle image paste when a terminal or scratch editor is focused.
+    // In modals, project name inputs, etc., native paste should work freely.
+    const ctx = getFocusContext();
+    if (ctx.has('terminalFocus') || ctx.has('scratchFocus') || ctx.has('editorFocus')) {
+      dispatch('terminal_paste_image');
+    }
   }
 });
 
@@ -4220,6 +4236,10 @@ register('tree_filter_focus', () => {
 
 register('tree_filter_clear', () => {
   closeTreeFilter();
+  // When triggered via keybinding (not from a caller that reloads),
+  // restore the tree here.
+  const project = projects.get(activeProjectId);
+  if (project) loadFileTree(project.path);
   fileTree.focus();
 });
 
@@ -4700,9 +4720,14 @@ function closeSearchTab() {
   if (!searchTabEl) return;
   searchTabEl.remove();
   searchTabEl = null;
-  // Restore visibility of editor/preview tabs.
+  // Restore visibility of editor/preview tabs for the active project only.
+  // previewFiles is cross-project; other projects' tabs must stay hidden.
   openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
-  previewFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
+  previewFiles.forEach((f) => {
+    if (f.tabEl && f.projectId === activeEditorProjectId) {
+      f.tabEl.style.display = '';
+    }
+  });
   // Switch back to terminal or editor.
   if (activeTabId !== null) {
     const t = tabs.get(activeTabId);
