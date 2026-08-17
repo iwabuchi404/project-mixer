@@ -6,9 +6,11 @@ const path = require('path');
 
 // Build the search command arguments for rg or git grep.
 // Returns { cmd, args } or null if the command is not supported.
+// Uses -F (fixed strings) so queries like [ or ( are treated as literal
+// text, not regex. This prevents exit code 2 errors from invalid regex.
 function buildSearchCommand(cmd, query, caseSensitive) {
   if (cmd === 'rg') {
-    const args = ['--line-number', '--no-heading', '--color=never'];
+    const args = ['--line-number', '--no-heading', '--color=never', '-F'];
     if (!caseSensitive) args.push('-i');
     // -e prevents queries starting with - from being treated as flags.
     args.push('-e', query, '.');
@@ -16,7 +18,8 @@ function buildSearchCommand(cmd, query, caseSensitive) {
   }
   if (cmd === 'git') {
     // --no-optional-locks prevents acquiring index.lock (D16 non-blocking rule).
-    const args = ['--no-optional-locks', 'grep', '--untracked', '-n'];
+    // -F treats the pattern as a fixed string (not regex).
+    const args = ['--no-optional-locks', 'grep', '--untracked', '-n', '-F'];
     if (!caseSensitive) args.push('-i');
     // -e prevents queries starting with - from being treated as flags.
     args.push('-e', query);

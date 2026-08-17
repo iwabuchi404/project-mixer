@@ -7,10 +7,13 @@
 //
 // `when` vocabulary (fixed — do not expand without discussion):
 //   terminalFocus | editorFocus | previewFocus | treeFocus |
-//   scratchFocus  | findOpen     | paletteOpen  | searchFocus
+//   scratchFocus  | findOpen     | paletteOpen  | searchFocus |
+//   treeFilterFocus
 //
 // D24: searchFocus added for Phase 5 S2 search tab Escape handling.
 //      Used by search_close (positive) and close_overlay_menus (negative).
+// D25: treeFilterFocus added so Escape works in the filter input while
+//      Slash (tree_filter_focus) does not intercept typing in the input.
 //
 // Operators: && || ! only. No nested parentheses (keeps the parser small).
 
@@ -24,12 +27,12 @@ export const BINDINGS = [
   { key: 'Ctrl+Shift+Z', command: 'undo_last_send', when: 'scratchFocus' },
   { key: 'Ctrl+Shift+C', command: 'terminal_copy', when: 'terminalFocus' },
   { key: 'Ctrl+B', command: 'toggle_sidebar', when: '!terminalFocus' },
-  { key: 'Escape', command: 'close_overlay_menus', when: '!findOpen && !treeFocus && !searchFocus' },
+  { key: 'Escape', command: 'close_overlay_menus', when: '!findOpen && !treeFocus && !treeFilterFocus && !searchFocus' },
 
   // Phase 5 additions.
   { key: 'Ctrl+Shift+F', command: 'search_text_open', when: null },
   { key: 'Slash', command: 'tree_filter_focus', when: 'treeFocus' },
-  { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus' },
+  { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus || treeFilterFocus' },
   { key: 'Escape', command: 'search_close', when: 'searchFocus' },
 ];
 
@@ -146,9 +149,21 @@ function extractConstraints(expr) {
   return { positive, negative };
 }
 
+// Focus contexts are mutually exclusive — only one can be active at a time
+// (getFocusContext returns exactly one focus set). State contexts (findOpen,
+// paletteOpen) can coexist with any focus context and with each other.
+const FOCUS_CONTEXTS = new Set([
+  'terminalFocus', 'editorFocus', 'previewFocus', 'treeFocus',
+  'scratchFocus', 'searchFocus', 'treeFilterFocus',
+]);
+
 // Check if two `when` clauses can both be true at the same time.
 // Two clauses overlap unless one requires a context that the other
-// forbids (positive in A and negative in B, or vice versa).
+// forbids (positive in A and negative in B, or vice versa), or both
+// require different focus contexts (which are mutually exclusive).
+//
+// State contexts (findOpen, paletteOpen) can coexist with anything,
+// so editorFocus vs findOpen correctly overlaps.
 //
 // Known limitation: disjunctions with negation (e.g. 'a || !b') are
 // treated as having both positive {a} and negative {b} constraints.
@@ -167,14 +182,19 @@ function whenOverlaps(a, b) {
   for (const p of cb.positive) {
     if (ca.negative.has(p)) return false;
   }
-  // If both have positive constraints and share none, they don't overlap.
-  if (ca.positive.size > 0 && cb.positive.size > 0) {
-    let shared = false;
-    for (const p of ca.positive) {
-      if (cb.positive.has(p)) { shared = true; break; }
+  // Focus contexts are mutually exclusive — if both clauses require
+  // different focus contexts (and share none), they can't overlap.
+  const af = [...ca.positive].filter((p) => FOCUS_CONTEXTS.has(p));
+  const bf = [...cb.positive].filter((p) => FOCUS_CONTEXTS.has(p));
+  if (af.length > 0 && bf.length > 0) {
+    let sharedFocus = false;
+    for (const p of af) {
+      if (bf.includes(p)) { sharedFocus = true; break; }
     }
-    if (!shared) return false;
+    if (!sharedFocus) return false;
   }
+  // State contexts can coexist with anything, so different state
+  // positives (or state vs focus) don't prevent overlap.
   return true;
 }
 

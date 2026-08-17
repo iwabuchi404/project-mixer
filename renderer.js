@@ -783,6 +783,10 @@ async function buildTreeIndex(dirPath) {
     // Reject stale results from a previous project switch.
     if (gen !== treeIndexGeneration) return;
     treeIndex = result;
+    // If the user typed a filter while the index was building, reapply it.
+    if (treeFilterInput && treeFilterInput.value && treeFilterInput.value.trim()) {
+      applyTreeFilter(treeFilterInput.value);
+    }
   } catch (e) {
     if (gen !== treeIndexGeneration) return;
     console.error('[tree-filter] indexTree failed:', e);
@@ -921,14 +925,22 @@ function closeTreeFilter() {
   treeFilterBar.classList.add('hidden');
   treeFilterInput.value = '';
   treeFilterClearBtn.classList.add('hidden');
-  clearTreeFilter();
+  if (treeFilterActive) {
+    clearTreeFilter();
+    const project = projects.get(activeProjectId);
+    if (project) loadFileTree(project.path);
+  }
 }
 
 // Clear the filter input but keep the bar open.
 function clearFilterInput() {
   treeFilterInput.value = '';
   treeFilterClearBtn.classList.add('hidden');
-  clearTreeFilter();
+  if (treeFilterActive) {
+    clearTreeFilter();
+    const project = projects.get(activeProjectId);
+    if (project) loadFileTree(project.path);
+  }
   treeFilterInput.focus();
 }
 
@@ -943,7 +955,17 @@ if (treeFilterInput) {
     }
     clearTimeout(filterTimeout);
     filterTimeout = setTimeout(() => {
-      applyTreeFilter(treeFilterInput.value);
+      const query = treeFilterInput.value;
+      if (!query || !query.trim()) {
+        // Empty query: restore the normal tree.
+        if (treeFilterActive) {
+          clearTreeFilter();
+          const project = projects.get(activeProjectId);
+          if (project) loadFileTree(project.path);
+        }
+        return;
+      }
+      applyTreeFilter(query);
     }, 80);
   });
   // Escape in the filter input is handled by the keybinding registry
@@ -998,8 +1020,8 @@ function getTreeCreateParent(projectPath) {
 treeReloadBtn.addEventListener('click', async () => {
   const project = projects.get(activeProjectId);
   if (!project) return;
-  // Clear filter state so reload shows the full tree, not stale filtered view.
-  if (treeFilterActive) clearTreeFilter();
+  // Close filter bar so reload shows the full tree, not stale filtered view.
+  closeTreeFilter();
   await loadFileTree(project.path);
   buildTreeIndex(project.path);
 });
@@ -1018,7 +1040,7 @@ treeNewFileBtn.addEventListener('click', async () => {
   }
   // 作成先が畳まれていると結果が見えないので開いておく
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
-  if (treeFilterActive) clearTreeFilter();
+  closeTreeFilter();
   await loadFileTree(project.path);
   buildTreeIndex(project.path);
   openFileInEditor(filePath, name.split(/[\\/]/).pop());
@@ -1037,7 +1059,7 @@ treeNewFolderBtn.addEventListener('click', async () => {
     return;
   }
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
-  if (treeFilterActive) clearTreeFilter();
+  closeTreeFilter();
   await loadFileTree(project.path);
   buildTreeIndex(project.path);
 });
@@ -1422,7 +1444,7 @@ deleteConfirmBtn.addEventListener('click', async () => {
   // Refresh file tree
   const project = projects.get(activeProjectId);
   if (project) {
-    if (treeFilterActive) clearTreeFilter();
+    closeTreeFilter();
     await loadFileTree(project.path);
     buildTreeIndex(project.path);
   }
@@ -3647,10 +3669,11 @@ function getFocusContext() {
   const ae = document.activeElement;
   if (ae === editorTextarea) return new Set(['scratchFocus']);
   if (ae === fileEditorTextarea) return new Set(['editorFocus']);
-  // treeFocus applies to the tree itself, not the filter input.
-  // When the filter input is focused, typing / should insert a character,
-  // not trigger tree_filter_focus.
-  if (ae?.closest('#file-tree') && ae !== treeFilterInput) return new Set(['treeFocus']);
+  // treeFilterFocus: filter input is focused. Slash binding (treeFocus)
+  // won't fire, so / can be typed. Escape binding (treeFocus || treeFilterFocus)
+  // will fire, so Escape clears the filter.
+  if (ae === treeFilterInput) return new Set(['treeFilterFocus']);
+  if (ae?.closest('#file-tree')) return new Set(['treeFocus']);
   if (ae === searchInput || ae?.closest('#search-pane')) return new Set(['searchFocus']);
   // When a terminal tab is active, treat as terminalFocus even if focus
   // is on <body> (e.g. after closing a modal). This ensures Ctrl+B
@@ -4236,10 +4259,6 @@ register('tree_filter_focus', () => {
 
 register('tree_filter_clear', () => {
   closeTreeFilter();
-  // When triggered via keybinding (not from a caller that reloads),
-  // restore the tree here.
-  const project = projects.get(activeProjectId);
-  if (project) loadFileTree(project.path);
   fileTree.focus();
 });
 
@@ -4248,6 +4267,7 @@ register('search_text_open', () => {
 });
 
 register('search_close', () => {
+  currentSearchId = null;
   searchInput.value = '';
   searchResults.innerHTML = '';
   searchStatus.textContent = '';
@@ -4841,6 +4861,8 @@ if (searchInput) {
     clearTimeout(searchTimeout);
     const query = searchInput.value.trim();
     if (!query) {
+      // Invalidate current search so stale results are ignored.
+      currentSearchId = null;
       searchResults.innerHTML = '';
       searchStatus.textContent = '';
       return;

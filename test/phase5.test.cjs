@@ -86,12 +86,35 @@ test('detectConflicts finds overlapping bindings with same key', async () => {
 
 test('detectConflicts does not flag non-overlapping when clauses', async () => {
   const { detectConflicts } = await loadKb();
+  // editorFocus and !editorFocus are mutually exclusive (positive vs negative).
+  const bindings = [
+    { key: 'Ctrl+S', command: 'save', when: 'editorFocus' },
+    { key: 'Ctrl+S', command: 'send', when: '!editorFocus' },
+  ];
+  const conflicts = detectConflicts(bindings);
+  assert.equal(conflicts.length, 0);
+});
+
+test('detectConflicts does not flag different focus contexts', async () => {
+  const { detectConflicts } = await loadKb();
+  // editorFocus and terminalFocus are both focus contexts — mutually exclusive.
   const bindings = [
     { key: 'Ctrl+S', command: 'save', when: 'editorFocus' },
     { key: 'Ctrl+S', command: 'send', when: 'terminalFocus' },
   ];
   const conflicts = detectConflicts(bindings);
   assert.equal(conflicts.length, 0);
+});
+
+test('detectConflicts flags coexistable positive constraints', async () => {
+  const { detectConflicts } = await loadKb();
+  // editorFocus (focus) and findOpen (state) can both be true at the same time.
+  const bindings = [
+    { key: 'Ctrl+F', command: 'find', when: 'editorFocus' },
+    { key: 'Ctrl+F', command: 'other', when: 'findOpen' },
+  ];
+  const conflicts = detectConflicts(bindings);
+  assert.equal(conflicts.length, 1);
 });
 
 test('detectConflicts flags global (null when) overlap with anything', async () => {
@@ -106,12 +129,14 @@ test('detectConflicts flags global (null when) overlap with anything', async () 
 
 test('detectConflicts handles Escape with different when clauses', async () => {
   const { detectConflicts } = await loadKb();
-  // Escape: close_overlay_menus (!findOpen && !treeFocus) vs find_close (findOpen) vs tree_filter_clear (treeFocus)
-  // These should NOT conflict because the when clauses are mutually exclusive.
+  // Escape: close_overlay_menus (!treeFocus && !searchFocus) vs
+  // tree_filter_clear (treeFocus) vs search_close (searchFocus).
+  // These should NOT conflict because treeFocus and searchFocus are
+  // mutually exclusive focus contexts, and close_overlay_menus negates both.
   const bindings = [
-    { key: 'Escape', command: 'close_overlay_menus', when: '!findOpen && !treeFocus' },
-    { key: 'Escape', command: 'find_close', when: 'findOpen' },
+    { key: 'Escape', command: 'close_overlay_menus', when: '!treeFocus && !searchFocus' },
     { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus' },
+    { key: 'Escape', command: 'search_close', when: 'searchFocus' },
   ];
   const conflicts = detectConflicts(bindings);
   assert.equal(conflicts.length, 0);
@@ -213,6 +238,7 @@ test('buildSearchCommand builds rg command with case-insensitive flag', () => {
   assert.ok(result.args.includes('--line-number'));
   assert.ok(result.args.includes('--no-heading'));
   assert.ok(result.args.includes('--color=never'));
+  assert.ok(result.args.includes('-F'), 'must include -F for fixed string search');
   assert.ok(result.args.includes('-i'));
   assert.ok(result.args.includes('-e'), 'must include -e to handle queries starting with -');
   assert.ok(result.args.includes('foo'));
@@ -232,6 +258,7 @@ test('buildSearchCommand builds git grep with --no-optional-locks', () => {
   assert.ok(result.args.includes('grep'));
   assert.ok(result.args.includes('--untracked'));
   assert.ok(result.args.includes('-n'));
+  assert.ok(result.args.includes('-F'), 'must include -F for fixed string search');
   assert.ok(result.args.includes('-i'));
   assert.ok(result.args.includes('-e'), 'must include -e to handle queries starting with -');
   assert.ok(result.args.includes('foo'));

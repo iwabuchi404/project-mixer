@@ -811,9 +811,11 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
   let truncated = false;
   const MAX_RESULTS = 500;
   let buffer = '';
+  let killed = false;
 
   proc.stdout.on('data', (chunk) => {
     if (sender.isDestroyed()) return;
+    if (killed) return; // discard output after kill
     buffer += chunk.toString();
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete last line
@@ -822,7 +824,10 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
       if (!line) continue;
       if (resultCount >= MAX_RESULTS) {
         truncated = true;
-        continue;
+        // Kill the process to stop CPU/I/O on large repos.
+        killed = true;
+        try { proc.kill(); } catch {}
+        return;
       }
       const result = parseSearchLine(line, cwd);
       if (result) {
