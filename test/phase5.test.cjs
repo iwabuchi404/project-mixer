@@ -142,7 +142,8 @@ test('validateBindings does not throw on clean bindings', async () => {
 test('matchBinding returns matching binding for context', async () => {
   const { matchBinding, BINDINGS } = await loadKb();
   const event = { ctrlKey: true, shiftKey: false, key: 'b' };
-  const ctx = new Set(['terminalFocus']);
+  // Ctrl+B is now !terminalFocus, so it matches in editor context.
+  const ctx = new Set(['editorFocus']);
   const binding = matchBinding(event, ctx);
   assert.ok(binding);
   assert.equal(binding.command, 'toggle_sidebar');
@@ -152,6 +153,14 @@ test('matchBinding returns null when no binding matches context', async () => {
   const { matchBinding } = await loadKb();
   // Ctrl+S with terminalFocus should not match (save is for editorFocus/scratchFocus)
   const event = { ctrlKey: true, shiftKey: false, key: 's' };
+  const ctx = new Set(['terminalFocus']);
+  const binding = matchBinding(event, ctx);
+  assert.equal(binding, null);
+});
+
+test('Ctrl+B does not fire in terminalFocus (discipline 4)', async () => {
+  const { matchBinding } = await loadKb();
+  const event = { ctrlKey: true, shiftKey: false, key: 'b' };
   const ctx = new Set(['terminalFocus']);
   const binding = matchBinding(event, ctx);
   assert.equal(binding, null);
@@ -182,7 +191,9 @@ test('BINDINGS includes all migrated bindings', async () => {
   assert.ok(keys.includes('Ctrl+I'));
   assert.ok(keys.includes('Ctrl+Shift+Z'));
   assert.ok(keys.includes('Ctrl+Shift+C'));
-  assert.ok(keys.includes('Ctrl+V'));
+  // Ctrl+V is deliberately NOT in the registry — it must not preventDefault
+  // so native paste works. It's handled by a dedicated listener.
+  assert.ok(!keys.includes('Ctrl+V'));
   assert.ok(keys.includes('Ctrl+B'));
   assert.ok(keys.includes('Escape'));
   assert.ok(keys.includes('Ctrl+Shift+F'));
@@ -203,6 +214,7 @@ test('buildSearchCommand builds rg command with case-insensitive flag', () => {
   assert.ok(result.args.includes('--no-heading'));
   assert.ok(result.args.includes('--color=never'));
   assert.ok(result.args.includes('-i'));
+  assert.ok(result.args.includes('-e'), 'must include -e to handle queries starting with -');
   assert.ok(result.args.includes('foo'));
   assert.ok(result.args.includes('.'));
 });
@@ -221,6 +233,7 @@ test('buildSearchCommand builds git grep with --no-optional-locks', () => {
   assert.ok(result.args.includes('--untracked'));
   assert.ok(result.args.includes('-n'));
   assert.ok(result.args.includes('-i'));
+  assert.ok(result.args.includes('-e'), 'must include -e to handle queries starting with -');
   assert.ok(result.args.includes('foo'));
 });
 

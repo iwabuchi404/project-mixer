@@ -786,7 +786,9 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
     if (proc.sender === sender) {
       try { proc.process.kill(); } catch {}
       activeSearches.delete(id);
-      sender.send('search:done', { searchId: id, cancelled: true });
+      if (!proc.sender.isDestroyed()) {
+        proc.sender.send('search:done', { searchId: id, cancelled: true });
+      }
     }
   }
 
@@ -803,6 +805,7 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
   let buffer = '';
 
   proc.stdout.on('data', (chunk) => {
+    if (sender.isDestroyed()) return;
     buffer += chunk.toString();
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete last line
@@ -826,6 +829,8 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
   });
 
   proc.on('close', (code) => {
+    activeSearches.delete(searchId);
+    if (sender.isDestroyed()) return;
     // Process any remaining buffer.
     if (buffer && resultCount < MAX_RESULTS) {
       const result = parseSearchLine(buffer, cwd);
@@ -835,15 +840,23 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
       }
     }
     sender.send('search:done', { searchId, truncated, totalCount: resultCount, exitCode: code });
-    activeSearches.delete(searchId);
   });
 
   proc.on('error', (err) => {
-    sender.send('search:done', { searchId, error: err.message, totalCount: resultCount });
     activeSearches.delete(searchId);
+    if (sender.isDestroyed()) return;
+    sender.send('search:done', { searchId, error: err.message, totalCount: resultCount });
   });
 
   return { searchId, command: built.cmd };
+});
+
+// Kill all active searches when the window is closed.
+mainWindow.on('closed', () => {
+  for (const [id, proc] of activeSearches.entries()) {
+    try { proc.process.kill(); } catch {}
+  }
+  activeSearches.clear();
 });
 
 // --- File read/write ---

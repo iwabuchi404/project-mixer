@@ -10,14 +10,16 @@ function buildSearchCommand(cmd, query, caseSensitive) {
   if (cmd === 'rg') {
     const args = ['--line-number', '--no-heading', '--color=never'];
     if (!caseSensitive) args.push('-i');
-    args.push(query, '.');
+    // -e prevents queries starting with - from being treated as flags.
+    args.push('-e', query, '.');
     return { cmd: 'rg', args };
   }
   if (cmd === 'git') {
     // --no-optional-locks prevents acquiring index.lock (D16 non-blocking rule).
     const args = ['--no-optional-locks', 'grep', '--untracked', '-n'];
     if (!caseSensitive) args.push('-i');
-    args.push(query);
+    // -e prevents queries starting with - from being treated as flags.
+    args.push('-e', query);
     return { cmd: 'git', args };
   }
   return null;

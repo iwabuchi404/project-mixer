@@ -7,7 +7,9 @@
 //
 // `when` vocabulary (fixed — do not expand without discussion):
 //   terminalFocus | editorFocus | previewFocus | treeFocus |
-//   scratchFocus  | findOpen     | paletteOpen
+//   scratchFocus  | findOpen     | paletteOpen  | searchFocus
+//
+// D24: searchFocus added for Phase 5 S2 search tab Escape handling.
 //
 // Operators: && || ! only. No nested parentheses (keeps the parser small).
 
@@ -20,9 +22,8 @@ export const BINDINGS = [
   { key: 'Ctrl+I', command: 'focus_scratch', when: 'scratchFocus' },
   { key: 'Ctrl+Shift+Z', command: 'undo_last_send', when: 'scratchFocus' },
   { key: 'Ctrl+Shift+C', command: 'terminal_copy', when: 'terminalFocus' },
-  { key: 'Ctrl+V', command: 'terminal_paste_image', when: 'terminalFocus' },
-  { key: 'Ctrl+B', command: 'toggle_sidebar', when: null },
-  { key: 'Escape', command: 'close_overlay_menus', when: '!findOpen && !treeFocus' },
+  { key: 'Ctrl+B', command: 'toggle_sidebar', when: '!terminalFocus' },
+  { key: 'Escape', command: 'close_overlay_menus', when: '!findOpen && !treeFocus && !searchFocus' },
 
   // Phase 5 additions.
   { key: 'Ctrl+Shift+F', command: 'search_text_open', when: null },
@@ -146,6 +147,12 @@ function extractConstraints(expr) {
 // Check if two `when` clauses can both be true at the same time.
 // Two clauses overlap unless one requires a context that the other
 // forbids (positive in A and negative in B, or vice versa).
+//
+// Known limitation: disjunctions with negation (e.g. 'a || !b') are
+// treated as having both positive {a} and negative {b} constraints.
+// This is conservative — it may miss overlaps when the positive branch
+// is independently satisfiable. The current binding table does not use
+// this pattern. A complete fix would enumerate context combinations.
 function whenOverlaps(a, b) {
   if (a === null || a === undefined || a === '') return true;
   if (b === null || b === undefined || b === '') return true;

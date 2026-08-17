@@ -606,6 +606,10 @@ async function selectProject(projectId) {
   if (p) {
     fileTreeTitle.textContent = p.name;
     // プロジェクトを跨ぐと展開状態は無意味になるので捨てる
+    // Clear filter state and tree index so stale data doesn't leak across projects.
+    if (treeFilterActive) clearTreeFilter();
+    treeIndex = null;
+    filterVisiblePaths = null;
     await loadFileTree(p.path, { preserveState: false });
     // Phase 5 S1: build tree index for filtering (async, non-blocking).
     buildTreeIndex(p.path);
@@ -810,6 +814,12 @@ function applyTreeFilter(query) {
     return;
   }
 
+  // Build a path→entry map for O(1) ancestor lookup.
+  const pathMap = new Map();
+  for (const f of treeIndex.files) {
+    pathMap.set(f.path, f);
+  }
+
   // Collect all paths that need to be visible:
   // matching files + all their ancestor directories.
   const visiblePaths = new Set();
@@ -818,7 +828,7 @@ function applyTreeFilter(query) {
     let p = m.parentPath;
     while (p) {
       visiblePaths.add(p);
-      const parent = treeIndex.files.find((f) => f.path === p);
+      const parent = pathMap.get(p);
       p = parent?.parentPath || null;
     }
   }
@@ -848,39 +858,23 @@ function applyTreeFilter(query) {
   }
 
   // Render top-level entries (parentPath === null).
-  renderFilteredChildren(null, 0, childrenMap, visiblePaths);
+  renderFilteredChildren(null, 0, childrenMap, fileTree);
 }
 
-function renderFilteredChildren(parentPath, depth, childrenMap, visiblePaths) {
+function renderFilteredChildren(parentPath, depth, childrenMap, container) {
   const children = childrenMap.get(parentPath) || [];
   for (const entry of children) {
     const item = createTreeItem(entry, depth);
-    fileTree.appendChild(item);
+    container.appendChild(item);
     if (entry.isDirectory) {
-      // Mark as expanded and render children inline.
+      // Mark as expanded and recursively render children.
       item.dataset.expanded = 'true';
       item.setAttribute('aria-expanded', 'true');
       const childContainer = document.createElement('div');
       childContainer.className = 'tree-children';
-      const childEntries = childrenMap.get(entry.path) || [];
-      for (const child of childEntries) {
-        const childItem = createTreeItem(child, depth + 1);
-        childContainer.appendChild(childItem);
-        if (child.isDirectory) {
-          // Recursively render nested children.
-          childItem.dataset.expanded = 'true';
-          childItem.setAttribute('aria-expanded', 'true');
-          const nested = document.createElement('div');
-          nested.className = 'tree-children';
-          const nestedEntries = childrenMap.get(child.path) || [];
-          for (const nc of nestedEntries) {
-            const ncItem = createTreeItem(nc, depth + 2);
-            nested.appendChild(ncItem);
-          }
-          childContainer.appendChild(nested);
-        }
-      }
-      fileTree.appendChild(childContainer);
+      childContainer.setAttribute('role', 'group');
+      renderFilteredChildren(entry.path, depth + 1, childrenMap, childContainer);
+      container.appendChild(childContainer);
     }
   }
 }
@@ -947,15 +941,8 @@ if (treeFilterInput) {
       applyTreeFilter(treeFilterInput.value);
     }, 80);
   });
-  // Escape in the filter input clears it.
-  treeFilterInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      closeTreeFilter();
-      fileTree.focus();
-    }
-  });
+  // Escape in the filter input is handled by the keybinding registry
+  // (tree_filter_clear, when: treeFocus). No individual handler needed.
 }
 
 // Search button toggles the filter bar.
@@ -1005,10 +992,11 @@ function getTreeCreateParent(projectPath) {
 
 treeReloadBtn.addEventListener('click', async () => {
   const project = projects.get(activeProjectId);
-  if (project) {
-    await loadFileTree(project.path);
-    buildTreeIndex(project.path);
-  }
+  if (!project) return;
+  // Clear filter state so reload shows the full tree, not stale filtered view.
+  if (treeFilterActive) clearTreeFilter();
+  await loadFileTree(project.path);
+  buildTreeIndex(project.path);
 });
 
 treeNewFileBtn.addEventListener('click', async () => {
@@ -1025,6 +1013,7 @@ treeNewFileBtn.addEventListener('click', async () => {
   }
   // 作成先が畳まれていると結果が見えないので開いておく
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
+  if (treeFilterActive) clearTreeFilter();
   await loadFileTree(project.path);
   buildTreeIndex(project.path);
   openFileInEditor(filePath, name.split(/[\\/]/).pop());
@@ -1043,6 +1032,7 @@ treeNewFolderBtn.addEventListener('click', async () => {
     return;
   }
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
+  if (treeFilterActive) clearTreeFilter();
   await loadFileTree(project.path);
   buildTreeIndex(project.path);
 });
@@ -3022,8 +3012,9 @@ document.addEventListener('mouseup', () => {
 // File path patterns for link detection in terminal output.
 // Matches absolute paths (Windows drive letter or POSIX /) and relative
 // paths that contain a dot in the filename (to reduce false positives).
-// Optional :line or :line:col suffix is captured.
-const FILE_PATH_RE = /(?:[A-Za-z]:[\\/][^\s'"<>|*?]+|\/[^\s'"<>|*?]+|[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-][^\s'"<>|*?]*)(?::(\d+))?(?::(\d+))?/g;
+// The path portion excludes ':' so that :line:col suffix is captured
+// separately and not included in the file path.
+const FILE_PATH_RE = /(?:[A-Za-z]:[\\/](?:[^\s'"<>|*?:]+[\\/])*[^\s'"<>|*?:]+|\/(?:[^\s'"<>|*?:]+[\\/])*[^\s'"<>|*?:]+|[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-][^\s'"<>|*?:]*)(?::(\d+))?(?::(\d+))?/g;
 
 // Extensions that are better opened in preview rather than the text editor.
 const PREVIEW_EXTENSIONS = new Set([
@@ -3086,18 +3077,40 @@ function registerFilePathLinkProvider(terminal, { cwd, projectId }) {
   });
 }
 
-function openTerminalLinkFile(filePath, lineNum, colNum, projectId) {
+async function openTerminalLinkFile(filePath, lineNum, colNum, projectId) {
   const name = filePath.split(/[/\\]/).pop();
   const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
   // Switch to the owning project if different from active.
   if (projectId && projectId !== activeProjectId) {
     dispatch('select_project', { projectId });
   }
+  const line = lineNum ? parseInt(lineNum, 10) : 0;
   if (PREVIEW_EXTENSIONS.has(ext)) {
-    dispatch('open_preview', { path: filePath, name });
+    const shown = await dispatch('open_preview', { path: filePath, name });
+    if (line > 0 && shown?.shown && shown.previewPath) {
+      await dispatch('preview_reveal', { previewPath: shown.previewPath, line });
+    }
   } else {
-    dispatch('open_file', { path: filePath, name });
+    await dispatch('open_file', { path: filePath, name });
+    // Jump to the line in the textarea editor.
+    if (line > 0 && activeMainFilePath === filePath) {
+      jumpEditorToLine(line);
+    }
   }
+}
+
+// Scroll the textarea editor to a specific 1-based line number.
+function jumpEditorToLine(line) {
+  const content = fileEditorTextarea.value;
+  const lines = content.split('\n');
+  let offset = 0;
+  for (let i = 0; i < Math.min(line - 1, lines.length); i++) {
+    offset += lines[i].length + 1;
+  }
+  fileEditorTextarea.focus();
+  fileEditorTextarea.setSelectionRange(offset, offset);
+  // Approximate scroll: line height ~ 18px.
+  fileEditorTextarea.scrollTop = Math.max(0, (line - 1) * 18);
 }
 
 async function createTerminal(command, cwd, projectId, savedLabel) {
@@ -3629,12 +3642,17 @@ function getFocusContext() {
 }
 
 document.addEventListener('keydown', (e) => {
+  // Ctrl+V is handled by a dedicated listener below (clipboard image paste).
+  // It must NOT be preventDefault'd so native paste still works in terminals
+  // and textareas. The keybinding registry deliberately omits Ctrl+V.
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key === 'v') return;
+
   // Don't intercept when typing in input fields that aren't part of the
   // main editing surfaces (project name input, prompt modal, etc).
   // Those have their own keydown handlers.
   const ae = document.activeElement;
-  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== fileEditorTextarea) {
-    // Allow global bindings (Ctrl+B, Ctrl+Shift+F) even in inputs.
+  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== fileEditorTextarea && ae !== treeFilterInput) {
+    // Allow global bindings (Ctrl+Shift+F) even in inputs.
     const key = keyToString(e);
     const isGlobal = BINDINGS.some(b => b.key === key && (b.when === null || b.when === undefined || b.when === ''));
     if (!isGlobal) return;
@@ -3646,6 +3664,19 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     e.stopPropagation();
     dispatch(binding.command, binding.args || {});
+  }
+});
+
+// ============================================================
+// Clipboard paste (Ctrl+V) -> save screenshot -> append path to scratch
+// ============================================================
+// Not in the keybinding registry because it must NOT preventDefault —
+// native paste must still work in terminals and textareas. This listener
+// only acts when there's an image in the clipboard; text paste falls
+// through to the browser's default behavior.
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key === 'v') {
+    dispatch('terminal_paste_image');
   }
 });
 
@@ -4180,6 +4211,7 @@ register('tree_filter_focus', () => {
 
 register('tree_filter_clear', () => {
   closeTreeFilter();
+  fileTree.focus();
 });
 
 register('search_text_open', () => {
@@ -4651,6 +4683,9 @@ function closeSearchTab() {
   if (!searchTabEl) return;
   searchTabEl.remove();
   searchTabEl = null;
+  // Restore visibility of editor/preview tabs.
+  openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
+  previewFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
   // Switch back to terminal or editor.
   if (activeTabId !== null) {
     const t = tabs.get(activeTabId);
@@ -4714,8 +4749,9 @@ window.api.onSearchDone(({ searchId, truncated, totalCount, error, cancelled }) 
 function appendSearchResult(result) {
   searchResultCount++;
 
-  // Group by file. Check if the last file header matches.
-  const lastFile = searchResults.querySelector('.search-result-file:last-of-type');
+  // Group by file. Check if the last child is a header for the same file.
+  const lastChild = searchResults.lastElementChild;
+  const lastFile = lastChild?.classList.contains('search-result-file') ? lastChild : null;
   const relativePath = getRelativePath(result.file);
 
   if (!lastFile || lastFile.dataset.path !== result.file) {
