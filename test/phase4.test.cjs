@@ -78,8 +78,9 @@ test('scratch composer remains a separate persistent lower surface', () => {
   assert.doesNotMatch(css, /#editor-pane:focus-within/);
   assert.match(renderer, /SCRATCH_COMPACT_HEIGHT = 112/);
   assert.match(renderer, /SCRATCH_DEFAULT_EXPANDED_HEIGHT = 220/);
-  assert.match(renderer, /editorPane\.addEventListener\('focusin'[\s\S]*setScratchExpanded\(true\)/);
-  assert.match(renderer, /editorPane\.addEventListener\('focusout'[\s\S]*setScratchExpanded\(false\)/);
+  // Scratch size is stable — no focusin/focusout expand/shrink handlers.
+  assert.doesNotMatch(renderer, /editorPane\.addEventListener\('focusin'/);
+  assert.doesNotMatch(renderer, /editorPane\.addEventListener\('focusout'/);
   assert.match(renderer, /savedScratchEditorHeight = clampScratchExpandedHeight\(editorPane\.offsetHeight\)/);
 });
 

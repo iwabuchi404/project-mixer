@@ -2653,7 +2653,9 @@ function showEditorPane() {
   if (scratchCollapsed) {
     applyScratchHeight(34);
   } else {
-    setScratchExpanded(editorPane.contains(document.activeElement));
+    // Always show at saved height — no focus-based expand/shrink.
+    editorPane.classList.add('expanded');
+    applyScratchHeight(clampScratchExpandedHeight(savedScratchEditorHeight));
   }
 }
 
@@ -2701,7 +2703,10 @@ function setScratchCollapsed(collapsed) {
     editorPane.classList.remove('expanded');
     applyScratchHeight(34);
   } else {
-    setScratchExpanded(editorPane.contains(document.activeElement));
+    // Always show at saved height — no focus-based expand/shrink.
+    scratchExpanded = true;
+    editorPane.classList.add('expanded');
+    applyScratchHeight(clampScratchExpandedHeight(savedScratchEditorHeight));
   }
 }
 
@@ -2710,17 +2715,8 @@ scratchCollapseBtn.addEventListener('click', () => {
   if (!scratchCollapsed) editorTextarea.focus();
 });
 
-editorPane.addEventListener('focusin', () => {
-  if (!scratchCollapsed) setScratchExpanded(true);
-});
-
-editorPane.addEventListener('focusout', () => {
-  setTimeout(() => {
-    if (!scratchCollapsed && !splitterDragging && !editorPane.contains(document.activeElement)) {
-      setScratchExpanded(false);
-    }
-  }, 0);
-});
+// No focusin/focusout handlers — scratch size is stable regardless of focus.
+// Size changes only via collapse button and splitter drag.
 
 function showMainEditorSurface() {
   showMainSurface('file');
@@ -3042,7 +3038,7 @@ document.addEventListener('mouseup', () => {
       localStorage.setItem('pm-scratch-expanded-height', String(savedScratchEditorHeight));
     } catch {}
     document.body.style.cursor = '';
-    if (!editorPane.contains(document.activeElement)) setScratchExpanded(false);
+    // No focus-based shrink — keep the height the user dragged to.
   }
 });
 
