@@ -4242,6 +4242,13 @@ register('terminal_copy', () => {
   }
 });
 
+register('terminal_select_all', () => {
+  if (activeTabId === null) return;
+  const t = tabs.get(activeTabId);
+  if (!t) return;
+  t.terminal.selectAll();
+});
+
 register('terminal_paste_image', async () => {
   if (activeTabId === null) return;
   const p = projects.get(activeProjectId);

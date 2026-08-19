@@ -190,7 +190,7 @@ function setupApplicationMenu() {
       submenu: [
         {
           label: 'Add Project...',
-          accelerator: 'CmdOrCtrl+Shift+A',
+          ...displayOnly('CmdOrCtrl+Shift+A'),
           click: () => dispatchToRenderer('add_project'),
         },
         {
@@ -222,7 +222,7 @@ function setupApplicationMenu() {
         { role: 'cut' },
         { role: 'copy' },
         { role: 'paste' },
-        { role: 'selectAll' },
+        { ...displayOnly('CmdOrCtrl+A'), role: 'selectAll' },
       ],
     },
     // View menu

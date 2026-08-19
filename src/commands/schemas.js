@@ -71,6 +71,7 @@ export const COMMAND_SCHEMAS = {
   tree_filter_clear: p({}),
   // Phase 5 S2: text search
   search_text_open: p({}),
+  terminal_select_all: p({}),
   search_text: p({ query: z.string(), cwd: optStr, caseSensitive: optBool }),
   search_close: p({}),
 };

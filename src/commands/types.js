@@ -170,6 +170,10 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  terminal_select_all: {
+    args: {},
+    returns: 'void',
+  },
   search_text: {
     args: { query: 'string', cwd: 'string?', caseSensitive: 'boolean?' },
     returns: 'SearchResult',

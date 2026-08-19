@@ -26,6 +26,7 @@ export const BINDINGS = [
   { key: 'Ctrl+I', command: 'focus_scratch', when: 'scratchFocus' },
   { key: 'Ctrl+Shift+Z', command: 'undo_last_send', when: 'scratchFocus' },
   { key: 'Ctrl+Shift+C', command: 'terminal_copy', when: 'terminalFocus' },
+  { key: 'Ctrl+A', command: 'terminal_select_all', when: 'terminalFocus' },
   { key: 'Ctrl+B', command: 'toggle_sidebar', when: '!terminalFocus' },
   { key: 'Escape', command: 'close_overlay_menus', when: '!findOpen && !treeFocus && !treeFilterFocus && !searchFocus' },
 
