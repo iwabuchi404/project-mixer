@@ -199,7 +199,7 @@ function setupApplicationMenu() {
         },
         {
           label: 'New Folder',
-          accelerator: 'CmdOrCtrl+Shift+N',
+          ...displayOnly('CmdOrCtrl+Shift+N'),
           click: () => dispatchToRenderer('new_folder'),
         },
         { type: 'separator' },
@@ -213,19 +213,23 @@ function setupApplicationMenu() {
       ],
     },
     // Edit menu
+    // All roles use displayOnly so terminal shortcuts (Ctrl+C=SIGINT,
+    // Ctrl+Z=suspend, Ctrl+V=paste, Ctrl+X, Ctrl+A) are not intercepted.
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        { ...displayOnly('CmdOrCtrl+Z'), role: 'undo' },
+        { ...displayOnly('CmdOrCtrl+Shift+Z'), role: 'redo' },
         { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
+        { ...displayOnly('CmdOrCtrl+X'), role: 'cut' },
+        { ...displayOnly('CmdOrCtrl+C'), role: 'copy' },
+        { ...displayOnly('CmdOrCtrl+V'), role: 'paste' },
         { ...displayOnly('CmdOrCtrl+A'), role: 'selectAll' },
       ],
     },
     // View menu
+    // reload (Ctrl+R) and zoom (Ctrl+=/-) use displayOnly so terminal
+    // reverse-search (Ctrl+R) and other shortcuts are not intercepted.
     {
       label: 'View',
       submenu: [
@@ -235,12 +239,12 @@ function setupApplicationMenu() {
           click: () => dispatchToRenderer('toggle_sidebar'),
         },
         { type: 'separator' },
-        { role: 'reload' },
+        { ...displayOnly('CmdOrCtrl+R'), role: 'reload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        { ...displayOnly('CmdOrCtrl+0'), role: 'resetZoom' },
+        { ...displayOnly('CmdOrCtrl+='), role: 'zoomIn' },
+        { ...displayOnly('CmdOrCtrl+-'), role: 'zoomOut' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
@@ -251,7 +255,7 @@ function setupApplicationMenu() {
       submenu: [
         {
           label: 'New Terminal',
-          accelerator: 'CmdOrCtrl+Shift+T',
+          ...displayOnly('CmdOrCtrl+Shift+T'),
           click: () => dispatchToRenderer('create_terminal'),
         },
         {
