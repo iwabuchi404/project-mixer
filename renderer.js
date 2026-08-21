@@ -57,8 +57,8 @@ const PREVIEW_FONT = {
   linux: '"Noto Sans Mono CJK JP", "DejaVu Sans Mono", "Liberation Mono", monospace',
 }[PLATFORM];
 
-const WIN_COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin'];
-const UNIX_COMMANDS = ['bash', 'zsh', 'sh', 'claude', 'codex', 'devin'];
+const WIN_COMMANDS = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe', 'claude', 'codex', 'devin', 'opencode'];
+const UNIX_COMMANDS = ['bash', 'zsh', 'sh', 'claude', 'codex', 'devin', 'opencode'];
 const COMMANDS = IS_WIN ? WIN_COMMANDS : UNIX_COMMANDS;
 
 const TERMINAL_LABELS = {
@@ -72,6 +72,7 @@ const TERMINAL_LABELS = {
   'claude': 'Claude Code',
   'codex': 'Codex',
   'devin': 'Devin CLI',
+  'opencode': 'OpenCode',
 };
 
 function defaultShell() {
@@ -371,7 +372,7 @@ const WAITING_PATTERNS = [
 ];
 
 function detectWaiting(command, data) {
-  const isAgent = command === 'claude' || command === 'codex';
+  const isAgent = command === 'claude' || command === 'codex' || command === 'opencode';
   if (!isAgent) return false;
   const stripped = stripAnsi(data);
   const lines = stripped.split(/\r?\n/);
