@@ -432,6 +432,11 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
 
   let ptyProcess;
   try {
+    // OpenCode uses OPENCODE_CONFIG_CONTENT env var for runtime config overrides
+    // (not CLI args). Inject MCP server config so OpenCode discovers the session.
+    const opencodeEnv = (mcpUrl && command === 'opencode')
+      ? { OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp: { 'project-mixer': { type: 'remote', url: mcpUrl, enabled: true } } }) }
+      : {};
     ptyProcess = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols: cols || 80,
@@ -444,6 +449,7 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
         PROJECT_MIXER_PTY_ID: String(id),
         // 3.5: inject a per-PTY MCP URL so agents discover only their session.
         ...(mcpUrl ? { PM_MCP_URL: mcpUrl } : {}),
+        ...opencodeEnv,
       },
     });
   } catch (error) {
@@ -530,7 +536,7 @@ ipcMain.handle('command:check', async (event, { commands }) => {
   // The --version fallback is restricted to known agent commands that may
   // be installed as shell functions or aliases not discoverable by where/which.
   // Allowing arbitrary commands here would let hook data execute any binary.
-  const VERSION_FALLBACK_ALLOWED = new Set(['claude', 'codex']);
+  const VERSION_FALLBACK_ALLOWED = new Set(['claude', 'codex', 'opencode']);
   for (const cmd of commands) {
     try {
       if (os.platform() === 'win32') {
@@ -1151,6 +1157,10 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   // Do not rewrite either automatically: changing notify would replace the
   // user's command, while project hooks require an explicit trust review.
   results.push({ tool: 'codex', success: true, note: 'Ready for Codex notify or trusted project hooks' });
+
+  // OpenCode: MCP is injected via OPENCODE_CONFIG_CONTENT env var at PTY
+  // creation time, so no project-level hook setup is needed.
+  results.push({ tool: 'opencode', success: true, note: 'MCP injected via OPENCODE_CONFIG_CONTENT env var' });
 
   return results;
 });
