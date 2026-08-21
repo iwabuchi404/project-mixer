@@ -782,7 +782,7 @@ textarea:focus-visible,
 #terminal-container,
 #preview-content,
 #preview-webview,
-#file-editor-textarea {
+#file-editor-mount {
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -828,14 +828,17 @@ textarea:focus-visible,
   visibility: hidden;
 }
 
-#file-editor-textarea,
+#file-editor-mount,
 #editor-textarea {
   display: block;
   width: 100%;
   height: 100%;
-  resize: none;
   color: var(--g-5);
   background: var(--g-1);
+}
+
+#editor-textarea {
+  resize: none;
   border: 0;
   border-radius: 0;
   outline: 0;
@@ -845,8 +848,59 @@ textarea:focus-visible,
   overflow: auto;
 }
 
-#file-editor-textarea {
+/* CodeMirror 6 (Phase 4.5 A1): match the previous textarea look.
+   Padding moved from the textarea to the mount so the gutter aligns
+   with the content edge. */
+#file-editor-mount {
   padding: var(--s-4);
+  box-sizing: border-box;
+}
+
+#file-editor-mount .cm-editor {
+  height: 100%;
+  background: var(--g-1);
+  color: var(--g-5);
+  font: var(--t-md)/1.55 var(--mono);
+}
+
+#file-editor-mount .cm-editor.cm-focused {
+  outline: none;
+}
+
+#file-editor-mount .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.55;
+  overflow: auto;
+}
+
+#file-editor-mount .cm-content {
+  caret-color: var(--g-5);
+  padding: 0;
+}
+
+#file-editor-mount .cm-gutters {
+  background: var(--g-1);
+  color: var(--g-4);
+  border-right: 1px solid var(--g-2);
+}
+
+#file-editor-mount .cm-activeLine {
+  background: var(--g-2);
+}
+
+#file-editor-mount .cm-activeLineGutter {
+  background: var(--g-2);
+  color: var(--g-5);
+}
+
+#file-editor-mount .cm-cursor,
+#file-editor-mount .cm-dropCursor {
+  border-left-color: var(--g-5);
+}
+
+#file-editor-mount .cm-selectionBackground,
+#file-editor-mount.cm-focused .cm-selectionBackground {
+  background: var(--g-3) !important;
 }
 
 #file-editor-pane {

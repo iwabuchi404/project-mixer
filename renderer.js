@@ -23,11 +23,12 @@ import {
 import { getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
 import { PREVIEW_CSP } from './src/preview/security.js';
 import { getBrowserTabLabel, normalizeLocalBrowserUrl } from './src/ui/browser.mjs';
+import { createEditorKit, revealLine } from './src/editor/cm6.mjs';
+import { isDocDirty, getCursorLine, getSelectionLines, detectEol, applyEol } from './src/editor/doc-state.mjs';
 import {
   INTERNAL_FILE_MIME,
   captureTerminalFollowToken,
   captureExpandedPaneWidth,
-  getEditorSurfaceKind,
   invalidateTerminalFollow,
   quotePathForCommand,
   shouldFollowTerminalOutput,
@@ -127,7 +128,7 @@ const newTabBtn = document.getElementById('new-tab-btn');
 const editorPane = document.getElementById('editor-pane');
 const editorTextarea = document.getElementById('editor-textarea');
 const fileEditorPane = document.getElementById('file-editor-pane');
-const fileEditorTextarea = document.getElementById('file-editor-textarea');
+const fileEditorMount = document.getElementById('file-editor-mount');
 const previewWebview = document.getElementById('preview-webview');
 const previewPane = document.getElementById('preview-pane');
 const searchPane = document.getElementById('search-pane');
@@ -1540,7 +1541,10 @@ confirmModal.addEventListener('keydown', (e) => {
 // ============================================================
 
 const SCRATCH_PATH = '__scratch__';
-let openFiles = new Map(); // path -> { path, name, content, originalContent, tabEl, isScratch }
+// path -> { path, name, content, originalContent, state, scrollTop, tabEl, isScratch }
+// Main files: `state` (CM6 EditorState) is authoritative; `content` mirrors
+// state.doc for legacy readers and scratch. Scratch stays a plain string.
+let openFiles = new Map();
 let previewFiles = new Map(); // previewPath -> { path, name, tabEl, isPreview, previewPath, projectId }
 let activeFilePath = null;
 let activePreviewPath = null;
@@ -1564,6 +1568,42 @@ let scratchExpanded = false;
 
 let draggedEditorTab = null;
 
+// Phase 4.5 A1/A2: single CM6 EditorView; per-file EditorState lives in
+// openFiles entries and is swapped in via setState on tab switch.
+let currentlyMountedPath = null;
+
+const editorKit = createEditorKit({
+  parent: fileEditorMount,
+  doc: '',
+  onDocChanged: (update) => {
+    const f = openFiles.get(currentlyMountedPath);
+    if (!f) return;
+    f.state = update.state;
+    f.content = update.state.doc.toString();
+    dispatch('update_editor_content', { filePath: f.path, content: f.content });
+  },
+  onSelectionChanged: () => dispatch('update_editor_selection'),
+});
+const fileEditorView = editorKit.view;
+
+function syncMountedFileScroll() {
+  const f = currentlyMountedPath !== null ? openFiles.get(currentlyMountedPath) : null;
+  if (f) f.scrollTop = fileEditorView.scrollDOM.scrollTop;
+}
+
+function mountFileDoc(f, { focus = true } = {}) {
+  syncMountedFileScroll();
+  currentlyMountedPath = f.path;
+  if (fileEditorView.state !== f.state) {
+    fileEditorView.setState(f.state);
+  }
+  fileEditorView.scrollDOM.scrollTop = f.scrollTop || 0;
+  updateEditorDirty(f.path);
+  if (focus) fileEditorView.focus();
+  requestAnimationFrame(() => fileEditorView.requestMeasure());
+  updateEditorCursorState();
+}
+
 function saveCurrentEditorState() {
   if (!editorStateInitialized) return;
   projectEditorStates.set(activeEditorProjectId, {
@@ -1585,6 +1625,7 @@ function switchProjectEditor(projectId) {
   if (editorStateInitialized && activeEditorProjectId === projectId) return;
 
   saveCurrentEditorState();
+  syncMountedFileScroll();
   openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = 'none'; });
   // Hide all preview tabs, will show matching ones below
   previewFiles.forEach((f) => { f.tabEl.style.display = 'none'; });
@@ -2541,11 +2582,18 @@ async function openFileInEditor(filePath, name) {
     return;
   }
 
+  // EditorState.create normalizes CRLF to LF: keep the doc text and the
+  // dirty-detection baseline in normalized form, and restore the file's
+  // own EOL when saving (applyEol in saveActiveFile).
+  const state = editorKit.createState(result.content);
   const fileData = {
     path: filePath,
     name,
-    content: result.content,
-    originalContent: result.content,
+    content: state.doc.toString(),
+    originalContent: state.doc.toString(),
+    eol: detectEol(result.content),
+    state,
+    scrollTop: 0,
     tabEl: null,
     isScratch: false,
     projectId,
@@ -2593,11 +2641,7 @@ function switchEditorTab(filePath, { focus = true } = {}) {
   activeMainFilePath = filePath;
   activeMainView = 'file';
   showMainSurface('file');
-  fileEditorTextarea.value = f.content;
-  updateEditorDirty(filePath);
-  if (focus) fileEditorTextarea.focus();
-  // Recalculate cursor/selection for the newly focused file
-  updateEditorCursorState();
+  mountFileDoc(f, { focus });
   return true;
 }
 
@@ -2719,19 +2763,6 @@ scratchCollapseBtn.addEventListener('click', () => {
 // No focusin/focusout handlers — scratch size is stable regardless of focus.
 // Size changes only via collapse button and splitter drag.
 
-function showMainEditorSurface() {
-  showMainSurface('file');
-}
-
-function applyEditorSurface(file) {
-  if (getEditorSurfaceKind(file) === 'scratch') {
-    showEditorPane();
-  } else {
-    showMainEditorSurface();
-    fileEditorTextarea.value = file.content;
-  }
-}
-
 function hideEditorPane() {
   editorPane.classList.add('hidden');
   splitter.classList.add('hidden');
@@ -2741,7 +2772,7 @@ function hideEditorPane() {
 function updateEditorDirty(filePath) {
   const f = openFiles.get(filePath);
   if (!f || f.isScratch) return;
-  const dirty = f.content !== f.originalContent;
+  const dirty = isDocDirty(f.state, f.originalContent);
   const dirtyEl = f.tabEl.querySelector('.editor-tab-dirty');
   if (dirtyEl) {
     if (dirty) dirtyEl.classList.remove('hidden');
@@ -2785,10 +2816,6 @@ editorTextarea.addEventListener('focus', () => {
   if (composer) selectComposerTab(composer, { focus: false });
 });
 
-fileEditorTextarea.addEventListener('input', () => {
-  dispatch('update_editor_content', { filePath: activeMainFilePath, content: fileEditorTextarea.value });
-});
-
 // Update cursor/selection state for get_focus
 function updateEditorCursorState() {
   const f = activeFilePath ? openFiles.get(activeFilePath) : null;
@@ -2796,27 +2823,27 @@ function updateEditorCursorState() {
     setState({ cursorLine: null, selection: null });
     return;
   }
-  const input = f.isScratch ? editorTextarea : fileEditorTextarea;
-  const value = input.value;
-  const pos = input.selectionStart;
-  const line = value.substring(0, pos).split('\n').length;
-  const selStart = input.selectionStart;
-  const selEnd = input.selectionEnd;
-  let selection = null;
-  if (selEnd > selStart) {
-    const startLine = value.substring(0, selStart).split('\n').length;
-    const endLine = value.substring(0, selEnd).split('\n').length;
-    selection = { startLine, endLine };
+  if (f.isScratch) {
+    const value = editorTextarea.value;
+    const pos = editorTextarea.selectionStart;
+    const line = value.substring(0, pos).split('\n').length;
+    let selection = null;
+    if (editorTextarea.selectionEnd > pos) {
+      selection = {
+        startLine: line,
+        endLine: value.substring(0, editorTextarea.selectionEnd).split('\n').length,
+      };
+    }
+    setState({ cursorLine: line, selection });
+    return;
   }
-  setState({ cursorLine: line, selection });
+  const state = f.state || fileEditorView.state;
+  setState({ cursorLine: getCursorLine(state), selection: getSelectionLines(state) });
 }
 
 editorTextarea.addEventListener('keyup', () => dispatch('update_editor_selection'));
 editorTextarea.addEventListener('click', () => dispatch('update_editor_selection'));
 editorTextarea.addEventListener('select', () => dispatch('update_editor_selection'));
-fileEditorTextarea.addEventListener('keyup', () => dispatch('update_editor_selection'));
-fileEditorTextarea.addEventListener('click', () => dispatch('update_editor_selection'));
-fileEditorTextarea.addEventListener('select', () => dispatch('update_editor_selection'));
 
 function insertIndent(input) {
   const start = input.selectionStart;
@@ -2834,20 +2861,13 @@ editorTextarea.addEventListener('keydown', (e) => {
   }
 });
 
-fileEditorTextarea.addEventListener('keydown', (e) => {
-  // Tab indentation is text input behavior, not a keybinding.
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    insertIndent(fileEditorTextarea);
-  }
-});
-
 async function saveActiveFile() {
   if (!activeFilePath) return;
   const f = openFiles.get(activeFilePath);
   if (!f || f.isScratch) return;
 
-  const result = await window.api.writeFile(f.path, f.content);
+  const text = applyEol(f.content, f.eol || '\n');
+  const result = await window.api.writeFile(f.path, text);
   if (result.success) {
     f.originalContent = f.content;
     updateEditorDirty(activeFilePath);
@@ -2857,20 +2877,6 @@ async function saveActiveFile() {
 // ============================================================
 // Send to terminal (D8: bracketed paste)
 // ============================================================
-
-// 3.1 push: build a compact context block from current focus state
-function getSelectionRange() {
-  const f = openFiles.get(activeFilePath);
-  const input = f?.isScratch ? editorTextarea : fileEditorTextarea;
-  const start = input.selectionStart;
-  const end = input.selectionEnd;
-  if (start === end) return null;
-  const before = input.value.substring(0, start);
-  const selected = input.value.substring(start, end);
-  const startLine = before.split('\n').length;
-  const endLine = startLine + selected.split('\n').length - 1;
-  return { startLine, endLine };
-}
 
 function buildPushFocusContext({ project, activeFilePath, isPreview, selectedText, selectionRange }) {
   const parts = [];
@@ -3143,20 +3149,10 @@ async function openTerminalLinkFile(filePath, lineNum, colNum, projectId) {
   }
 }
 
-// Scroll the textarea editor to a specific 1-based line number.
+// Scroll the editor to a specific 1-based line number.
 function jumpEditorToLine(line) {
-  const content = fileEditorTextarea.value;
-  const lines = content.split('\n');
-  let offset = 0;
-  for (let i = 0; i < Math.min(line - 1, lines.length); i++) {
-    offset += lines[i].length + 1;
-  }
-  fileEditorTextarea.focus();
-  fileEditorTextarea.setSelectionRange(offset, offset);
-  // Measure actual line height from the textarea instead of hardcoding.
-  const computed = getComputedStyle(fileEditorTextarea);
-  const lineHeight = parseFloat(computed.lineHeight) || 18;
-  fileEditorTextarea.scrollTop = Math.max(0, (line - 1) * lineHeight);
+  revealLine(fileEditorView, line);
+  updateEditorCursorState();
 }
 
 async function createTerminal(command, cwd, projectId, savedLabel) {
@@ -3678,7 +3674,7 @@ validateBindings(BINDINGS);
 function getFocusContext() {
   const ae = document.activeElement;
   if (ae === editorTextarea) return new Set(['scratchFocus']);
-  if (ae === fileEditorTextarea) return new Set(['editorFocus']);
+  if (ae && fileEditorMount.contains(ae)) return new Set(['editorFocus']);
   // treeFilterFocus: filter input is focused. Slash binding (treeFocus)
   // won't fire, so / can be typed. Escape binding (treeFocus || treeFilterFocus)
   // will fire, so Escape clears the filter.
@@ -3704,7 +3700,7 @@ document.addEventListener('keydown', (e) => {
   // main editing surfaces (project name input, prompt modal, etc).
   // Those have their own keydown handlers.
   const ae = document.activeElement;
-  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== fileEditorTextarea && ae !== treeFilterInput && ae !== searchInput) {
+  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== treeFilterInput && ae !== searchInput) {
     // Allow global bindings (Ctrl+Shift+F) even in inputs.
     const key = keyToString(e);
     const isGlobal = BINDINGS.some(b => b.key === key && (b.when === null || b.when === undefined || b.when === ''));
@@ -3945,8 +3941,8 @@ mainPane.addEventListener('dragover', (e) => {
   }
 });
 mainPane.addEventListener('drop', (e) => {
-  // Don't intercept if dropping on textarea or terminal (they have their own handlers)
-  if (e.target === editorTextarea || e.target === fileEditorTextarea || e.target.closest('#terminal-container')) return;
+  // Don't intercept if dropping on the editor or terminal (they have their own handlers)
+  if (e.target === editorTextarea || fileEditorMount.contains(e.target) || e.target.closest('#terminal-container')) return;
   e.preventDefault();
   const paths = getDroppedFilePaths(e);
   for (const p of paths) {

@@ -70,7 +70,7 @@ test('scratch composer remains a separate persistent lower surface', () => {
   assert.match(html, /id="main-surface"[\s\S]*id="splitter"[\s\S]*id="editor-pane"/);
   assert.match(html, /id="scratch-header"[\s\S]*id="send-target"[\s\S]*id="send-btn"[\s\S]*id="scratch-collapse-btn"[\s\S]*id="editor-textarea"/);
   assert.doesNotMatch(html, /id="editor-tab-bar"|id="send-bar"/);
-  assert.match(html, /id="file-editor-textarea"/);
+  assert.match(html, /id="file-editor-mount"/);
   const css = read('styles.css');
   const renderer = read('renderer.js');
   assert.match(css, /#editor-pane\s*\{[\s\S]*height:\s*112px/);
