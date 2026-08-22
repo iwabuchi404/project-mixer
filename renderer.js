@@ -419,7 +419,11 @@ const WAITING_PATTERNS = [
 ];
 
 function detectWaiting(command, data) {
-  const isAgent = command === 'claude' || command === 'codex' || command === 'opencode';
+  // opencode deliberately NOT scraped: its notification bridge plugin
+  // (.opencode/plugins/project-mixer.js, installed by hook:setup) delivers
+  // real lifecycle events over /hook. Scraping the TUI caused both missed
+  // prompts and false amber dots on redraws.
+  const isAgent = command === 'claude' || command === 'codex';
   if (!isAgent) return false;
   const stripped = stripAnsi(data);
   const lines = stripped.split(/\r?\n/);

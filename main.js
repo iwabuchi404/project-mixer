@@ -7,6 +7,7 @@ const http = require('http');
 const pty = require('node-pty');
 const { execSync, spawn } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
+const { PLUGIN_SOURCE: OPENCODE_PLUGIN_SOURCE } = require('./src/main/opencode-plugin-source.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
@@ -449,6 +450,9 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
         PROJECT_MIXER_PTY_ID: String(id),
         // 3.5: inject a per-PTY MCP URL so agents discover only their session.
         ...(mcpUrl ? { PM_MCP_URL: mcpUrl } : {}),
+        // OpenCode plugin bridge: POST /hook target for lifecycle events
+        // (session.status idle -> stop, permission.asked, question.asked).
+        ...(HOOK_PORT ? { PM_HOOK_URL: `http://127.0.0.1:${HOOK_PORT}/hook` } : {}),
         ...opencodeEnv,
       },
     });
@@ -1158,9 +1162,18 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   // user's command, while project hooks require an explicit trust review.
   results.push({ tool: 'codex', success: true, note: 'Ready for Codex notify or trusted project hooks' });
 
-  // OpenCode: MCP is injected via OPENCODE_CONFIG_CONTENT env var at PTY
-  // creation time, so no project-level hook setup is needed.
-  results.push({ tool: 'opencode', success: true, note: 'MCP injected via OPENCODE_CONFIG_CONTENT env var' });
+  // OpenCode: install the notification bridge plugin into the project.
+  // The plugin is inert unless the PTY env provides PM_HOOK_URL (injected at
+  // terminal creation), so writing it is side-effect free for other setups.
+  const opencodePluginDir = path.join(projectPath, '.opencode', 'plugins');
+  const opencodePluginPath = path.join(opencodePluginDir, 'project-mixer.js');
+  try {
+    if (!fs.existsSync(opencodePluginDir)) fs.mkdirSync(opencodePluginDir, { recursive: true });
+    fs.writeFileSync(opencodePluginPath, OPENCODE_PLUGIN_SOURCE, 'utf-8');
+    results.push({ tool: 'opencode', success: true, path: opencodePluginPath });
+  } catch (e) {
+    results.push({ tool: 'opencode', success: false, error: e.message });
+  }
 
   return results;
 });

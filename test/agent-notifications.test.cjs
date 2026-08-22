@@ -247,3 +247,68 @@ test('turn start clears stale attention and failure is summarized separately', a
     unread: true,
   }), {});
 });
+
+// ============================================================
+// OpenCode notification bridge (plugin -> /hook)
+// ============================================================
+
+test('opencode payloads map onto the canonical lifecycle kinds', () => {
+  // session.status idle -> stop -> turn_completed (white unread badge)
+  const completed = normalizeAgentNotification({ type: 'stop', agent_source: 'opencode', pty_id: 12, cwd: 'D:\\work\\app' });
+  assert.equal(completed.kind, 'turn_completed');
+  assert.equal(completed.source, 'opencode');
+  assert.equal(completed.ptyId, 12);
+
+  // permission.asked -> permissionrequest -> needs_attention / approval (amber)
+  const approval = normalizeAgentNotification({
+    type: 'permissionrequest',
+    agent_source: 'opencode',
+    tool_name: 'bash',
+    message: 'rm -rf dist',
+  });
+  assert.equal(approval.kind, 'needs_attention');
+  assert.equal(approval.reason, 'approval');
+  assert.equal(approval.title, null);
+  assert.equal(approval.message, 'rm -rf dist');
+
+  // question.asked -> notification -> needs_attention / input
+  const question = normalizeAgentNotification({ type: 'notification', agent_source: 'opencode' });
+  assert.equal(question.kind, 'needs_attention');
+  assert.equal(question.reason, 'input');
+
+  // session.error -> stopfailure -> turn_failed
+  assert.equal(normalizeAgentNotification({ type: 'stopfailure', agent_source: 'opencode' }).kind, 'turn_failed');
+});
+
+test('opencode plugin source is self-contained ESM with no local imports', () => {
+  const { PLUGIN_SOURCE } = require('../src/main/opencode-plugin-source.cjs');
+  // No relative imports: OpenCode requires plugins to be self-contained.
+  assert.doesNotMatch(PLUGIN_SOURCE, /from\s+['"]\.\.?\/|require\(['"]\.\.?\//);
+  // Subscribes via the `event` hook and switches on bus event types —
+  // top-level "session.idle" style handlers would be dead code.
+  assert.match(PLUGIN_SOURCE, /export const ProjectMixerPlugin/);
+  assert.match(PLUGIN_SOURCE, /event:\s*async \(\{ event \}\)/);
+  assert.match(PLUGIN_SOURCE, /session\.status/);
+  assert.match(PLUGIN_SOURCE, /permission\.asked/);
+  assert.match(PLUGIN_SOURCE, /question\.asked/);
+  // Endpoint comes from the PTY env; without it the plugin is inert.
+  assert.match(PLUGIN_SOURCE, /process\.env\.PM_HOOK_URL/);
+  assert.match(PLUGIN_SOURCE, /PROJECT_MIXER_PTY_ID/);
+});
+
+test('main process injects PM_HOOK_URL into the PTY env and installs the plugin in hook:setup', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
+  // PTY env carries the /hook endpoint so the plugin can post lifecycle events.
+  assert.match(main, /PM_HOOK_URL: `http:\/\/127\.0\.0\.1:\$\{HOOK_PORT\}\/hook`/);
+  // hook:setup writes the bridge into the project's OpenCode plugin dir.
+  assert.match(main, /OPENCODE_PLUGIN_SOURCE/);
+  assert.match(main, /\.opencode', 'plugins'\)/);
+  assert.match(main, /project-mixer\.js/);
+
+  // The screen-scrape heuristic must NOT include opencode: real events now
+  // drive waiting/completion, and scraping caused false amber dots.
+  const renderer = require('fs').readFileSync(require('path').join(__dirname, '..', 'renderer.js'), 'utf-8');
+  const detect = renderer.match(/function detectWaiting\(command, data\) \{[\s\S]*?\n\}/)[0];
+  assert.match(detect, /command === 'claude' \|\| command === 'codex'/);
+  assert.doesNotMatch(detect, /=== 'opencode'/);
+});
