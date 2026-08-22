@@ -307,6 +307,16 @@ Golden Layout / Dockview / FlexLayout はいずれも**タブの状態を自分�
 - [x] A4 完了 — 2026-08-22。`Ctrl+Shift+Enter`（`when: editorFocus`）で選択範囲を `path:L10-L20` 形式のラベルとして scratch へ挿入し、scratch にフォーカス。パスはプロジェクトルート相当（相対化できない場合は絶対パス）。コマンド `insert_selection_to_scratch` は types.js / schemas.js の**両方**に定義（D19）。送信経路は既存の `append_to_scratch` / `focus_scratch` を流用（新経路なし）
 - [ ] A5 完了 —
 
+**A5 検証記録（2026-08-22）**:
+
+- `npm test`: 168件成功（12スイート）/ `npm run build:renderer`: 成功
+- 歯止めテストは A1 実装時に先行追加済み（依存3パッケージ限定・basicSetup 不使用・lang/autocomplete/lint 不使用を検査）
+- タブ切替で undo 履歴・カーソル・スクロール保持: kamox 実機で確認（A2 検証に含む）
+- `preview_reveal` の行表示: ターミナルのファイルリンク（`src/brush-preset.ts:6:` クリック→エディタで行6ハイライト+スクロール）で実機確認。md/html 分岐は従来経路維持
+- **プロジェクト切替の復元**: photon-mixer で LICENSE を開いた状態→project-mixer へ切替→戻る→LICENSE タブが選択状態で復元、エディタ内容・scratch 内容とも復元
+- kamox 実機確認の全体: 起動時エラーログなし / CM6 描画+行番号 / 入力+dirty / CRLF clean-on-open / undo後clean / A4 pointing
+- **残項目**: MCP `show_file` 経路（`preview_reveal` → `revealInEditor` の分岐）は MCP セッションが必要なため kamox から駆動できず。unit + 静的アサーションでカバー済み。Claude Code 接続環境での確認を推奨
+
 **A4 実装メモ（2026-08-22）**:
 
 - **バグ修正（kamox 実機検証で発見）**: 選択のみのトランザクションで `f.state` が同期されていなかった（onDocChanged でのみ同期）。カーソル移動後の `f.state` が古い選択を保持するため、A4 と `get_focus` の cursorLine/selection が stale になる問題。`onSelectionChanged` でも `f.state = update.state` を行うように修正。ヘッドレスでは発見できず、実機駆動が効いた例
