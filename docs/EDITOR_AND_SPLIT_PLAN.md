@@ -305,7 +305,7 @@ Golden Layout / Dockview / FlexLayout はいずれも**タブの状態を自分�
 - [x] A2 完了 — 2026-08-22。`openFiles` エントリが `state`（EditorState）と `scrollTop` を保持。タブ切替は `view.setState(f.state)` + スクロール復元。プロジェクト別退避は既存の `saveCurrentEditorState` / `switchProjectEditor` がエントリごと state を運ぶため追加コード不要（プロジェクト切替時に `syncMountedFileScroll()` を1呼び追加）。dirty 判定は `isDocDirty(state, originalContent)`（`src/editor/doc-state.mjs`、旧 textarea 計算との等価性をテストで固定）。undo 履歴・カーソルは state ごとタブに保持
 - [x] A3 完了 — 2026-08-22。`preview_reveal` のテキスト/コード分岐をエディタ側へ（`revealInEditor`: 未開なら `open_file` 経路で開いてタブ切替→`revealLine`）。ハイライトは `StateField` + `Decoration.line`（`pm-line-reveal-highlight`、トークンは `--attn-soft` / `--attn`）。Markdown / HTML / 画像 / ブラウザは従来どおり preview のまま（`buildLinePreviewDocument` は md/html の reveal で継続利用——テキスト経路のみ死んだため関数自体は削除せず）。ターミナルのファイルリンクのジャンプにも同一ハイライトを実施（ユーザー確認済み）。show_file がテキストファイルを指した場合、エディタ表示後に preview 側に残るストレイタブを閉じる
 - [x] A4 完了 — 2026-08-22。`Ctrl+Shift+Enter`（`when: editorFocus`）で選択範囲を `path:L10-L20` 形式のラベルとして scratch へ挿入し、scratch にフォーカス。パスはプロジェクトルート相当（相対化できない場合は絶対パス）。コマンド `insert_selection_to_scratch` は types.js / schemas.js の**両方**に定義（D19）。送信経路は既存の `append_to_scratch` / `focus_scratch` を流用（新経路なし）
-- [ ] A5 完了 —
+- [x] A5 完了 — 2026-08-22。`npm test` 178件成功（13スイート）/ `build:renderer` 成功。歯止めテストは A1 時に先行追加済みで、Phase 5 S3 で `@codemirror/search` 承認時に承認リストを4パッケージへ更新済み（lang/autocomplete/lint 不使用検査は維持）。**MCP `show_file` 経路の実機確認済み（kamox 駆動）**: 正規 MCP トークンは PTY 起動時発行のため外部から取得できないため、`show_file` ツールが実行する dispatch 列（server.cjs の `preview_open` → `preview_reveal`、transport 層は phase3 単体テスト済み）を renderer の `__pmDispatch` 経由で同一実行した。テキストファイル（cm6.mjs、line:110 / endLine:116）を指定 → エディタサーフェスへ切替・タブ作成・7行ハイライト（110–116）・スクロール位置 ≒ 行110 を確認、ストレイ preview タブは 0 で削除済み
 
 **A5 検証記録（2026-08-22）**:
 
