@@ -182,4 +182,9 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // Phase 4.5 A4: point at selected editor lines from the scratch composer
+  insert_selection_to_scratch: {
+    args: {},
+    returns: 'void',
+  },
 };

@@ -214,6 +214,44 @@ test('A3: preview_reveal routes text/code files to the editor', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A4: selection -> scratch reference
+// ---------------------------------------------------------------------------
+
+test('A4: formatLineReference builds path:L10 / path:L10-L20 labels', async () => {
+  const docs = await importEsm('src/editor/doc-state.mjs');
+  assert.equal(docs.formatLineReference('src/a.ts', { startLine: 10 }), 'src/a.ts:L10');
+  assert.equal(docs.formatLineReference('src/a.ts', { startLine: 10, endLine: 20 }), 'src/a.ts:L10-L20');
+  // Collapsed or inverted ranges degrade to the single-line form.
+  assert.equal(docs.formatLineReference('a.ts', { startLine: 5, endLine: 5 }), 'a.ts:L5');
+  assert.equal(docs.formatLineReference('a.ts', { startLine: 5 }), 'a.ts:L5');
+});
+
+test('A4: insert_selection_to_scratch is defined in types and schemas and bound in the registry', () => {
+  const types = read(path.join('src', 'commands', 'types.js'));
+  const schemas = read(path.join('src', 'commands', 'schemas.js'));
+  const bindings = read(path.join('src', 'keybindings', 'registry.js'));
+  const renderer = read('renderer.js');
+
+  // Both definitions are mandatory — adding only one breaks startup.
+  for (const source of [types, schemas]) {
+    assert.match(source, /insert_selection_to_scratch/);
+  }
+  assert.match(bindings, /key: 'Ctrl\+Shift\+Enter', command: 'insert_selection_to_scratch', when: 'editorFocus'/);
+  assert.match(renderer, /register\('insert_selection_to_scratch'/);
+});
+
+test('A4: every COMMAND_TYPES entry has a matching schema', async () => {
+  const types = await importEsm('src/commands/types.js');
+  const schemas = await importEsm('src/commands/schemas.js');
+  const typeNames = Object.keys(types.COMMAND_TYPES);
+  const schemaNames = Object.keys(schemas.COMMAND_SCHEMAS);
+  const missingSchemas = typeNames.filter((name) => !schemaNames.includes(name));
+  const orphanSchemas = schemaNames.filter((name) => !typeNames.includes(name));
+  assert.deepEqual(missingSchemas, [], 'commands missing schemas');
+  assert.deepEqual(orphanSchemas, [], 'schemas without command types');
+});
+
+// ---------------------------------------------------------------------------
 // Static wiring
 // ---------------------------------------------------------------------------
 
@@ -247,5 +285,7 @@ test('A1: per-file states carry the shared extensions (EditorView ignores extens
 test('A2: update_editor_content fires from the CM6 updateListener', () => {
   const renderer = read('renderer.js');
   assert.match(renderer, /onDocChanged[\s\S]*?dispatch\('update_editor_content'/);
-  assert.match(renderer, /onSelectionChanged: \(\) => dispatch\('update_editor_selection'\)/);
+  // Selection-only transactions must also sync the per-file state, or
+  // A4 pointing and get_focus read stale selections.
+  assert.match(renderer, /onSelectionChanged: \(update\) => \{[\s\S]*?f\.state = update\.state;[\s\S]*?dispatch\('update_editor_selection'\)/);
 });

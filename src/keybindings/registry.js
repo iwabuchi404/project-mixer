@@ -35,6 +35,8 @@ export const BINDINGS = [
   { key: 'Slash', command: 'tree_filter_focus', when: 'treeFocus' },
   { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus || treeFilterFocus' },
   { key: 'Escape', command: 'search_close', when: 'searchFocus' },
+  // Phase 4.5 A4: point at selected editor lines from the scratch composer.
+  { key: 'Ctrl+Shift+Enter', command: 'insert_selection_to_scratch', when: 'editorFocus' },
 ];
 
 // --- Key normalization ---

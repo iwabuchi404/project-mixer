@@ -74,4 +74,6 @@ export const COMMAND_SCHEMAS = {
   terminal_select_all: p({}),
   search_text: p({ query: z.string(), cwd: optStr, caseSensitive: optBool }),
   search_close: p({}),
+  // Phase 4.5 A4: point at selected editor lines from the scratch composer
+  insert_selection_to_scratch: p({}),
 };

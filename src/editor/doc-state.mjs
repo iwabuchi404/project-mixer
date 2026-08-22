@@ -47,3 +47,12 @@ export function detectEol(text) {
 export function applyEol(text, eol) {
   return eol === '\r\n' ? text.replace(/\n/g, '\r\n') : text;
 }
+
+// A4: scratch reference label for a selection, e.g. "src/a.ts:L10-L20".
+// Single-line selections collapse to "path:L10".
+export function formatLineReference(path, { startLine, endLine }) {
+  const from = Math.max(1, startLine);
+  return endLine && endLine > from
+    ? `${path}:L${from}-L${endLine}`
+    : `${path}:L${from}`;
+}

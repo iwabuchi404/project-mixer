@@ -24,7 +24,7 @@ import { getPreviewForProject, getNextPreviewForProject, isPreviewForProject } f
 import { PREVIEW_CSP } from './src/preview/security.js';
 import { getBrowserTabLabel, normalizeLocalBrowserUrl } from './src/ui/browser.mjs';
 import { createEditorKit, revealLine } from './src/editor/cm6.mjs';
-import { isDocDirty, getCursorLine, getSelectionLines, detectEol, applyEol } from './src/editor/doc-state.mjs';
+import { isDocDirty, getCursorLine, getSelectionLines, detectEol, applyEol, formatLineReference } from './src/editor/doc-state.mjs';
 import {
   INTERNAL_FILE_MIME,
   captureTerminalFollowToken,
@@ -1582,7 +1582,14 @@ const editorKit = createEditorKit({
     f.content = update.state.doc.toString();
     dispatch('update_editor_content', { filePath: f.path, content: f.content });
   },
-  onSelectionChanged: () => dispatch('update_editor_selection'),
+  onSelectionChanged: (update) => {
+    const f = openFiles.get(currentlyMountedPath);
+    if (!f) return;
+    // Cursor-only transactions carry no doc change: keep the per-file state
+    // in sync so selection readers (A4 pointing, get_focus) see live values.
+    f.state = update.state;
+    dispatch('update_editor_selection');
+  },
 });
 const fileEditorView = editorKit.view;
 
@@ -4213,6 +4220,25 @@ register('switch_tab', ({ filePath }) => {
 
 register('append_to_scratch', ({ text }) => {
   appendToScratch(text);
+});
+
+// A4: point at selected editor lines from the scratch composer.
+register('insert_selection_to_scratch', () => {
+  const f = openFiles.get(activeFilePath);
+  if (!f || f.isScratch || f.isPreview) return;
+  const selection = getSelectionLines(f.state);
+  if (!selection) return;
+  const project = projects.get(activeProjectId);
+  let labelPath = f.path;
+  if (project) {
+    const normProject = project.path.replace(/\\/g, '/').replace(/\/$/, '');
+    const normPath = f.path.replace(/\\/g, '/');
+    if (normPath.startsWith(normProject + '/')) {
+      labelPath = normPath.slice(normProject.length + 1);
+    }
+  }
+  dispatch('append_to_scratch', { text: formatLineReference(labelPath, selection) });
+  dispatch('focus_scratch');
 });
 
 register('update_editor_content', ({ filePath, content }) => {

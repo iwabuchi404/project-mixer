@@ -304,8 +304,14 @@ Golden Layout / Dockview / FlexLayout はいずれも**タブの状態を自分�
 - [x] A1 完了 — 2026-08-22。`#file-editor-textarea` を `#file-editor-mount`（CM6 `EditorView` 1個）に置換。拡張は明示列挙（lineNumbers / highlightActiveLineGutter / highlightActiveLine / drawSelection / dropCursor / history / keymap）。`basicSetup` 不使用。Tab → 2スペース挿入は旧 textarea 挙動を維持（cm6.mjs 内の keymap）。`update_editor_content` / `update_editor_selection` の発火元を `updateListener` へ差し替え。コマンド語彙は変更なし（D10 維持）。テーマは styles.css の CSS 変数で上書き（one-dark 等の追加パッケージは不使用）
 - [x] A2 完了 — 2026-08-22。`openFiles` エントリが `state`（EditorState）と `scrollTop` を保持。タブ切替は `view.setState(f.state)` + スクロール復元。プロジェクト別退避は既存の `saveCurrentEditorState` / `switchProjectEditor` がエントリごと state を運ぶため追加コード不要（プロジェクト切替時に `syncMountedFileScroll()` を1呼び追加）。dirty 判定は `isDocDirty(state, originalContent)`（`src/editor/doc-state.mjs`、旧 textarea 計算との等価性をテストで固定）。undo 履歴・カーソルは state ごとタブに保持
 - [x] A3 完了 — 2026-08-22。`preview_reveal` のテキスト/コード分岐をエディタ側へ（`revealInEditor`: 未開なら `open_file` 経路で開いてタブ切替→`revealLine`）。ハイライトは `StateField` + `Decoration.line`（`pm-line-reveal-highlight`、トークンは `--attn-soft` / `--attn`）。Markdown / HTML / 画像 / ブラウザは従来どおり preview のまま（`buildLinePreviewDocument` は md/html の reveal で継続利用——テキスト経路のみ死んだため関数自体は削除せず）。ターミナルのファイルリンクのジャンプにも同一ハイライトを実施（ユーザー確認済み）。show_file がテキストファイルを指した場合、エディタ表示後に preview 側に残るストレイタブを閉じる
-- [ ] A4 完了 —
+- [x] A4 完了 — 2026-08-22。`Ctrl+Shift+Enter`（`when: editorFocus`）で選択範囲を `path:L10-L20` 形式のラベルとして scratch へ挿入し、scratch にフォーカス。パスはプロジェクトルート相当（相対化できない場合は絶対パス）。コマンド `insert_selection_to_scratch` は types.js / schemas.js の**両方**に定義（D19）。送信経路は既存の `append_to_scratch` / `focus_scratch` を流用（新経路なし）
 - [ ] A5 完了 —
+
+**A4 実装メモ（2026-08-22）**:
+
+- **バグ修正（kamox 実機検証で発見）**: 選択のみのトランザクションで `f.state` が同期されていなかった（onDocChanged でのみ同期）。カーソル移動後の `f.state` が古い選択を保持するため、A4 と `get_focus` の cursorLine/selection が stale になる問題。`onSelectionChanged` でも `f.state = update.state` を行うように修正。ヘッドレスでは発見できず、実機駆動が効いた例
+- テスト追加: `formatLineReference` のラベル形式、types/schemas 同期検査（全コマンドの双方向チェック——「定義の追加漏れで起動が壊れる」過去事故の再発防止）、配線静的アサーション。`npm test`: 168件成功
+- kamox 実機検証: エディタで3〜4行ドラッグ選択→`Ctrl+Shift+Enter`→scratch に `LICENSE:L1-L4` 挿入 + フォーカス移動を確認
 
 **D13-3 確定（2026-08-22、ユーザー確認）**: ハイライトは**次の編集で消す**。新しい reveal は前のハイライトを差し替える。編集+新 reveal が同一トランザクションの場合は効果を優先。ヘッドレス単体テストで固定（`test/codemirror.test.cjs`）
 
