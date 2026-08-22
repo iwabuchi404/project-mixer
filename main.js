@@ -10,6 +10,7 @@ const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { PLUGIN_SOURCE: OPENCODE_PLUGIN_SOURCE } = require('./src/main/opencode-plugin-source.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
+const { buildResumeArgs } = require('./src/main/resume-args.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, ConfigParseError } = require('./src/main/config-service.cjs');
@@ -389,7 +390,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols, rows }) => {
+ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols, rows, resumeSessionId }) => {
   const id = ++ptyCounter;
   const shellCwd = cwd || os.homedir();
   const mcpPort = MCP_PORT || await mcpReady;
@@ -400,6 +401,10 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
     }) : null;
   const mcpUrl = mcpToken ? `http://127.0.0.1:${mcpPort}/s/${mcpToken}` : null;
   const requestedArgs = args || [];
+  // Resume-previous-session: prepend the agent's resume flags before
+  // user-supplied args (they compose with the MCP injection args).
+  const resumeArgs = buildResumeArgs(command, resumeSessionId);
+  const effectiveArgs = resumeArgs ? [...resumeArgs, ...requestedArgs] : requestedArgs;
   const agentMcpArgs = buildAgentMcpArgs(command, mcpUrl);
 
   const isWin = os.platform() === 'win32';
@@ -409,13 +414,13 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
   let shell, shellArgs;
   if (!command) {
     shell = isWin ? 'pwsh.exe' : 'bash';
-    shellArgs = requestedArgs;
+    shellArgs = effectiveArgs;
   } else if (isWin && winShells.includes(command)) {
     shell = command;
-    shellArgs = requestedArgs;
+    shellArgs = effectiveArgs;
   } else if (!isWin && unixShells.includes(command)) {
     shell = command;
-    shellArgs = requestedArgs;
+    shellArgs = effectiveArgs;
   } else {
     // claude, codex, etc. — wrap in pwsh -NoExit -Command on Windows
     if (isWin) {
@@ -423,11 +428,11 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
       shellArgs = [
         '-NoExit',
         '-Command',
-        buildPowerShellInvocation(command, [...requestedArgs, ...agentMcpArgs]),
+        buildPowerShellInvocation(command, [...effectiveArgs, ...agentMcpArgs]),
       ];
     } else {
       shell = command;
-      shellArgs = [...requestedArgs, ...agentMcpArgs];
+      shellArgs = [...effectiveArgs, ...agentMcpArgs];
     }
   }
 
@@ -613,6 +618,7 @@ function handleHookNotification(data) {
     reason: notification.reason,
     title: notification.title,
     message: notification.message,
+    sessionId: notification.sessionId,
     cwd: notification.cwd,
     ...target,
   });

@@ -67,6 +67,12 @@ function normalizeAgentNotification(data) {
         ? 'codex'
         : 'agent';
   const explicitPtyId = Number(data.pty_id ?? data.ptyId);
+  // Session id (Claude hooks / OpenCode plugin payloads). Used for tab
+  // binding and for the resume-previous-session feature.
+  const rawSessionId = data.session_id ?? data.sessionId;
+  const sessionId = typeof rawSessionId === 'string' && rawSessionId.trim()
+    ? rawSessionId.trim()
+    : null;
   const permissionDetails = eventType.toLowerCase() === 'permissionrequest'
     ? getPermissionDetails(data)
     : { title: null, message: null };
@@ -90,6 +96,7 @@ function normalizeAgentNotification(data) {
     title,
     message,
     source,
+    sessionId,
     cwd: typeof data.cwd === 'string'
       ? data.cwd
       : typeof data.working_directory === 'string'

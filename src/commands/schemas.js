@@ -33,6 +33,7 @@ export const COMMAND_SCHEMAS = {
     cwd: optStr,
     projectId: optStr,
     label: optStr,
+    resumeSessionId: optStr,
   }),
   close_terminal: p({ tabId: z.number() }),
   send_to_terminal: p({ text: optStr, tabId: optNum }),

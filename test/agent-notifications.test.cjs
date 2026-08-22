@@ -23,6 +23,7 @@ test('normalizes agent hook payloads into canonical lifecycle events', () => {
     reason: 'input',
     title: null,
     message: null,
+    sessionId: null,
     source: 'claude',
     cwd: 'D:\\work\\app',
     ptyId: 7,
@@ -246,6 +247,54 @@ test('turn start clears stale attention and failure is summarized separately', a
     sessionId: 'devin-123',
     unread: true,
   }), {});
+});
+
+// ============================================================
+// Session resume (previous-session restore on tab open)
+// ============================================================
+
+const { buildResumeArgs } = require('../src/main/resume-args.cjs');
+
+test('buildResumeArgs picks per-agent flags and prefers a tracked session id', () => {
+  assert.deepEqual(buildResumeArgs('claude', 'abc'), ['--resume', 'abc']);
+  assert.deepEqual(buildResumeArgs('claude', null), ['--continue']);
+  assert.deepEqual(buildResumeArgs('codex', 's_1'), ['resume', 's_1']);
+  assert.deepEqual(buildResumeArgs('codex', null), ['resume', '--last']);
+  assert.deepEqual(buildResumeArgs('opencode', 'ses_x'), ['-s', 'ses_x']);
+  assert.deepEqual(buildResumeArgs('opencode', null), ['--continue']);
+  // Devin is cloud-based — no local resume surface.
+  assert.equal(buildResumeArgs('devin', 'x'), null);
+  assert.equal(buildResumeArgs('pwsh.exe', null), null);
+  // .exe suffix normalized.
+  assert.deepEqual(buildResumeArgs('Claude.exe', 'abc'), ['--resume', 'abc']);
+});
+
+test('hook payloads expose session_id for resume tracking and routing', () => {
+  const notification = normalizeAgentNotification({
+    hook_event_type: 'Stop',
+    session_id: 'sess-abc',
+    cwd: 'D:\\work\\app',
+  });
+  assert.equal(notification.sessionId, 'sess-abc');
+  assert.equal(normalizeAgentNotification({ type: 'stop' }).sessionId, null);
+  // OpenCode plugin payload shape (sessionId key).
+  assert.equal(normalizeAgentNotification({ type: 'stop', sessionId: 'ses_1' }).sessionId, 'ses_1');
+});
+
+test('renderer tracks last sessions and prompts only for supported agents', () => {
+  const renderer = require('fs').readFileSync(require('path').join(__dirname, '..', 'renderer.js'), 'utf-8');
+  assert.match(renderer, /pm-last-agent-sessions/);
+  assert.match(renderer, /rememberAgentSession\(t\.projectId, t\.command, sessionId\)/);
+  // The prompt only fires for explicit menu-created terminals.
+  assert.match(renderer, /resumePrompt: true/);
+  const detect = renderer.match(/if \(resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED\.has\(cmd\)\)/);
+  assert.ok(detect);
+});
+
+test('main process prepends resume args and passes them through pty:create', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
+  assert.match(main, /buildResumeArgs\(command, resumeSessionId\)/);
+  assert.match(main, /\[\.\.\.resumeArgs, \.\.\.requestedArgs\]/);
 });
 
 // ============================================================

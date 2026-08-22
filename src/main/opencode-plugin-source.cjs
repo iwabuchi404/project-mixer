@@ -45,17 +45,18 @@ export const ProjectMixerPlugin = async () => ({
       const type = event && event.type;
       const props = (event && event.properties) || {};
       if (type === 'session.status' && props.status && props.status.type === 'idle') {
-        send({ type: 'stop' });
+        send({ type: 'stop', session_id: props.sessionID });
       } else if (type === 'session.error') {
-        send({ type: 'stopfailure', message: describeError(props.error) });
+        send({ type: 'stopfailure', session_id: props.sessionID, message: describeError(props.error) });
       } else if (type === 'permission.asked') {
         send({
           type: 'permissionrequest',
+          session_id: props.sessionID,
           tool_name: props.permission || undefined,
           message: permissionDetail(props),
         });
       } else if (type === 'question.asked') {
-        send({ type: 'notification', title: 'OpenCode is asking a question' });
+        send({ type: 'notification', session_id: props.sessionID, title: 'OpenCode is asking a question' });
       }
     } catch {
       // Never break the host session because of a notification failure.

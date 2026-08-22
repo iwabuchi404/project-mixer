@@ -3229,7 +3229,7 @@ async function revealInEditor(filePath, line, endLine) {
   return { revealed: true, inEditor: true, filePath };
 }
 
-async function createTerminal(command, cwd, projectId, savedLabel) {
+async function createTerminal(command, cwd, projectId, savedLabel, resumeSessionId) {
   const terminal = new Terminal({
     fontSize: 13,
     fontFamily: '"Cascadia Mono", Consolas, monospace',
@@ -3300,6 +3300,7 @@ async function createTerminal(command, cwd, projectId, savedLabel) {
     projectId: projectId || null,
     cols,
     rows,
+    resumeSessionId: resumeSessionId || undefined,
   });
 
   terminal.onData((data) => {
@@ -3660,7 +3661,7 @@ async function buildTerminalMenu() {
       newTabMenu.classList.add('hidden');
       const p = projects.get(activeProjectId);
       const cwd = p ? p.path : undefined;
-      dispatch('create_terminal', { command: cmd, cwd, projectId: activeProjectId });
+      dispatch('create_terminal', { command: cmd, cwd, projectId: activeProjectId, resumePrompt: true });
     });
     newTabMenu.appendChild(item);
   });
@@ -4401,14 +4402,59 @@ register('search_close', () => {
   closeSearchTab();
 });
 
-register('create_terminal', ({ command, cwd, projectId, label } = {}) => {
+// ============================================================
+// Session resume (previous-session restore on tab open)
+// ============================================================
+//
+// Tracks the last agent session id per project+command and offers to
+// resume it when the user opens a new terminal of the same kind.
+// Resume flags per agent live in src/main/resume-args.cjs; Devin is not
+// resumable (cloud sessions) so it never gets the prompt.
+
+const LAST_SESSION_KEY = 'pm-last-agent-sessions';
+const RESUME_SUPPORTED = new Set(['claude', 'codex', 'opencode']);
+
+function loadLastSessions() {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_SESSION_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberAgentSession(projectId, command, sessionId) {
+  if (!projectId || !command || !sessionId) return;
+  try {
+    const all = loadLastSessions();
+    all[`${projectId}:${command}`] = { sessionId, endedAt: Date.now() };
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify(all));
+  } catch {
+    // Storage full / unavailable: resume tracking is best-effort.
+  }
+}
+
+register('create_terminal', async ({ command, cwd, projectId, label, resumeSessionId, resumeSkip, resumePrompt } = {}) => {
   // A8: メニューからの呼び出し用デフォルト。
   // 新規タブのドロップダウンはインストール済みのツールだけを出すため、
   // ここで特定の AI CLI を決め打ちすると未インストール環境で必ず失敗する。
   const cmd = command || defaultShell();
   const cwd_ = cwd || (projects.get(activeProjectId)?.path);
   const pid = projectId || activeProjectId;
-  return createTerminal(cmd, cwd_, pid, label);
+  let effectiveResumeId = resumeSessionId || null;
+  // The prompt fires only for explicit menu-created terminals — layout
+  // restore must reopen tabs silently. Once the setting exists
+  // (auto-resume vs ask), this branch becomes its switch point.
+  if (resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED.has(cmd)) {
+    const last = loadLastSessions()[`${pid}:${cmd}`];
+    if (last && last.sessionId) {
+      const ok = await showConfirm(
+        `Resume ${TERMINAL_LABELS[cmd] || cmd}?`,
+        'A previous session was found for this project. Resume it instead of starting fresh?',
+      );
+      if (ok) effectiveResumeId = last.sessionId;
+    }
+  }
+  return createTerminal(cmd, cwd_, pid, label, effectiveResumeId);
 });
 
 // A8: commands for application menu access
@@ -4556,6 +4602,9 @@ register('agent_notification_received', ({ tabId, projectId, kind, eventType, so
   if (wasWaiting && !terminalAttention[tabId]?.waiting) closeOsNotification(tabId);
   updateTabStatus(tabId);
   updateProjectStatus(projectId);
+  // Resume tracking: hook/plugin payloads carry the session id.
+  const notifiedTab = tabs.get(tabId);
+  if (notifiedTab) rememberAgentSession(notifiedTab.projectId, notifiedTab.command, sessionId);
   if (source === 'devin' && sessionId) {
     const current = getTerminalAgentBinding(tabId);
     if (current?.sessionId === sessionId) {
@@ -4624,6 +4673,9 @@ register('agent_session_bound', ({ tabId, provider, sessionId, status }) => {
   };
   setState({ terminalAgentBindings });
   tabs.get(tabId).tabElement.title = `${provider}: ${sessionId}${status ? ` (${status})` : ''}`;
+  // Resume tracking: remember this as the tab's last session.
+  const t = tabs.get(tabId);
+  rememberAgentSession(t.projectId, t.command, sessionId);
 });
 
 register('agent_session_unbound', ({ tabId }) => {
