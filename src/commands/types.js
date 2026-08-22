@@ -187,4 +187,21 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // Phase 5 S3: shared find bar (delegates to editor / preview)
+  find_open: {
+    args: {},
+    returns: 'void',
+  },
+  find_next: {
+    args: {},
+    returns: 'void',
+  },
+  find_prev: {
+    args: {},
+    returns: 'void',
+  },
+  find_close: {
+    args: {},
+    returns: 'void',
+  },
 };

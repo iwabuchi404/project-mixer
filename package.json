@@ -1,6 +1,6 @@
 {
   "name": "project-mixer",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "VSCode を 5〜8 枚開かなくて済むようにするデスクトップアプリ",
   "main": "main.js",
   "author": "Project Mixer",
@@ -8,6 +8,7 @@
     "start": "electron .",
     "start:dev": "electron . --dev",
     "rebuild": "electron-rebuild -f -w node-pty",
+    "build": "node build.cjs",
     "build:renderer": "node build.cjs",
     "build:renderer:watch": "node build.cjs --watch",
     "test": "npm run test:phase0 && npm run test:phase1 && npm run test:phase2 && npm run test:phase2.5 && npm run test:phase3 && npm run test:phase4 && npm run test:phase5 && npm run test:codemirror && npm run test:agent-notifications && npm run test:devin-notifications && npm run test:refactor-r0 && npm run test:refactor-r2 && npm run test:refactor-r4",
@@ -40,6 +41,7 @@
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",
+    "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.9",
     "@modelcontextprotocol/sdk": "^1.30.0",

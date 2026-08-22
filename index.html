@@ -73,6 +73,19 @@
       <div id="main-tab-bar" class="tabbar" role="tablist" aria-label="Main views">
         <button id="new-tab-btn" class="tab-add" title="New terminal">+</button>
       </div>
+      <div id="find-bar" class="hidden">
+        <input id="find-input" type="text" placeholder="Find..." title="Find (Ctrl+F)" />
+        <span id="find-count"></span>
+        <button id="find-prev-btn" title="Previous match (Shift+Enter)" aria-label="Previous match">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4"/></svg>
+        </button>
+        <button id="find-next-btn" title="Next match (Enter)" aria-label="Next match">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+        </button>
+        <button id="find-close-btn" title="Close (Esc)" aria-label="Close find bar">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 3.5 9 9M12.5 3.5l-9 9"/></svg>
+        </button>
+      </div>
       <div id="main-surface">
         <div id="terminal-pane" class="main-surface-pane">
           <div id="terminal-container"></div>

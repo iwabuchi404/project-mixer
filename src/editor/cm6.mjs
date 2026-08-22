@@ -2,7 +2,9 @@
 // CodeMirror 6 editor surface (Phase 4.5).
 //
 // D9 guardrail: dependencies are limited to @codemirror/state,
-// @codemirror/view and @codemirror/commands. basicSetup is NOT used —
+// @codemirror/view, @codemirror/commands and @codemirror/search (added in
+// Phase 5 S3 as the find bar's delegation target — explicitly approved by
+// the S3 decision). basicSetup is NOT used —
 // it bundles autocompletion() and lintKeymap, which violate the guardrail
 // (@codemirror/lang-* / @codemirror/autocomplete / LSP must never appear
 // in package.json). Extensions are enumerated explicitly below.
@@ -19,6 +21,7 @@ import {
   keymap,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { search, setSearchQuery, findNext as cmFindNext, findPrevious as cmFindPrevious, SearchQuery } from '@codemirror/search';
 
 // Preserves the previous textarea behavior: Tab inserts two spaces.
 // Text input behavior, not a keybinding (same rule as insertIndent in
@@ -88,6 +91,11 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
     drawSelection(),
     dropCursor(),
     history(),
+    // Phase 5 S3: query state for the shared find bar. The default search
+    // panel and its keymap are deliberately NOT registered — a panel would
+    // duplicate the bar and the keymap would bypass the keybinding
+    // registry (D21). The panel is never opened, so no panel DOM exists.
+    search(),
     lineHighlightField,
     keymap.of([{ key: 'Tab', run: insertTwoSpaces }]),
     keymap.of([...defaultKeymap, ...historyKeymap]),
@@ -99,6 +107,44 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
       }
     }),
   ];
+}
+
+// --- Shared find bar delegation (Phase 5 S3) ---
+
+// Set the current search query from the find bar. caseSensitive maps to
+// SearchQuery's caseSensitive flag; no regex (fixed-string only).
+export function setEditorSearchQuery(view, queryString, { caseSensitive = false } = {}) {
+  const query = new SearchQuery({ search: queryString, caseSensitive });
+  view.dispatch({ effects: setSearchQuery.of(query) });
+}
+
+export function editorFindNext(view) {
+  return cmFindNext(view);
+}
+
+export function editorFindPrevious(view) {
+  return cmFindPrevious(view);
+}
+
+// Count matches of the query in the document and locate the one starting at
+// or after the selection head (1-based). Pure over (state, query) —
+// headless testable. Fixed-string matching only; no regex.
+export function countEditorMatches(state, queryString, { caseSensitive = false } = {}) {
+  if (!queryString) return { total: 0, index: 0 };
+  const docText = state.doc.toString();
+  const hay = caseSensitive ? docText : docText.toLowerCase();
+  const needle = caseSensitive ? queryString : queryString.toLowerCase();
+  const head = state.selection.main.head;
+  let total = 0;
+  let wrappedIndex = null;
+  let pos = 0;
+  while ((pos = hay.indexOf(needle, pos)) !== -1) {
+    total++;
+    if (wrappedIndex === null && pos >= head) wrappedIndex = total;
+    pos += needle.length;
+  }
+  if (total === 0) return { total: 0, index: 0 };
+  return { total, index: wrappedIndex !== null ? wrappedIndex : 1 };
 }
 
 // Creates the single EditorView plus a state factory for additional files.

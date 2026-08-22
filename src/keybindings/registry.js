@@ -33,10 +33,14 @@ export const BINDINGS = [
   // Phase 5 additions.
   { key: 'Ctrl+Shift+F', command: 'search_text_open', when: null },
   { key: 'Slash', command: 'tree_filter_focus', when: 'treeFocus' },
-  { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus || treeFilterFocus' },
-  { key: 'Escape', command: 'search_close', when: 'searchFocus' },
+  { key: 'Escape', command: 'tree_filter_clear', when: '!findOpen && treeFocus || !findOpen && treeFilterFocus' },
+  { key: 'Escape', command: 'search_close', when: '!findOpen && searchFocus' },
   // Phase 4.5 A4: point at selected editor lines from the scratch composer.
   { key: 'Ctrl+Shift+Enter', command: 'insert_selection_to_scratch', when: 'editorFocus' },
+  // Phase 5 S3: shared find bar. Terminal keeps Ctrl+F (forward-char), so
+  // find_open only applies to editor/preview focus contexts.
+  { key: 'Ctrl+F', command: 'find_open', when: 'editorFocus || previewFocus' },
+  { key: 'Escape', command: 'find_close', when: 'findOpen' },
 ];
 
 // --- Key normalization ---

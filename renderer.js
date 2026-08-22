@@ -23,7 +23,7 @@ import {
 import { getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
 import { PREVIEW_CSP } from './src/preview/security.js';
 import { getBrowserTabLabel, normalizeLocalBrowserUrl } from './src/ui/browser.mjs';
-import { createEditorKit, revealLine } from './src/editor/cm6.mjs';
+import { createEditorKit, revealLine, setEditorSearchQuery, editorFindNext, editorFindPrevious, countEditorMatches } from './src/editor/cm6.mjs';
 import { isDocDirty, getCursorLine, getSelectionLines, detectEol, applyEol, formatLineReference } from './src/editor/doc-state.mjs';
 import {
   INTERNAL_FILE_MIME,
@@ -167,6 +167,17 @@ const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
 const searchStatus = document.getElementById('search-status');
 const searchCaseCheckbox = document.getElementById('search-case-checkbox');
+// Phase 5 S3: shared find bar
+const findBar = document.getElementById('find-bar');
+const findInput = document.getElementById('find-input');
+const findCountEl = document.getElementById('find-count');
+const findPrevBtn = document.getElementById('find-prev-btn');
+const findNextBtn = document.getElementById('find-next-btn');
+const findCloseBtn = document.getElementById('find-close-btn');
+// Declared early: showMainSurface hides the bar for non file/preview
+// surfaces, and can run before the S3 section below is evaluated.
+let findOpen = false;
+let findMode = null; // 'editor' | 'preview' | null
 const previewTabBar = tabBar;
 const splitter = document.getElementById('splitter');
 const contextMenu = document.getElementById('context-menu');
@@ -313,6 +324,10 @@ function showMainSurface(kind) {
   if (mainSurface.dataset.surface === 'preview' && kind !== 'preview') {
     queueVisiblePreviewScrollCapture();
   }
+  // S3: the find bar only applies to editor/preview surfaces. Switching
+  // away (e.g. clicking a terminal tab) closes it so it never dangles
+  // above an unsupported pane.
+  if (findOpen && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
   terminalPane.classList.toggle('hidden', kind !== 'terminal');
   fileEditorPane.classList.toggle('hidden', kind !== 'file');
   previewPane.classList.toggle('hidden', kind !== 'preview');
@@ -3723,21 +3738,40 @@ validateBindings(BINDINGS);
 
 function getFocusContext() {
   const ae = document.activeElement;
-  if (ae === editorTextarea) return new Set(['scratchFocus']);
-  if (ae && fileEditorMount.contains(ae)) return new Set(['editorFocus']);
+  let ctx;
+  if (ae === findInput) {
+    // The find bar belongs to whichever surface opened it.
+    ctx = new Set([findMode === 'preview' ? 'previewFocus' : 'editorFocus']);
+  } else if (ae === editorTextarea) {
+    ctx = new Set(['scratchFocus']);
+  } else if (ae && fileEditorMount.contains(ae)) {
+    ctx = new Set(['editorFocus']);
   // treeFilterFocus: filter input is focused. Slash binding (treeFocus)
   // won't fire, so / can be typed. Escape binding (treeFocus || treeFilterFocus)
   // will fire, so Escape clears the filter.
-  if (ae === treeFilterInput) return new Set(['treeFilterFocus']);
-  if (ae?.closest('#file-tree')) return new Set(['treeFocus']);
-  if (ae === searchInput || ae?.closest('#search-pane')) return new Set(['searchFocus']);
+  } else if (ae === treeFilterInput) {
+    ctx = new Set(['treeFilterFocus']);
+  } else if (ae?.closest('#file-tree')) {
+    ctx = new Set(['treeFocus']);
+  } else if (ae === searchInput || ae?.closest('#search-pane')) {
+    ctx = new Set(['searchFocus']);
   // When a terminal tab is active, treat as terminalFocus even if focus
   // is on <body> (e.g. after closing a modal). This ensures Ctrl+B
   // (!terminalFocus) correctly defers to the shell's tmux prefix.
-  if (activeMainView === 'terminal') return new Set(['terminalFocus']);
-  if (activeMainView === 'preview') return new Set(['previewFocus']);
-  if (activeMainView === 'file') return new Set(['editorFocus']);
-  return new Set();
+  } else if (activeMainView === 'terminal') {
+    ctx = new Set(['terminalFocus']);
+  } else if (activeMainView === 'preview') {
+    ctx = new Set(['previewFocus']);
+  } else if (activeMainView === 'file') {
+    ctx = new Set(['editorFocus']);
+  } else {
+    ctx = new Set();
+  }
+  // S3: findOpen is a state context — it coexists with any focus context
+  // so Escape reaches find_close regardless of what has focus while the
+  // bar is open.
+  if (findOpen) ctx.add('findOpen');
+  return ctx;
 }
 
 document.addEventListener('keydown', (e) => {
@@ -3750,7 +3784,7 @@ document.addEventListener('keydown', (e) => {
   // main editing surfaces (project name input, prompt modal, etc).
   // Those have their own keydown handlers.
   const ae = document.activeElement;
-  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== treeFilterInput && ae !== searchInput) {
+  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== treeFilterInput && ae !== searchInput && ae !== findInput) {
     // Allow global bindings (Ctrl+Shift+F) even in inputs.
     const key = keyToString(e);
     const isGlobal = BINDINGS.some(b => b.key === key && (b.when === null || b.when === undefined || b.when === ''));
@@ -5008,6 +5042,146 @@ if (searchInput) {
     }
   });
 }
+
+// ============================================================
+// Phase 5 S3: Shared find bar (editor / preview delegation)
+// ============================================================
+//
+// One bar, delegated by the kind of the active main surface:
+//   editor  -> @codemirror/search commands (standard panel NOT used)
+//   preview -> webview.findInPage()
+//   terminal -> nothing (terminal keeps Ctrl+F; D21 discipline)
+// The bar sits between the tab bar and #main-surface — it pushes content
+// down, it does not overlay it.
+
+let findPreviewQuery = '';
+
+function updateEditorFindCount() {
+  const query = findInput.value;
+  if (!query) {
+    findCountEl.textContent = '';
+    return;
+  }
+  const { total, index } = countEditorMatches(fileEditorView.state, query);
+  findCountEl.textContent = total ? `${index} / ${total}` : 'No matches';
+}
+
+function canFindInPreview() {
+  return activeMainView === 'preview' && !!previewWebview.src && previewWebview.src !== 'about:blank';
+}
+
+function findInPreview({ forward, findNext }) {
+  if (!canFindInPreview()) return;
+  const text = findInput.value;
+  if (!text) return;
+  try {
+    previewWebview.findInPage(text, { forward, findNext });
+  } catch {
+    // webview not attached yet; ignore.
+  }
+}
+
+function stopPreviewFind() {
+  try {
+    previewWebview.stopFindInPage('clearSelection');
+  } catch {
+    // webview not attached yet; ignore.
+  }
+  findPreviewQuery = '';
+}
+
+function openFindBar() {
+  if (activeMainView !== 'file' && activeMainView !== 'preview') return;
+  findMode = activeMainView === 'preview' ? 'preview' : 'editor';
+  findOpen = true;
+  findBar.classList.remove('hidden');
+  // The bar pushes the surface down; terminals must re-fit.
+  requestAnimationFrame(handleResize);
+  findInput.focus();
+  findInput.select();
+}
+
+function closeFindBar({ restoreFocus = true } = {}) {
+  if (!findOpen) return;
+  findOpen = false;
+  findBar.classList.add('hidden');
+  if (findMode === 'preview') stopPreviewFind();
+  findMode = null;
+  findCountEl.textContent = '';
+  requestAnimationFrame(handleResize);
+  if (restoreFocus) {
+    if (activeMainView === 'file' && currentlyMountedPath) fileEditorView.focus();
+    else if (activeMainView === 'preview' && activeTabId !== null && tabs.has(activeTabId)) {
+      tabs.get(activeTabId).termEl.focus();
+    }
+  }
+}
+
+register('find_open', () => {
+  openFindBar();
+});
+
+register('find_next', () => {
+  if (!findOpen || !findInput.value) return;
+  if (findMode === 'editor') {
+    editorFindNext(fileEditorView);
+    updateEditorFindCount();
+  } else {
+    findInPreview({ forward: true, findNext: true });
+  }
+});
+
+register('find_prev', () => {
+  if (!findOpen || !findInput.value) return;
+  if (findMode === 'editor') {
+    editorFindPrevious(fileEditorView);
+    updateEditorFindCount();
+  } else {
+    findInPreview({ forward: false, findNext: true });
+  }
+});
+
+register('find_close', () => {
+  closeFindBar();
+});
+
+findInput.addEventListener('input', () => {
+  const query = findInput.value.trim();
+  if (findMode === 'editor') {
+    setEditorSearchQuery(fileEditorView, query);
+    updateEditorFindCount();
+  } else if (findMode === 'preview') {
+    // findInPage restarts on each new (non-findNext) call.
+    findPreviewQuery = query;
+    if (query) findInPreview({ forward: true, findNext: false });
+    else stopPreviewFind();
+  }
+});
+
+findInput.addEventListener('keydown', (e) => {
+  // Escape goes through the keybinding registry (find_close, when: findOpen).
+  // Enter/Shift+Enter are input behavior for next/previous match.
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    dispatch(e.shiftKey ? 'find_prev' : 'find_next');
+  }
+});
+
+findNextBtn.addEventListener('click', () => dispatch('find_next'));
+findPrevBtn.addEventListener('click', () => dispatch('find_prev'));
+findCloseBtn.addEventListener('click', () => dispatch('find_close'));
+
+// Preview delegation feedback: hit count comes from the webview event.
+previewWebview.addEventListener('found-in-page', (e) => {
+  if (!findOpen || findMode !== 'preview') return;
+  const result = e.result;
+  if (result && result.matches > 0) {
+    findCountEl.textContent = `${result.activeMatchOrdinal} / ${result.matches}`;
+  } else {
+    findCountEl.textContent = 'No matches';
+  }
+});
+
 
 // Expose dispatch to main process via executeJavaScript (for MCP get_focus)
 // Returns a JSON-serializable focus state

@@ -129,11 +129,14 @@ test('D9 guardrail: no forbidden editor packages in dependencies', () => {
   assert.deepEqual(forbidden, []);
 });
 
-test('D9 guardrail: exactly the three approved CM6 packages are installed', () => {
+test('D9 guardrail: exactly the four approved CM6 packages are installed', () => {
   const pkg = JSON.parse(read('package.json'));
   const cmPackages = Object.keys(pkg.dependencies).filter((name) => name.startsWith('@codemirror/'));
+  // @codemirror/search was added in Phase 5 S3 (find bar delegation target,
+  // explicitly approved — not on the D9 forbidden list).
   assert.deepEqual(cmPackages.sort(), [
     '@codemirror/commands',
+    '@codemirror/search',
     '@codemirror/state',
     '@codemirror/view',
   ]);
@@ -249,6 +252,84 @@ test('A4: every COMMAND_TYPES entry has a matching schema', async () => {
   const orphanSchemas = schemaNames.filter((name) => !typeNames.includes(name));
   assert.deepEqual(missingSchemas, [], 'commands missing schemas');
   assert.deepEqual(orphanSchemas, [], 'schemas without command types');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5 S3: shared find bar (editor delegation)
+// ---------------------------------------------------------------------------
+
+test('S3: countEditorMatches counts matches and locates the one at/after the head', async () => {
+  const { EditorState } = await import('@codemirror/state');
+  const cm6 = await importEsm('src/editor/cm6.mjs');
+
+  const doc = 'foo\nbar\nfoo\nbaz\nfoo';
+  const mk = (head) => EditorState.create({ doc, selection: { anchor: head } });
+
+  assert.deepEqual(cm6.countEditorMatches(mk(0), 'foo'), { total: 3, index: 1 });
+  // Head inside the second match (pos of line 3 start = 8).
+  assert.deepEqual(cm6.countEditorMatches(mk(8), 'foo'), { total: 3, index: 2 });
+  // Head past all matches wraps to the first.
+  assert.deepEqual(cm6.countEditorMatches(mk(doc.length), 'foo'), { total: 3, index: 1 });
+  // Case sensitivity.
+  const mixed = EditorState.create({ doc: 'Foo foo FOO' });
+  assert.deepEqual(cm6.countEditorMatches(mixed, 'foo', { caseSensitive: true }), { total: 1, index: 1 });
+  assert.deepEqual(cm6.countEditorMatches(mixed, 'foo'), { total: 3, index: 1 });
+  // Empty query and no matches.
+  assert.deepEqual(cm6.countEditorMatches(mk(0), ''), { total: 0, index: 0 });
+  assert.deepEqual(cm6.countEditorMatches(mk(0), 'zzz'), { total: 0, index: 0 });
+});
+
+test('S3: buildExtensions registers the search extension but not the panel/keymap', () => {
+  const source = read(path.join('src', 'editor', 'cm6.mjs'));
+  assert.match(source, /import \{ search, setSearchQuery/);
+  assert.match(source, /\n\s+search\(\),/);
+  // The standard search panel and its keymap must never be registered —
+  // they would duplicate the bar and bypass the keybinding registry (D21).
+  assert.doesNotMatch(source, /openSearchPanel|searchKeymap/);
+});
+
+test('S3: find commands are defined in types and schemas and wired in renderer', async () => {
+  const types = await importEsm('src/commands/types.js');
+  const schemas = await importEsm('src/commands/schemas.js');
+  for (const name of ['find_open', 'find_next', 'find_prev', 'find_close']) {
+    assert.ok(types.COMMAND_TYPES[name], `${name} in COMMAND_TYPES`);
+    assert.ok(schemas.COMMAND_SCHEMAS[name], `${name} in COMMAND_SCHEMAS`);
+  }
+  const bindings = read(path.join('src', 'keybindings', 'registry.js'));
+  const renderer = read('renderer.js');
+  assert.match(bindings, /key: 'Ctrl\+F', command: 'find_open', when: 'editorFocus \|\| previewFocus'/);
+  assert.match(bindings, /key: 'Escape', command: 'find_close', when: 'findOpen'/);
+  // Escape conflicts are avoided by negating findOpen on the other bindings.
+  assert.match(bindings, /command: 'tree_filter_clear', when: '!findOpen && treeFocus \|\| !findOpen && treeFilterFocus'/);
+  assert.match(bindings, /command: 'search_close', when: '!findOpen && searchFocus'/);
+  for (const name of ['find_open', 'find_next', 'find_prev', 'find_close']) {
+    assert.match(renderer, new RegExp(`register\\('${name}'`));
+  }
+});
+
+test('S3: renderer delegates by surface kind (editor CM6 / preview findInPage)', () => {
+  const renderer = read('renderer.js');
+  // Editor delegation via the cm6 helpers.
+  assert.match(renderer, /setEditorSearchQuery\(fileEditorView, query\)/);
+  assert.match(renderer, /editorFindNext\(fileEditorView\)/);
+  assert.match(renderer, /editorFindPrevious\(fileEditorView\)/);
+  // Preview delegation via webview.findInPage + cleanup on close.
+  assert.match(renderer, /previewWebview\.findInPage\(text, \{ forward, findNext \}\)/);
+  assert.match(renderer, /previewWebview\.stopFindInPage\('clearSelection'\)/);
+  assert.match(renderer, /addEventListener\('found-in-page'/);
+  // Hit counter shows "current / total".
+  assert.match(renderer, /`\$\{index\} \/ \$\{total\}`/);
+  // The bar lives between the tab bar and #main-surface (non-overlay).
+  const html = read('index.html');
+  const tabBarIdx = html.indexOf('id="main-tab-bar"');
+  const findBarIdx = html.indexOf('id="find-bar"');
+  const surfaceIdx = html.indexOf('id="main-surface"');
+  assert.ok(tabBarIdx !== -1 && tabBarIdx < findBarIdx && findBarIdx < surfaceIdx);
+  // Terminal keeps Ctrl+F: find_open is not bound to terminalFocus.
+  const kb = read(path.join('src', 'keybindings', 'registry.js'));
+  const ctrlF = kb.match(/\{ key: 'Ctrl\+F'[^}]*\}/g) || [];
+  assert.equal(ctrlF.length, 1);
+  assert.doesNotMatch(ctrlF[0], /terminalFocus/);
 });
 
 // ---------------------------------------------------------------------------
