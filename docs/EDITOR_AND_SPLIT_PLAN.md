@@ -303,9 +303,15 @@ Golden Layout / Dockview / FlexLayout はいずれも**タブの状態を自分�
 
 - [x] A1 完了 — 2026-08-22。`#file-editor-textarea` を `#file-editor-mount`（CM6 `EditorView` 1個）に置換。拡張は明示列挙（lineNumbers / highlightActiveLineGutter / highlightActiveLine / drawSelection / dropCursor / history / keymap）。`basicSetup` 不使用。Tab → 2スペース挿入は旧 textarea 挙動を維持（cm6.mjs 内の keymap）。`update_editor_content` / `update_editor_selection` の発火元を `updateListener` へ差し替え。コマンド語彙は変更なし（D10 維持）。テーマは styles.css の CSS 変数で上書き（one-dark 等の追加パッケージは不使用）
 - [x] A2 完了 — 2026-08-22。`openFiles` エントリが `state`（EditorState）と `scrollTop` を保持。タブ切替は `view.setState(f.state)` + スクロール復元。プロジェクト別退避は既存の `saveCurrentEditorState` / `switchProjectEditor` がエントリごと state を運ぶため追加コード不要（プロジェクト切替時に `syncMountedFileScroll()` を1呼び追加）。dirty 判定は `isDocDirty(state, originalContent)`（`src/editor/doc-state.mjs`、旧 textarea 計算との等価性をテストで固定）。undo 履歴・カーソルは state ごとタブに保持
-- [ ] A3 完了 —
+- [x] A3 完了 — 2026-08-22。`preview_reveal` のテキスト/コード分岐をエディタ側へ（`revealInEditor`: 未開なら `open_file` 経路で開いてタブ切替→`revealLine`）。ハイライトは `StateField` + `Decoration.line`（`pm-line-reveal-highlight`、トークンは `--attn-soft` / `--attn`）。Markdown / HTML / 画像 / ブラウザは従来どおり preview のまま（`buildLinePreviewDocument` は md/html の reveal で継続利用——テキスト経路のみ死んだため関数自体は削除せず）。ターミナルのファイルリンクのジャンプにも同一ハイライトを実施（ユーザー確認済み）。show_file がテキストファイルを指した場合、エディタ表示後に preview 側に残るストレイタブを閉じる
 - [ ] A4 完了 —
 - [ ] A5 完了 —
+
+**D13-3 確定（2026-08-22、ユーザー確認）**: ハイライトは**次の編集で消す**。新しい reveal は前のハイライトを差し替える。編集+新 reveal が同一トランザクションの場合は効果を優先。ヘッドレス単体テストで固定（`test/codemirror.test.cjs`）
+
+**A3 検証（kamox 実機・photon-mixer 上）**: ターミナルに `git grep -n import -- src` を実行→出力リンク `src/brush-preset.ts:6:` クリック→エディタが開き行6がハイライト + スクロール。編集1文字でハイライト消滅（Ctrl+Z で入力は戻した）。`npm test`: 165件成功
+
+**A3 の未検証**: MCP `show_file` 経路（`preview_reveal` の editor 分岐）は MCP セッションが必要なため実機未駆動。unit + 静的アサーションでカバー。Claude Code 接続環境での確認を A5 に残す
 
 **A1/A2 実装メモ（2026-08-22）**:
 

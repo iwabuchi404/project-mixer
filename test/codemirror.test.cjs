@@ -149,6 +149,71 @@ test('D9 guardrail: cm6.mjs does not use basicSetup', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A3: line reveal highlight (StateField + Decoration.line)
+// ---------------------------------------------------------------------------
+
+async function makeHighlightState(doc) {
+  const { EditorState } = await import('@codemirror/state');
+  const cm6 = await importEsm('src/editor/cm6.mjs');
+  const state = EditorState.create({ doc, extensions: cm6.buildExtensions() });
+  return { state, cm6 };
+}
+
+test('A3: setLineHighlight decorates the requested range', async () => {
+  const { state, cm6 } = await makeHighlightState('l1\nl2\nl3\nl4');
+  const next = state.update({
+    effects: cm6.setLineHighlight.of({ startLine: 2, endLine: 3 }),
+  }).state;
+  assert.deepEqual(cm6.getHighlightedLines(next), { startLine: 2, endLine: 3 });
+  assert.equal(cm6.getHighlightedLines(state), null);
+});
+
+test('A3: a new reveal replaces the previous highlight', async () => {
+  const { state, cm6 } = await makeHighlightState('l1\nl2\nl3\nl4');
+  let cur = state.update({ effects: cm6.setLineHighlight.of({ startLine: 1 }) }).state;
+  cur = cur.update({ effects: cm6.setLineHighlight.of({ startLine: 4 }) }).state;
+  assert.deepEqual(cm6.getHighlightedLines(cur), { startLine: 4, endLine: 4 });
+});
+
+test('A3: editing the document clears the highlight (D13-3)', async () => {
+  const { state, cm6 } = await makeHighlightState('l1\nl2\nl3');
+  let cur = state.update({ effects: cm6.setLineHighlight.of({ startLine: 2 }) }).state;
+  cur = cur.update({ changes: { from: 0, insert: 'x' } }).state;
+  assert.equal(cm6.getHighlightedLines(cur), null);
+});
+
+test('A3: highlight survives selection-only transactions and maps across edits when set together', async () => {
+  const { state, cm6 } = await makeHighlightState('l1\nl2');
+  // Selection change alone must not clear.
+  let cur = state.update({ selection: { anchor: 0 } }).state;
+  cur = cur.update({ effects: cm6.setLineHighlight.of({ startLine: 1 }) }).state;
+  cur = cur.update({ selection: { anchor: 1 } }).state;
+  assert.deepEqual(cm6.getHighlightedLines(cur), { startLine: 1, endLine: 1 });
+  // Edit + new reveal in one transaction: effect wins over the clear rule.
+  cur = cur.update({
+    changes: { from: 5, insert: '\nl3' },
+    effects: cm6.setLineHighlight.of({ startLine: 3 }),
+  }).state;
+  assert.deepEqual(cm6.getHighlightedLines(cur), { startLine: 3, endLine: 3 });
+});
+
+test('A3: out-of-range lines are clamped to the document', async () => {
+  const { state, cm6 } = await makeHighlightState('l1\nl2');
+  const next = state.update({
+    effects: cm6.setLineHighlight.of({ startLine: 99, endLine: 200 }),
+  }).state;
+  assert.deepEqual(cm6.getHighlightedLines(next), { startLine: 2, endLine: 2 });
+});
+
+test('A3: preview_reveal routes text/code files to the editor', () => {
+  const renderer = read('renderer.js');
+  assert.match(renderer, /async function revealInEditor\(filePath, line, endLine\)/);
+  assert.match(renderer, /!preview\.isBrowser && !isImage\(preview\.name\) && !isHtml\(preview\.name\) && !isMarkdown\(preview\.name\)/);
+  // jumpEditorToLine highlights as well (terminal link pointing).
+  assert.match(renderer, /function jumpEditorToLine\(line, endLine\) \{\s*\n\s*revealLine\(fileEditorView, line, endLine\);/);
+});
+
+// ---------------------------------------------------------------------------
 // Static wiring
 // ---------------------------------------------------------------------------
 

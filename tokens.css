@@ -7,6 +7,7 @@
   --g-5: #c8ccd4;
   --g-6: var(--g-5);
   --attn: #c08b4d;
+  --attn-soft: rgba(192, 139, 77, .18);
   --act: #5b9691;
   --act-ink: #0d1412;
   --err: #b56b66;

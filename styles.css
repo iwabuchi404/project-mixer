@@ -903,6 +903,12 @@ textarea:focus-visible,
   background: var(--g-3) !important;
 }
 
+/* A3: persistent line reveal highlight (show_file pointing). */
+#file-editor-mount .cm-line.pm-line-reveal-highlight {
+  background: var(--attn-soft);
+  box-shadow: inset 3px 0 var(--attn);
+}
+
 #file-editor-pane {
   padding-right: var(--s-1);
 }

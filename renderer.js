@@ -3149,10 +3149,27 @@ async function openTerminalLinkFile(filePath, lineNum, colNum, projectId) {
   }
 }
 
-// Scroll the editor to a specific 1-based line number.
-function jumpEditorToLine(line) {
-  revealLine(fileEditorView, line);
+// Scroll the editor to a specific 1-based line number and highlight it.
+function jumpEditorToLine(line, endLine) {
+  revealLine(fileEditorView, line, endLine);
   updateEditorCursorState();
+}
+
+// A3: reveal a line in the editor surface (show_file pointing for
+// text/code files). Opens the file if needed, then highlights the range.
+async function revealInEditor(filePath, line, endLine) {
+  if (!openFiles.has(filePath)) {
+    const name = filePath.split(/[/\\]/).pop();
+    await openFileInEditor(filePath, name);
+  }
+  if (openFiles.has(filePath) && activeMainFilePath !== filePath) {
+    switchEditorTab(filePath);
+  }
+  if (activeMainFilePath !== filePath) {
+    return { revealed: false, reason: 'file could not be opened in the editor' };
+  }
+  jumpEditorToLine(line, endLine);
+  return { revealed: true, inEditor: true, filePath };
 }
 
 async function createTerminal(command, cwd, projectId, savedLabel) {
@@ -4623,7 +4640,18 @@ register('preview_reveal', async ({ previewPath, line, endLine }) => {
   if (!line) return { revealed: false, reason: 'no line' };
   const targetPath = previewPath || activePreviewPath;
   const preview = previewFiles.get(targetPath);
-  if (!preview || targetPath !== activePreviewPath || !isActivePreview(preview)) {
+  if (!preview) return { revealed: false, reason: 'preview is not visible' };
+
+  // A3: text/code files are revealed in the editor surface, not the preview.
+  if (!preview.isBrowser && !isImage(preview.name) && !isHtml(preview.name) && !isMarkdown(preview.name)) {
+    const result = await revealInEditor(preview.path, line, endLine || line);
+    if (result.revealed && previewFiles.has(targetPath)) {
+      closePreviewTab(targetPath);
+    }
+    return result;
+  }
+
+  if (targetPath !== activePreviewPath || !isActivePreview(preview)) {
     return { revealed: false, reason: 'preview is not visible' };
   }
   if (isImage(preview.name)) {
