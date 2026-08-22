@@ -10,7 +10,7 @@ import DOMPurify from 'dompurify';
 import sharedScrollbarCss from './scrollbars.css';
 import { register, dispatch } from './src/commands/registry.js';
 import { BINDINGS, validateBindings, matchBinding, keyToString, evaluateWhen } from './src/keybindings/registry.js';
-import { getState, setState, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
+import { getState, setState, subscribe, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
 import { clearTerminalAttention, markAgentNotificationSeen, receiveAgentNotification, setTerminalWaiting } from './src/notifications/state.mjs';
 import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
 import {
@@ -99,6 +99,37 @@ const DEFAULT_TERMINAL_SEND_MODES = {
   devin: 'raw',
 };
 let terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES };
+
+// ============================================================
+// R2: attention-state commit choke point + store subscriptions
+// ============================================================
+//
+// activeProjectId / activeFilePath / activeTabId are derived caches of the
+// authoritative store values (R2). All attention mutations must go through
+// commitAttention so the store and the caches cannot drift. Exceptions are
+// the transient working values inside switchProjectEditor / initScratchTab,
+// which are finalized by the switch functions or selectProject before any
+// reader outside the swap sequence observes them.
+
+function commitAttention(patch) {
+  if ('activeProjectId' in patch) activeProjectId = patch.activeProjectId;
+  if ('activeFilePath' in patch) activeFilePath = patch.activeFilePath;
+  if ('activeTerminalTabId' in patch) activeTabId = patch.activeTerminalTabId;
+  setState(patch);
+}
+
+let subscribedBadgesRef = null;
+let subscribedAttentionRef = null;
+subscribe((s) => {
+  if (s.projectBadges !== subscribedBadgesRef) {
+    subscribedBadgesRef = s.projectBadges;
+    renderProjectList();
+  }
+  if (s.terminalAttention !== subscribedAttentionRef) {
+    subscribedAttentionRef = s.terminalAttention;
+    for (const tabId of tabs.keys()) updateTabStatus(tabId);
+  }
+});
 
 // ============================================================
 // DOM refs
@@ -574,19 +605,22 @@ async function saveProjectOrder() {
   }
 }
 
+// タイトルは「どのプロジェクトか」。名前が主役で、パスは補助。
+// パスは画面の他のどこにも出ないため、同名プロジェクトや worktree の
+// 取り違えを防ぐ唯一の手がかりになる。
+function updateTitleBar() {
+  const p = projects.get(activeProjectId);
+  titleBarContext.textContent = p?.name || '';
+  titleBarPath.textContent = p?.path || '';
+  titleBarPath.title = p?.path || '';
+}
+
 async function selectProject(projectId) {
   switchProjectEditor(projectId);
-  activeProjectId = projectId;
   focusedTreeEntry = null;
-  setState({ activeProjectId });
+  commitAttention({ activeProjectId: projectId });
   dispatch('project_set_badge', { projectId, kind: 'clear' });
-  // タイトルは「どのプロジェクトか」。名前が主役で、パスは補助。
-  // パスは画面の他のどこにも出ないため、同名プロジェクトや worktree の
-  // 取り違えを防ぐ唯一の手がかりになる。
-  const activeProject = projects.get(projectId);
-  titleBarContext.textContent = activeProject?.name || '';
-  titleBarPath.textContent = activeProject?.path || '';
-  titleBarPath.title = activeProject?.path || '';
+  updateTitleBar();
   // Update editor state in store after switching project editor
   const activePreview = previewFiles.get(activePreviewPath);
   if (activeSurface === 'preview' && isPreviewForProject(activePreview, projectId)) {
@@ -654,9 +688,8 @@ async function removeProject(projectId) {
   removeProjectEditorState(projectId);
 
   if (activeProjectId === projectId) {
-    activeProjectId = null;
-    activeTabId = null;
-    setState({ activeProjectId: null, activeTerminalTabId: null });
+    commitAttention({ activeProjectId: null, activeTerminalTabId: null });
+    updateTitleBar();
     fileTreeTitle.textContent = 'Files';
     fileTree.innerHTML = '';
     updateSendTarget();
@@ -2635,9 +2668,8 @@ function switchEditorTab(filePath, { focus = true } = {}) {
   const f = openFiles.get(filePath);
   if (!f) return;
 
-  activeFilePath = filePath;
   activeSurface = 'editor';
-  setState({ activeFilePath: filePath, isPreview: false });
+  commitAttention({ activeFilePath: filePath, isPreview: false });
   if (f.isScratch) {
     selectComposerTab(f, { focus });
     setState({ scratchContent: f.content });
@@ -2658,10 +2690,9 @@ function selectComposerTab(file, { focus = true } = {}) {
     if (candidate.isScratch) setTabSelected(candidate.tabEl, candidate === file);
   });
   activeComposerPath = file.path;
-  activeFilePath = file.path;
   activeSurface = 'editor';
   editorTextarea.value = file.content;
-  setState({ activeFilePath: file.path, isPreview: false, scratchContent: file.content });
+  commitAttention({ activeFilePath: file.path, isPreview: false, scratchContent: file.content });
   if (focus) {
     setScratchCollapsed(false);
     editorTextarea.focus();
@@ -3425,14 +3456,12 @@ function showProjectTabs(projectId) {
     if (activeMainView === 'terminal') {
       switchTab(restoreId);
     } else {
-      activeTabId = restoreId;
       projectActiveTab.set(projectId, restoreId);
-      setState({ activeTerminalTabId: restoreId });
+      commitAttention({ activeTerminalTabId: restoreId });
       updateSendTarget();
     }
   } else {
-    activeTabId = null;
-    setState({ activeTerminalTabId: null });
+    commitAttention({ activeTerminalTabId: null });
     updateSendTarget();
   }
 }
@@ -3450,16 +3479,14 @@ function switchTab(tabId, { focus = true } = {}) {
   t.termEl.style.display = 'block';
   activateMainTab(t.tabElement);
   showMainSurface('terminal');
-  activeTabId = tabId;
   activeMainView = 'terminal';
   activeSurface = 'editor';
   const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
   if (composer) {
-    activeFilePath = composer.path;
-    setState({ activeFilePath: composer.path, isPreview: false, scratchContent: composer.content });
+    commitAttention({ activeFilePath: composer.path, isPreview: false, scratchContent: composer.content });
   }
   projectActiveTab.set(t.projectId, tabId);
-  setState({ activeTerminalTabId: tabId });
+  commitAttention({ activeTerminalTabId: tabId });
   // Completion notices become read when opened. Input-waiting notices are
   // intentionally not "seen" because they remain actionable until input.
   if (!getTabAttention(tabId)?.waiting) {
@@ -3521,9 +3548,8 @@ function closeTerminal(tabId) {
     if (nextId !== null) {
       switchTab(nextId);
     } else {
-      activeTabId = null;
       projectActiveTab.delete(projectId);
-      setState({ activeTerminalTabId: null });
+      commitAttention({ activeTerminalTabId: null });
       activateMainTab(null);
       showMainSurface('terminal');
       updateSendTarget();

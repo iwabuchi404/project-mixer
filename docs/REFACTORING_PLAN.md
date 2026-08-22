@@ -2,7 +2,7 @@
 
 **作成日**: 2026-08-12
 
-**状態**: R0実装、R1概ね完了、R2–R4部分実装（2026-08-12）。R5の実Electron検証は未実施。下記「実装ログ」参照。
+**状態**: R0実装、R1概ね完了、**R2完了（2026-08-22）**、R3–R4部分実装。R5の実Electron検証は未実施。下記「実装ログ」参照。
 
 **対象ブランチ**: `v2`
 
@@ -226,14 +226,17 @@ StoreにはID・文字列・boolean・配列・plain objectだけを置く。DOM
 - `main.js` `dispatchToRenderer`: エラーを握り潰さずlog出力してre-throw。
 - Gate: 自動テスト成功。installed/dev同時起動による配送確認はR5で必要。
 
-### R2: Storeをsingle source of truthに（部分実装）
+### R2: Storeをsingle source of truthに（完了・2026-08-22）
 - `src/store/index.js`: `projectBadges` と `waitingTabs` を追加。selector `getProjectBadge`/`getWaitingSummary`/`isTabWaiting` を追加。
 - `renderer.js` `project_set_badge` handler: storeを更新し、DOMはstoreから描画。
 - `renderer.js` `renderProjectList`: 再描画後にstoreからbadge/waiting状態を復元。
 - `renderer.js` `updateTabStatus`/`updateProjectStatus`: storeと同期。
 - `renderer.js` `closeTerminal`: storeからwaiting状態を削除。
-- **残作業**: `activeProjectId`、active file/preview/terminal、project別scratch/open file identityはrenderer globalとの二重管理が残る。store subscriptionによる描画も未導入。
-- Gate: badge/waitingの自動テスト成功。R2全体のGateは未達。
+- **完了（2026-08-22）**: attention状態（`activeProjectId` / `activeFilePath` / `activeTerminalTabId`）の書き込みを `commitAttention(patch)` チョークポイントに集約。renderer側の同名変数は派生キャッシュに降格し、storeとキャッシュが乖離する経路を構造的に排除。二重書き込みサイト（selectProject / removeProject / switchEditorTab / selectComposerTab / switchTab / closeTerminal / showProjectTabs）をすべて移行。`switchProjectEditor` / `initScratchTab` 内の一時値は後続のswitch系関数・selectProjectがコミットで収束するため直書きのまま（設計コメントに記載）。
+- **store subscription描画を導入**: `projectBadges` 変更→`renderProjectList()`、`terminalAttention` 変更→全タブの `updateTabStatus()`。タイトルバーは `updateTitleBar()` がコミット済みattention状態から生成。
+- テスト: `test/refactor-r2.test.cjs`（6件、`npm run test:refactor-r2`、`npm test` に組込み）。store購読の意味論（同期通知・変更時のみ通知・getStateはコピー）+ 配線の静的検査（commitAttention存在・二重書き込みの不在・subscription描画・タイトル生成）。
+- kamox実機検証（2026-08-22）: プロジェクト切替 A→B→A でタブ選択・エディタ内容・scratch内容・タイトルバーが復元。エラーログなし。`npm test`: 174件成功。
+- **Gate達成**: badge/status/focusがstoreの状態から再描画され、project list再生成で状態が失われない。attention状態の正本はstoreに一箇所。
 
 ### R3: Rendererの責務をfeature単位に抽出（部分実装）
 - `renderer.js` `createMainTab` factoryを追加。4種類のtab（preview/browser/file/terminal）の重複markup + event setupを統合。
