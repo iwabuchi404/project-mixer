@@ -4442,19 +4442,36 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
   const pid = projectId || activeProjectId;
   let effectiveResumeId = resumeSessionId || null;
   // The prompt fires only for explicit menu-created terminals — layout
-  // restore must reopen tabs silently. Once the setting exists
-  // (auto-resume vs ask), this branch becomes its switch point.
+  // restore must reopen tabs silently. The File menu checkbox
+  // (Auto-Resume Previous Sessions) switches between ask and auto modes.
   if (resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED.has(cmd)) {
     const last = loadLastSessions()[`${pid}:${cmd}`];
     if (last && last.sessionId) {
-      const ok = await showConfirm(
-        `Resume ${TERMINAL_LABELS[cmd] || cmd}?`,
-        'A previous session was found for this project. Resume it instead of starting fresh?',
-      );
-      if (ok) effectiveResumeId = last.sessionId;
+      let mode = 'ask';
+      try {
+        mode = (await window.api.getSettings()).resumeMode || 'ask';
+      } catch {
+        // Fall back to asking when settings are unavailable.
+      }
+      if (mode === 'auto') {
+        effectiveResumeId = last.sessionId;
+      } else {
+        const ok = await showConfirm(
+          `Resume ${TERMINAL_LABELS[cmd] || cmd}?`,
+          'A previous session was found for this project. Resume it instead of starting fresh?',
+        );
+        if (ok) effectiveResumeId = last.sessionId;
+      }
     }
   }
   return createTerminal(cmd, cwd_, pid, label, effectiveResumeId);
+});
+
+register('resume_mode_changed', ({ mode }) => {
+  showToast({
+    key: 'resume-mode',
+    message: mode === 'auto' ? 'Session resume: automatic' : 'Session resume: ask every time',
+  });
 });
 
 // A8: commands for application menu access

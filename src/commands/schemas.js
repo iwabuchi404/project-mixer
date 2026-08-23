@@ -77,6 +77,8 @@ export const COMMAND_SCHEMAS = {
   search_close: p({}),
   // Phase 4.5 A4: point at selected editor lines from the scratch composer
   insert_selection_to_scratch: p({}),
+  // Session resume: menu checkbox toggles the mode.
+  resume_mode_changed: p({ mode: z.enum(['ask', 'auto']) }),
   // Phase 5 S3: shared find bar (delegates to editor / preview)
   find_open: p({}),
   find_next: p({}),

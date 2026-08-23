@@ -47,6 +47,24 @@ const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
 const layoutFile = path.join(configDir, 'layout.json');
 const portFile = path.join(configDir, 'port.json');
+const settingsFile = path.join(configDir, 'settings.json');
+// Session-resume mode: 'ask' shows the confirm modal per new agent tab;
+// 'auto' resumes silently when a previous session is known.
+let appSettings = { resumeMode: 'ask' };
+function loadAppSettings() {
+  try {
+    const data = readConfig(settingsFile, { resumeMode: 'ask' });
+    if (data && typeof data === 'object' && (data.resumeMode === 'ask' || data.resumeMode === 'auto')) {
+      appSettings = data;
+    }
+  } catch (e) {
+    console.warn(`[Project Mixer] ${e.message}; using default settings`);
+  }
+}
+function saveAppSettings() {
+  ensureConfigDir();
+  writeConfig(settingsFile, appSettings);
+}
 
 function ensureConfigDir() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
@@ -211,6 +229,17 @@ function setupApplicationMenu() {
           click: () => dispatchToRenderer('save_active_file'),
         },
         { type: 'separator' },
+        {
+          type: 'checkbox',
+          label: 'Auto-Resume Previous Sessions',
+          checked: appSettings.resumeMode === 'auto',
+          click: (menuItem) => {
+            appSettings.resumeMode = menuItem.checked ? 'auto' : 'ask';
+            saveAppSettings();
+            dispatchToRenderer('resume_mode_changed', { mode: appSettings.resumeMode });
+          },
+        },
+        { type: 'separator' },
         isMac ? { role: 'close', label: 'Close Window' } : { role: 'quit', label: 'Exit' },
       ],
     },
@@ -315,9 +344,12 @@ app.whenReady().then(() => {
   // Windows toast notifications require an AppUserModelID so the notification
   // shows the correct app name and icon. Without this, Windows falls back to
   // a generic "Electron" label. Must be set before any Notification is shown.
-  if (process.platform === 'win32') {
-    app.setAppUserModelId('com.projectmixer.app');
-  }
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.projectmixer.app');
+    }
+
+    loadAppSettings();
+
 
   // R4: startup guard — if projects.json is corrupt, stop startup and show
   // an error dialog instead of overwriting the corrupt file with defaults.
@@ -540,8 +572,9 @@ ipcMain.handle('mem:get', async () => {
 
 // --- Command availability check ---
 
-ipcMain.handle('command:check', async (event, { commands }) => {
-  const result = {};
+ipcMain.handle('settings:get', () => ({ ...appSettings }));
+
+ipcMain.handle('command:check', async (event, { commands }) => {  const result = {};
   // The --version fallback is restricted to known agent commands that may
   // be installed as shell functions or aliases not discoverable by where/which.
   // Allowing arbitrary commands here would let hook data execute any binary.

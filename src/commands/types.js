@@ -187,6 +187,11 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // Session resume: menu checkbox toggles the mode.
+  resume_mode_changed: {
+    args: { mode: 'ask | auto' },
+    returns: 'void',
+  },
   // Phase 5 S3: shared find bar (delegates to editor / preview)
   find_open: {
     args: {},
