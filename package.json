@@ -1,6 +1,6 @@
 {
   "name": "project-mixer",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "VSCode を 5〜8 枚開かなくて済むようにするデスクトップアプリ",
   "main": "main.js",
   "author": "Project Mixer",
