@@ -357,6 +357,10 @@ test('Ctrl+D is bound to editor_select_next_occurrence (editorFocus only) and wi
   // CM6 drops all but the main range unless this facet is enabled —
   // without it Ctrl+D silently does nothing multi-cursor.
   assert.match(cm6, /EditorState\.allowMultipleSelections\.of\(true\)/);
+  // #3: Alt+click multi-cursor + rectangular selection are core view
+  // extensions (no new packages — guardrail intact).
+  assert.match(cm6, /clickAddsSelectionRange\.of\(\(event\) => event\.altKey/);
+  assert.match(cm6, /rectangularSelection\(\)/);
 });
 
 test('multi-range selections survive a transaction with the facet enabled', async () => {

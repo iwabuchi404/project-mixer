@@ -19,6 +19,8 @@ import {
   drawSelection,
   dropCursor,
   keymap,
+  rectangularSelection,
+  crosshairCursor,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { search, setSearchQuery, findNext as cmFindNext, findPrevious as cmFindPrevious, selectNextOccurrence as cmSelectNextOccurrence, SearchQuery } from '@codemirror/search';
@@ -158,6 +160,11 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
     // VSCode-style multi-cursor (Ctrl+D): CM6 drops all but the main range
     // unless this facet is enabled.
     EditorState.allowMultipleSelections.of(true),
+    // Alt+click adds a cursor; Alt+drag selects a rectangular region
+    // (#3). Both are core @codemirror/view extensions.
+    EditorView.clickAddsSelectionRange.of((event) => event.altKey && event.button === 0),
+    rectangularSelection(),
+    crosshairCursor(),
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightActiveLine(),
