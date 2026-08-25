@@ -68,8 +68,8 @@ test('terminal, file editor, and preview share one main tab surface', () => {
 test('scratch composer remains a separate persistent lower surface', () => {
   const html = read('index.html');
   assert.match(html, /id="main-surface"[\s\S]*id="splitter"[\s\S]*id="editor-pane"/);
-  assert.match(html, /id="scratch-header"[\s\S]*id="send-target"[\s\S]*id="send-btn"[\s\S]*id="scratch-collapse-btn"[\s\S]*id="editor-textarea"/);
-  assert.doesNotMatch(html, /id="editor-tab-bar"|id="send-bar"/);
+  assert.match(html, /id="scratch-header"[\s\S]*id="send-target"[\s\S]*id="send-btn"[\s\S]*id="scratch-collapse-btn"[\s\S]*id="scratch-editor-mount"/);
+  assert.doesNotMatch(html, /id="editor-tab-bar"|id="send-bar"|id="editor-textarea"/);
   assert.match(html, /id="file-editor-mount"/);
   const css = read('styles.css');
   const renderer = read('renderer.js');

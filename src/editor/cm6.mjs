@@ -21,7 +21,7 @@ import {
   keymap,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
-import { search, setSearchQuery, findNext as cmFindNext, findPrevious as cmFindPrevious, SearchQuery } from '@codemirror/search';
+import { search, setSearchQuery, findNext as cmFindNext, findPrevious as cmFindPrevious, selectNextOccurrence as cmSelectNextOccurrence, SearchQuery } from '@codemirror/search';
 
 // Preserves the previous textarea behavior: Tab inserts two spaces.
 // Text input behavior, not a keybinding (same rule as insertIndent in
@@ -83,8 +83,81 @@ export function getHighlightedLines(state) {
   return { startLine, endLine };
 }
 
+// --- Find match highlight (Phase 5 S3 follow-up) ---
+// The stock search extension paints match decorations only while its panel
+// is open. The shared find bar never opens the panel (D21), so this field
+// paints fixed-string matches itself. The match containing the selection
+// head is tagged -selected (findNext places the cursor inside it).
+
+export const setFindHighlight = StateEffect.define(); // { query, caseSensitive } | null (clears)
+
+function buildFindDecos(state, spec, head = null) {
+  if (!spec || !spec.query) return Decoration.none;
+  const docText = state.doc.sliceString(0);
+  const hay = spec.caseSensitive ? docText : docText.toLowerCase();
+  const needle = spec.caseSensitive ? spec.query : spec.query.toLowerCase();
+  if (!needle) return Decoration.none;
+  const decos = [];
+  let pos = 0;
+  for (;;) {
+    const idx = hay.indexOf(needle, pos);
+    if (idx === -1) break;
+    // head (when provided) marks the match containing it as -selected.
+    const cls = head !== null && idx <= head && head <= idx + needle.length
+      ? 'cm-searchMatch cm-searchMatch-selected'
+      : 'cm-searchMatch';
+    decos.push(Decoration.mark({ class: cls }).range(idx, idx + needle.length));
+    pos = idx + needle.length;
+  }
+  return Decoration.set(decos, true);
+}
+
+const findHighlightField = StateField.define({
+  create: () => ({ query: '', caseSensitive: false, decos: Decoration.none }),
+  update(value, tr) {
+    let spec = { query: value.query, caseSensitive: value.caseSensitive };
+    let forced = false;
+    for (const effect of tr.effects) {
+      if (effect.is(setFindHighlight)) {
+        spec = effect.value || { query: '', caseSensitive: false };
+        forced = true;
+      }
+    }
+    // Recompute only on a new query or an edit (positions shift). NOT on
+    // selection moves: repainting decorations on every cursor move rewrites
+    // the DOM, which disturbs the native selection and makes CM6 read the
+    // selection back as a single range — collapsing multi-cursor (Ctrl+D).
+    // The current match is indicated by the native selection instead.
+    if (!forced && !tr.docChanged) return value;
+    if (!spec.query) return { ...spec, decos: Decoration.none };
+    return { ...spec, decos: buildFindDecos(tr.state, spec, tr.state.selection.main.head) };
+  },
+  provide: (field) => EditorView.decorations.from(field, (v) => v.decos),
+});
+
+// Test/diagnostic accessor: read the painted match ranges (0-based offsets)
+// and the selected one. Headless tests cannot read view decorations.
+export function getFindHighlightRanges(state) {
+  const v = state.field(findHighlightField, false);
+  if (!v || !v.decos || !v.decos.size) return { ranges: [], selected: null };
+  const ranges = [];
+  let selected = null;
+  const cursor = v.decos.iter();
+  while (cursor.value) {
+    const cls = cursor.value.spec.class || '';
+    const range = { from: cursor.from, to: cursor.to };
+    ranges.push(range);
+    if (cls.includes('cm-searchMatch-selected')) selected = range;
+    cursor.next();
+  }
+  return { ranges, selected };
+}
+
 export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
   return [
+    // VSCode-style multi-cursor (Ctrl+D): CM6 drops all but the main range
+    // unless this facet is enabled.
+    EditorState.allowMultipleSelections.of(true),
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightActiveLine(),
@@ -96,6 +169,10 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
     // duplicate the bar and the keymap would bypass the keybinding
     // registry (D21). The panel is never opened, so no panel DOM exists.
     search(),
+    // S3 follow-up: our own match decorations (the stock highlighter only
+    // paints while the stock panel is open). The current match — the one
+    // containing the selection head — gets the -selected class.
+    findHighlightField,
     lineHighlightField,
     keymap.of([{ key: 'Tab', run: insertTwoSpaces }]),
     keymap.of([...defaultKeymap, ...historyKeymap]),
@@ -115,7 +192,14 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
 // SearchQuery's caseSensitive flag; no regex (fixed-string only).
 export function setEditorSearchQuery(view, queryString, { caseSensitive = false } = {}) {
   const query = new SearchQuery({ search: queryString, caseSensitive });
-  view.dispatch({ effects: setSearchQuery.of(query) });
+  view.dispatch({
+    effects: [
+      setSearchQuery.of(query),
+      // The stock search extension only paints match highlights while its
+      // panel is open — we never open the panel (D21), so paint our own.
+      setFindHighlight.of({ query: queryString, caseSensitive }),
+    ],
+  });
 }
 
 export function editorFindNext(view) {
@@ -124,6 +208,18 @@ export function editorFindNext(view) {
 
 export function editorFindPrevious(view) {
   return cmFindPrevious(view);
+}
+
+// VSCode-style Ctrl+D: select the word at the cursor, then add the next
+// occurrence to the selection (multi-cursor). @codemirror/search provides
+// the command; drawSelection already renders multiple ranges.
+export function editorSelectNextOccurrence(view) {
+  return cmSelectNextOccurrence(view);
+}
+
+// Effect: scroll so the end of the document is visible (scratch append).
+export function scrollToEndEffect(view) {
+  return EditorView.scrollIntoView(view.state.doc.length, { y: 'end' });
 }
 
 // Count matches of the query in the document and locate the one starting at

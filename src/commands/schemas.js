@@ -81,6 +81,8 @@ export const COMMAND_SCHEMAS = {
   resume_mode_changed: p({ mode: z.enum(['ask', 'auto']) }),
   // Phase 5 S3: shared find bar (delegates to editor / preview)
   find_open: p({}),
+  // Editor: VSCode-style Ctrl+D (add next occurrence to selection)
+  editor_select_next_occurrence: p({}),
   find_next: p({}),
   find_prev: p({}),
   find_close: p({}),

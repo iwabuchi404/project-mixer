@@ -23,7 +23,7 @@ import {
 import { getPreviewForProject, getNextPreviewForProject, isPreviewForProject } from './src/preview/state.js';
 import { PREVIEW_CSP } from './src/preview/security.js';
 import { getBrowserTabLabel, normalizeLocalBrowserUrl } from './src/ui/browser.mjs';
-import { createEditorKit, revealLine, setEditorSearchQuery, editorFindNext, editorFindPrevious, countEditorMatches } from './src/editor/cm6.mjs';
+import { createEditorKit, revealLine, setEditorSearchQuery, editorFindNext, editorFindPrevious, editorSelectNextOccurrence, countEditorMatches, scrollToEndEffect } from './src/editor/cm6.mjs';
 import { isDocDirty, getCursorLine, getSelectionLines, detectEol, applyEol, formatLineReference } from './src/editor/doc-state.mjs';
 import {
   INTERNAL_FILE_MIME,
@@ -157,7 +157,7 @@ const terminalContainer = document.getElementById('terminal-container');
 const terminalPane = document.getElementById('terminal-pane');
 const newTabBtn = document.getElementById('new-tab-btn');
 const editorPane = document.getElementById('editor-pane');
-const editorTextarea = document.getElementById('editor-textarea');
+const scratchEditorMount = document.getElementById('scratch-editor-mount');
 const fileEditorPane = document.getElementById('file-editor-pane');
 const fileEditorMount = document.getElementById('file-editor-mount');
 const previewWebview = document.getElementById('preview-webview');
@@ -324,10 +324,9 @@ function showMainSurface(kind) {
   if (mainSurface.dataset.surface === 'preview' && kind !== 'preview') {
     queueVisiblePreviewScrollCapture();
   }
-  // S3: the find bar only applies to editor/preview surfaces. Switching
-  // away (e.g. clicking a terminal tab) closes it so it never dangles
-  // above an unsupported pane.
-  if (findOpen && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
+  // S3: the find bar only applies to editor/preview surfaces (the scratch
+  // bar survives surface switches — the composer is always visible).
+  if (findOpen && findMode !== 'scratch' && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
   terminalPane.classList.toggle('hidden', kind !== 'terminal');
   fileEditorPane.classList.toggle('hidden', kind !== 'file');
   previewPane.classList.toggle('hidden', kind !== 'preview');
@@ -1641,9 +1640,42 @@ const editorKit = createEditorKit({
     // in sync so selection readers (A4 pointing, get_focus) see live values.
     f.state = update.state;
     dispatch('update_editor_selection');
+    // S3 follow-up: keep the find bar's "index / total" in sync while the
+    // user moves the cursor with the bar open on the editor surface. Do NOT
+    // re-set the search query here — repainting decorations on every cursor
+    // move disturbs the native selection and collapses multi-cursor.
+    if (findOpen && findMode === 'editor') updateEditorFindCount();
   },
 });
 const fileEditorView = editorKit.view;
+
+// Scratch composer (D8): the lower surface is a second CM6 view so it gets
+// the same editor features as the main editor (multi-cursor, selection
+// rendering, history). The doc mirrors the active composer tab's content
+// (SCRATCH_PATH or a temporary composer tab).
+const scratchKit = createEditorKit({
+  parent: scratchEditorMount,
+  doc: '',
+  onDocChanged: (update) => {
+    const f = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+    if (!f) return;
+    f.content = update.state.doc.toString();
+    if (f.isScratch) setState({ scratchContent: f.content });
+    dispatch('update_editor_content', { filePath: f.path, content: f.content });
+  },
+  onSelectionChanged: () => {
+    dispatch('update_editor_selection');
+    if (findOpen && findMode === 'scratch') updateEditorFindCount();
+  },
+});
+const scratchView = scratchKit.view;
+
+// Replace the whole scratch doc (composer switch, undo last send, clear).
+function setScratchDoc(content) {
+  if (scratchView.state.doc.toString() !== content) {
+    scratchView.dispatch({ changes: { from: 0, to: scratchView.state.doc.length, insert: content } });
+  }
+}
 
 function syncMountedFileScroll() {
   const f = currentlyMountedPath !== null ? openFiles.get(currentlyMountedPath) : null;
@@ -2710,11 +2742,11 @@ function selectComposerTab(file, { focus = true } = {}) {
   });
   activeComposerPath = file.path;
   activeSurface = 'editor';
-  editorTextarea.value = file.content;
+  setScratchDoc(file.content);
   commitAttention({ activeFilePath: file.path, isPreview: false, scratchContent: file.content });
   if (focus) {
     setScratchCollapsed(false);
-    editorTextarea.focus();
+    scratchView.focus();
   }
   updateEditorCursorState();
 }
@@ -2814,7 +2846,7 @@ function setScratchCollapsed(collapsed) {
 
 scratchCollapseBtn.addEventListener('click', () => {
   setScratchCollapsed(!scratchCollapsed);
-  if (!scratchCollapsed) editorTextarea.focus();
+  if (!scratchCollapsed) scratchView.focus();
 });
 
 // No focusin/focusout handlers — scratch size is stable regardless of focus.
@@ -2846,8 +2878,15 @@ function appendToScratch(text) {
   if (target.isScratch) {
     setState({ scratchContent: target.content });
   }
-  editorTextarea.value = target.content;
-  editorTextarea.scrollTop = editorTextarea.scrollHeight;
+  if (targetPath === activeComposerPath) {
+    // Append in place and scroll to the end so the inserted text is visible.
+    const end = scratchView.state.doc.length;
+    scratchView.dispatch({
+      changes: { from: end, insert: sep + text + '\n' },
+      selection: { anchor: end + sep.length + text.length + 1 },
+      effects: scrollToEndEffect(scratchView),
+    });
+  }
   switchEditorTab(targetPath);
 }
 
@@ -2865,14 +2904,6 @@ function updateEditorContent(filePath, content) {
   }
 }
 
-editorTextarea.addEventListener('input', () => {
-  dispatch('update_editor_content', { filePath: activeComposerPath, content: editorTextarea.value });
-});
-editorTextarea.addEventListener('focus', () => {
-  const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
-  if (composer) selectComposerTab(composer, { focus: false });
-});
-
 // Update cursor/selection state for get_focus
 function updateEditorCursorState() {
   const f = activeFilePath ? openFiles.get(activeFilePath) : null;
@@ -2881,42 +2912,14 @@ function updateEditorCursorState() {
     return;
   }
   if (f.isScratch) {
-    const value = editorTextarea.value;
-    const pos = editorTextarea.selectionStart;
-    const line = value.substring(0, pos).split('\n').length;
-    let selection = null;
-    if (editorTextarea.selectionEnd > pos) {
-      selection = {
-        startLine: line,
-        endLine: value.substring(0, editorTextarea.selectionEnd).split('\n').length,
-      };
-    }
+    const line = getCursorLine(scratchView.state);
+    const selection = getSelectionLines(scratchView.state);
     setState({ cursorLine: line, selection });
     return;
   }
   const state = f.state || fileEditorView.state;
   setState({ cursorLine: getCursorLine(state), selection: getSelectionLines(state) });
 }
-
-editorTextarea.addEventListener('keyup', () => dispatch('update_editor_selection'));
-editorTextarea.addEventListener('click', () => dispatch('update_editor_selection'));
-editorTextarea.addEventListener('select', () => dispatch('update_editor_selection'));
-
-function insertIndent(input) {
-  const start = input.selectionStart;
-  const end = input.selectionEnd;
-  input.value = input.value.substring(0, start) + '  ' + input.value.substring(end);
-  input.selectionStart = input.selectionEnd = start + 2;
-  input.dispatchEvent(new Event('input'));
-}
-
-editorTextarea.addEventListener('keydown', (e) => {
-  // Tab indentation is text input behavior, not a keybinding.
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    insertIndent(editorTextarea);
-  }
-});
 
 async function saveActiveFile() {
   if (!activeFilePath) return;
@@ -2970,7 +2973,7 @@ function sendToTerminal(text, tabId) {
   if (!f && !hasExplicitText) return;
 
   const selectedText = f
-    ? editorTextarea.value.substring(editorTextarea.selectionStart, editorTextarea.selectionEnd)
+    ? scratchView.state.selection.ranges.map((r) => scratchView.state.sliceDoc(r.from, r.to)).join('\n')
     : '';
   let contentToSend = hasExplicitText ? text : (selectedText || f.content);
   if (!contentToSend) return;
@@ -3017,7 +3020,7 @@ function sendToTerminal(text, tabId) {
     lastSentContent = f.content;
     lastSentTabPath = activeComposerPath;
     f.content = '';
-    editorTextarea.value = '';
+    setScratchDoc('');
     setState({ scratchContent: '', cursorLine: null, selection: null });
     showToast({
       key: 'send-to-terminal',
@@ -3041,11 +3044,11 @@ function undoLastSend() {
     setState({ scratchContent: target.content });
   }
   if (activeComposerPath === (lastSentTabPath || SCRATCH_PATH)) {
-    editorTextarea.value = target.content;
+    setScratchDoc(target.content);
   }
   lastSentContent = '';
   switchEditorTab(lastSentTabPath || SCRATCH_PATH);
-  editorTextarea.focus();
+  scratchView.focus();
 }
 
 sendBtn.addEventListener('click', () => dispatch('send_to_terminal', {}));
@@ -3080,7 +3083,7 @@ splitter.addEventListener('mousedown', (e) => {
   editorPane.classList.add('expanded');
   // サイズ変更開始時にフォーカスをscratchエリアに移動する。
   // これにより、ドラッグ中に focusout で expanded が解除されるのを防ぐ。
-  editorTextarea.focus();
+  scratchView.focus();
   splitterStartY = e.clientY;
   splitterStartHeight = editorPane.offsetHeight;
   document.body.style.cursor = 'ns-resize';
@@ -3746,8 +3749,8 @@ function getFocusContext() {
   let ctx;
   if (ae === findInput) {
     // The find bar belongs to whichever surface opened it.
-    ctx = new Set([findMode === 'preview' ? 'previewFocus' : 'editorFocus']);
-  } else if (ae === editorTextarea) {
+    ctx = new Set([findMode === 'preview' ? 'previewFocus' : findMode === 'scratch' ? 'scratchFocus' : 'editorFocus']);
+  } else if (scratchEditorMount.contains(ae)) {
     ctx = new Set(['scratchFocus']);
   } else if (ae && fileEditorMount.contains(ae)) {
     ctx = new Set(['editorFocus']);
@@ -3789,7 +3792,7 @@ document.addEventListener('keydown', (e) => {
   // main editing surfaces (project name input, prompt modal, etc).
   // Those have their own keydown handlers.
   const ae = document.activeElement;
-  if (ae && ae.tagName === 'INPUT' && ae !== editorTextarea && ae !== treeFilterInput && ae !== searchInput && ae !== findInput) {
+  if (ae && ae.tagName === 'INPUT' && ae !== treeFilterInput && ae !== searchInput && ae !== findInput) {
     // Allow global bindings (Ctrl+Shift+F) even in inputs.
     const key = keyToString(e);
     const isGlobal = BINDINGS.some(b => b.key === key && (b.when === null || b.when === undefined || b.when === ''));
@@ -4031,7 +4034,7 @@ mainPane.addEventListener('dragover', (e) => {
 });
 mainPane.addEventListener('drop', (e) => {
   // Don't intercept if dropping on the editor or terminal (they have their own handlers)
-  if (e.target === editorTextarea || fileEditorMount.contains(e.target) || e.target.closest('#terminal-container')) return;
+  if (scratchEditorMount.contains(e.target) || fileEditorMount.contains(e.target) || e.target.closest('#terminal-container')) return;
   e.preventDefault();
   const paths = getDroppedFilePaths(e);
   for (const p of paths) {
@@ -4041,18 +4044,18 @@ mainPane.addEventListener('drop', (e) => {
 });
 
 // Scratch (editor textarea): append path
-editorTextarea.addEventListener('dragover', (e) => {
+scratchEditorMount.addEventListener('dragover', (e) => {
   if (hasFileDrop(e.dataTransfer)) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   }
 });
-editorTextarea.addEventListener('drop', (e) => {
+scratchEditorMount.addEventListener('drop', (e) => {
   e.preventDefault();
   const paths = getDroppedFilePaths(e);
   if (paths.length > 0) {
     dispatch('append_to_scratch', { text: paths.join('\n') });
-    editorTextarea.focus();
+    scratchView.focus();
   }
 });
 
@@ -4333,7 +4336,7 @@ register('focus_terminal', ({ tabId }) => {
 
 register('focus_scratch', () => {
   dispatch('switch_tab', { filePath: SCRATCH_PATH });
-  editorTextarea.focus();
+  scratchView.focus();
 });
 
 register('terminal_copy', () => {
@@ -5129,13 +5132,18 @@ if (searchInput) {
 
 let findPreviewQuery = '';
 
+function findView() {
+  if (findMode === 'scratch') return scratchView;
+  return fileEditorView;
+}
+
 function updateEditorFindCount() {
   const query = findInput.value;
   if (!query) {
     findCountEl.textContent = '';
     return;
   }
-  const { total, index } = countEditorMatches(fileEditorView.state, query);
+  const { total, index } = countEditorMatches(findView().state, query);
   findCountEl.textContent = total ? `${index} / ${total}` : 'No matches';
 }
 
@@ -5164,8 +5172,14 @@ function stopPreviewFind() {
 }
 
 function openFindBar() {
-  if (activeMainView !== 'file' && activeMainView !== 'preview') return;
-  findMode = activeMainView === 'preview' ? 'preview' : 'editor';
+  if (activeMainView === 'file' || activeMainView === 'preview') {
+    findMode = activeMainView === 'preview' ? 'preview' : 'editor';
+  } else if (scratchEditorMount.contains(document.activeElement)) {
+    // Ctrl+F from the scratch composer.
+    findMode = 'scratch';
+  } else {
+    return;
+  }
   findOpen = true;
   findBar.classList.remove('hidden');
   // The bar pushes the surface down; terminals must re-fit.
@@ -5179,11 +5193,13 @@ function closeFindBar({ restoreFocus = true } = {}) {
   findOpen = false;
   findBar.classList.add('hidden');
   if (findMode === 'preview') stopPreviewFind();
+  const wasMode = findMode;
   findMode = null;
   findCountEl.textContent = '';
   requestAnimationFrame(handleResize);
   if (restoreFocus) {
-    if (activeMainView === 'file' && currentlyMountedPath) fileEditorView.focus();
+    if (wasMode === 'scratch') scratchView.focus();
+    else if (activeMainView === 'file' && currentlyMountedPath) fileEditorView.focus();
     else if (activeMainView === 'preview' && activeTabId !== null && tabs.has(activeTabId)) {
       tabs.get(activeTabId).termEl.focus();
     }
@@ -5196,21 +5212,21 @@ register('find_open', () => {
 
 register('find_next', () => {
   if (!findOpen || !findInput.value) return;
-  if (findMode === 'editor') {
-    editorFindNext(fileEditorView);
-    updateEditorFindCount();
-  } else {
+  if (findMode === 'preview') {
     findInPreview({ forward: true, findNext: true });
+  } else {
+    editorFindNext(findView());
+    updateEditorFindCount();
   }
 });
 
 register('find_prev', () => {
   if (!findOpen || !findInput.value) return;
-  if (findMode === 'editor') {
-    editorFindPrevious(fileEditorView);
-    updateEditorFindCount();
-  } else {
+  if (findMode === 'preview') {
     findInPreview({ forward: false, findNext: true });
+  } else {
+    editorFindPrevious(findView());
+    updateEditorFindCount();
   }
 });
 
@@ -5218,16 +5234,29 @@ register('find_close', () => {
   closeFindBar();
 });
 
+// Editor: VSCode-style Ctrl+D (add next occurrence to selection).
+// Editor: VSCode-style Ctrl+D (add next occurrence to selection).
+// Applies to whichever CM6 view has focus (main editor or scratch).
+register('editor_select_next_occurrence', () => {
+  if (scratchEditorMount.contains(document.activeElement)) {
+    editorSelectNextOccurrence(scratchView);
+    return;
+  }
+  if (activeMainView !== 'file') return;
+  editorSelectNextOccurrence(fileEditorView);
+});
+
 findInput.addEventListener('input', () => {
   const query = findInput.value.trim();
-  if (findMode === 'editor') {
-    setEditorSearchQuery(fileEditorView, query);
-    updateEditorFindCount();
-  } else if (findMode === 'preview') {
+  if (findMode === 'preview') {
     // findInPage restarts on each new (non-findNext) call.
     findPreviewQuery = query;
     if (query) findInPreview({ forward: true, findNext: false });
     else stopPreviewFind();
+  } else if (findMode) {
+    // editor / scratch: same CM6 delegation.
+    setEditorSearchQuery(findView(), query);
+    updateEditorFindCount();
   }
 });
 

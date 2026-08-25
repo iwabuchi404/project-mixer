@@ -297,7 +297,7 @@ test('S3: find commands are defined in types and schemas and wired in renderer',
   }
   const bindings = read(path.join('src', 'keybindings', 'registry.js'));
   const renderer = read('renderer.js');
-  assert.match(bindings, /key: 'Ctrl\+F', command: 'find_open', when: 'editorFocus \|\| previewFocus'/);
+  assert.match(bindings, /key: 'Ctrl\+F', command: 'find_open', when: 'editorFocus \|\| previewFocus \|\| scratchFocus'/);
   assert.match(bindings, /key: 'Escape', command: 'find_close', when: 'findOpen'/);
   // Escape conflicts are avoided by negating findOpen on the other bindings.
   assert.match(bindings, /command: 'tree_filter_clear', when: '!findOpen && treeFocus \|\| !findOpen && treeFilterFocus'/);
@@ -309,10 +309,11 @@ test('S3: find commands are defined in types and schemas and wired in renderer',
 
 test('S3: renderer delegates by surface kind (editor CM6 / preview findInPage)', () => {
   const renderer = read('renderer.js');
-  // Editor delegation via the cm6 helpers.
-  assert.match(renderer, /setEditorSearchQuery\(fileEditorView, query\)/);
-  assert.match(renderer, /editorFindNext\(fileEditorView\)/);
-  assert.match(renderer, /editorFindPrevious\(fileEditorView\)/);
+  // Editor delegation via the cm6 helpers (findView() resolves the
+  // focused surface: main editor or scratch composer).
+  assert.match(renderer, /setEditorSearchQuery\(findView\(\), query\)/);
+  assert.match(renderer, /editorFindNext\(findView\(\)\)/);
+  assert.match(renderer, /editorFindPrevious\(findView\(\)\)/);
   // Preview delegation via webview.findInPage + cleanup on close.
   assert.match(renderer, /previewWebview\.findInPage\(text, \{ forward, findNext \}\)/);
   assert.match(renderer, /previewWebview\.stopFindInPage\('clearSelection'\)/);
@@ -330,6 +331,106 @@ test('S3: renderer delegates by surface kind (editor CM6 / preview findInPage)',
   const ctrlF = kb.match(/\{ key: 'Ctrl\+F'[^}]*\}/g) || [];
   assert.equal(ctrlF.length, 1);
   assert.doesNotMatch(ctrlF[0], /terminalFocus/);
+});
+
+// ---------------------------------------------------------------------------
+// Editor polish: Ctrl+D next occurrence + search highlight + selection CSS
+// ---------------------------------------------------------------------------
+
+test('Ctrl+D is bound to editor_select_next_occurrence (editorFocus only) and wired', () => {
+  const types = read(path.join('src', 'commands', 'types.js'));
+  const schemas = read(path.join('src', 'commands', 'schemas.js'));
+  const bindings = read(path.join('src', 'keybindings', 'registry.js'));
+  const renderer = read('renderer.js');
+  const cm6 = read(path.join('src', 'editor', 'cm6.mjs'));
+
+  // Both definitions are mandatory — adding only one breaks startup.
+  for (const source of [types, schemas]) {
+    assert.match(source, /editor_select_next_occurrence/);
+  }
+  // Terminal must keep Ctrl+D (EOF): binding is editor/scratch focus only.
+  assert.match(bindings, /key: 'Ctrl\+D', command: 'editor_select_next_occurrence', when: 'editorFocus \|\| scratchFocus'/);
+  assert.match(renderer, /register\('editor_select_next_occurrence'/);
+  assert.match(renderer, /editorSelectNextOccurrence\(fileEditorView\)/);
+  // The command comes from @codemirror/search (guardrail-approved package).
+  assert.match(cm6, /selectNextOccurrence/);
+  // CM6 drops all but the main range unless this facet is enabled —
+  // without it Ctrl+D silently does nothing multi-cursor.
+  assert.match(cm6, /EditorState\.allowMultipleSelections\.of\(true\)/);
+});
+
+test('multi-range selections survive a transaction with the facet enabled', async () => {
+  const { EditorState, EditorSelection } = await import('@codemirror/state');
+  const cm6 = await importEsm('src/editor/cm6.mjs');
+  const doc = 'alpha beta\ngamma alpha\nepsilon zeta';
+  const state = EditorState.create({ doc, extensions: cm6.buildExtensions() })
+    .update({ selection: EditorSelection.single(0, 5) }).state;
+  const next = state.update({
+    selection: state.selection.addRange(EditorSelection.range(17, 22), false),
+  }).state;
+  assert.equal(next.selection.ranges.length, 2);
+});
+
+test('search matches and selection are styled (classes ship without CSS in CM6)', () => {
+  const css = read('styles.css');
+  // @codemirror/search tags matches but styles nothing — without these the
+  // find bar appears to do nothing visually.
+  assert.match(css, /\.cm-searchMatch\b/);
+  assert.match(css, /\.cm-searchMatch-selected\b/);
+  // Keyboard (shift) selection visibility: the old --g-3 background was
+  // nearly identical to the editor background.
+  const sel = css.match(/#file-editor-mount \.cm-selectionBackground \{[^}]*\}/);
+  assert.ok(sel, 'selection rule exists');
+  assert.doesNotMatch(sel[0], /--g-3/);
+  // The focused variant must target .cm-editor.cm-focused (the mount never
+  // carries cm-focused itself).
+  assert.match(css, /#file-editor-mount \.cm-editor\.cm-focused \.cm-selectionBackground/);
+});
+
+test('find count updates on cursor movement while the find bar is open', () => {
+  const renderer = read('renderer.js');
+  // Count-only refresh: re-setting the query on every cursor move repaints
+  // decorations, disturbs the native selection, and collapses multi-cursor.
+  assert.match(renderer, /if \(findOpen && findMode === 'editor'\) updateEditorFindCount\(\);/);
+  assert.doesNotMatch(renderer, /if \(findOpen && findMode === 'editor'\) \{[\s\S]*?setEditorSearchQuery/);
+});
+
+test('S3 follow-up: find highlight field paints matches without the stock panel', async () => {
+  const { EditorState } = await import('@codemirror/state');
+  const cm6 = await importEsm('src/editor/cm6.mjs');
+
+  const doc = 'foo bar foo baz foo';
+  const mk = (head, query = 'foo') => EditorState.create({ doc, extensions: cm6.buildExtensions() })
+    .update({ selection: { anchor: head }, effects: cm6.setFindHighlight.of({ query, caseSensitive: false }) })
+    .state;
+
+  // All matches painted.
+  const { ranges } = cm6.getFindHighlightRanges(mk(0));
+  assert.deepEqual(ranges, [
+    { from: 0, to: 3 },
+    { from: 8, to: 11 },
+    { from: 16, to: 19 },
+  ]);
+
+  // The match containing the selection head is tagged -selected.
+  assert.deepEqual(cm6.getFindHighlightRanges(mk(8)).selected, { from: 8, to: 11 });
+  assert.deepEqual(cm6.getFindHighlightRanges(mk(0)).selected, { from: 0, to: 3 });
+
+  // Case sensitivity.
+  const mixed = EditorState.create({ doc: 'Foo foo', extensions: cm6.buildExtensions() })
+    .update({ effects: cm6.setFindHighlight.of({ query: 'foo', caseSensitive: true }) }).state;
+  assert.equal(cm6.getFindHighlightRanges(mixed).ranges.length, 1);
+
+  // Empty query clears.
+  const cleared = EditorState.create({ doc, extensions: cm6.buildExtensions() })
+    .update({ effects: cm6.setFindHighlight.of(null) }).state;
+  assert.equal(cm6.getFindHighlightRanges(cleared).ranges.length, 0);
+
+  // Edits recompute positions.
+  let edited = mk(0);
+  edited = edited.update({ changes: { from: 0, insert: 'x' } }).state;
+  const shifted = cm6.getFindHighlightRanges(edited).ranges;
+  assert.equal(shifted[0].from, 1);
 });
 
 // ---------------------------------------------------------------------------

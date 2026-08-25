@@ -197,6 +197,11 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // Editor: VSCode-style Ctrl+D (add next occurrence to selection)
+  editor_select_next_occurrence: {
+    args: {},
+    returns: 'void',
+  },
   find_next: {
     args: {},
     returns: 'void',

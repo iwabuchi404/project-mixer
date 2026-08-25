@@ -39,8 +39,11 @@ export const BINDINGS = [
   { key: 'Ctrl+Shift+Enter', command: 'insert_selection_to_scratch', when: 'editorFocus' },
   // Phase 5 S3: shared find bar. Terminal keeps Ctrl+F (forward-char), so
   // find_open only applies to editor/preview focus contexts.
-  { key: 'Ctrl+F', command: 'find_open', when: 'editorFocus || previewFocus' },
+  { key: 'Ctrl+F', command: 'find_open', when: 'editorFocus || previewFocus || scratchFocus' },
   { key: 'Escape', command: 'find_close', when: 'findOpen' },
+  // Editor: VSCode-style Ctrl+D (add next occurrence). editorFocus/scratch
+  // only — terminals must keep Ctrl+D (EOF).
+  { key: 'Ctrl+D', command: 'editor_select_next_occurrence', when: 'editorFocus || scratchFocus' },
 ];
 
 // --- Key normalization ---

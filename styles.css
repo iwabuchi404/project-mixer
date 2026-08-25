@@ -209,8 +209,12 @@ textarea:focus-visible,
 
 #find-count {
   flex: 0 0 auto;
-  color: var(--g-3);
-  font-size: var(--t-xs);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-1);
+  background: var(--g-2);
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -899,7 +903,7 @@ textarea:focus-visible,
 }
 
 #file-editor-mount,
-#editor-textarea {
+#scratch-editor-mount {
   display: block;
   width: 100%;
   height: 100%;
@@ -907,16 +911,7 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
-#editor-textarea {
-  resize: none;
-  border: 0;
-  border-radius: 0;
-  outline: 0;
-  font: var(--t-md)/1.55 var(--mono);
-  tab-size: 2;
-  white-space: pre;
-  overflow: auto;
-}
+/* Scratch composer CM6 surface: mirrors the main editor styles. */
 
 /* CodeMirror 6 (Phase 4.5 A1): match the previous textarea look.
    Padding moved from the textarea to the mount so the gutter aligns
@@ -954,12 +949,15 @@ textarea:focus-visible,
   border-right: 1px solid var(--g-2);
 }
 
+/* Semi-transparent: an opaque active-line background paints OVER the
+   selection layer (CM6 draws selection behind the text when focused) and
+   hides keyboard selections on the cursor's line. */
 #file-editor-mount .cm-activeLine {
-  background: var(--g-2);
+  background: var(--active-line);
 }
 
 #file-editor-mount .cm-activeLineGutter {
-  background: var(--g-2);
+  background: var(--active-line);
   color: var(--g-5);
 }
 
@@ -968,9 +966,25 @@ textarea:focus-visible,
   border-left-color: var(--g-5);
 }
 
-#file-editor-mount .cm-selectionBackground,
-#file-editor-mount.cm-focused .cm-selectionBackground {
-  background: var(--g-3) !important;
+/* Selection: VSCode-dark-like blue so keyboard (shift) selection is clearly
+   visible. The old --g-3 was nearly identical to the background. */
+#file-editor-mount .cm-selectionBackground {
+  background: var(--sel-soft) !important;
+}
+
+#file-editor-mount .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--sel) !important;
+}
+
+/* Phase 5 S3 follow-up: search match highlights. @codemirror/search tags
+   matches with these classes but ships no styles of its own. */
+#file-editor-mount .cm-searchMatch {
+  background: var(--attn-soft);
+}
+
+#file-editor-mount .cm-searchMatch-selected {
+  background: var(--match);
+  outline: 1px solid var(--match-edge);
 }
 
 /* A3: persistent line reveal highlight (show_file pointing). */
@@ -1376,4 +1390,63 @@ textarea:focus-visible,
 .toast-dismiss {
   color: var(--g-4);
   text-decoration: none;
+}
+
+/* ============================================================
+   Scratch composer CM6 surface (Phase: scratch editor migration)
+   Mirrors #file-editor-mount so the composer gets the same
+   selection / active-line / search-match rendering.
+   ============================================================ */
+
+#scratch-editor-mount {
+  padding: var(--s-3);
+  box-sizing: border-box;
+}
+
+#scratch-editor-mount .cm-editor {
+  height: 100%;
+  background: transparent;
+  color: var(--g-5);
+  font: var(--t-md)/1.55 var(--mono);
+}
+
+#scratch-editor-mount .cm-editor.cm-focused {
+  outline: none;
+}
+
+#scratch-editor-mount .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.55;
+  overflow: auto;
+}
+
+#scratch-editor-mount .cm-content {
+  caret-color: var(--g-5);
+  padding: 0;
+}
+
+#scratch-editor-mount .cm-cursor,
+#scratch-editor-mount .cm-dropCursor {
+  border-left-color: var(--g-5);
+}
+
+#scratch-editor-mount .cm-selectionBackground {
+  background: var(--sel-soft) !important;
+}
+
+#scratch-editor-mount .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--sel) !important;
+}
+
+#scratch-editor-mount .cm-activeLine {
+  background: var(--active-line);
+}
+
+#scratch-editor-mount .cm-searchMatch {
+  background: var(--attn-soft);
+}
+
+#scratch-editor-mount .cm-searchMatch-selected {
+  background: var(--match);
+  outline: 1px solid var(--match-edge);
 }
