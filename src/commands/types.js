@@ -214,4 +214,25 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // Phase 8 B1: flat pane operations. Not exposed to MCP (D11).
+  pane_split: {
+    args: { direction: "'row' | 'column' | 'toggle'?" },
+    returns: 'void',
+  },
+  pane_close: {
+    args: {},
+    returns: 'void',
+  },
+  focus_pane: {
+    args: { index: 'number' },
+    returns: 'void',
+  },
+  focus_pane_1: { args: {}, returns: 'void' },
+  focus_pane_2: { args: {}, returns: 'void' },
+  focus_pane_3: { args: {}, returns: 'void' },
+  focus_pane_4: { args: {}, returns: 'void' },
+  tab_move_to_pane: {
+    args: { tabId: 'number?', filePath: 'string?', paneIndex: 'number' },
+    returns: 'void',
+  },
 };

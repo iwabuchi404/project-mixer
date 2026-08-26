@@ -866,9 +866,44 @@ textarea:focus-visible,
 #terminal-container {
   position: relative;
   flex: 1;
+  display: flex;
   overflow: hidden;
   padding: var(--s-2);
   background: var(--g-1);
+}
+
+/* Phase 8 / B1: flat pane layout inside the terminal container */
+.terminal-pane-item {
+  position: relative;
+  flex: 1 1 0%;
+  min-width: 120px;
+  min-height: 100px;
+  display: flex;
+  overflow: hidden;
+  border-radius: var(--r-1);
+  outline: 1px solid transparent;
+}
+
+.terminal-pane-item.focused {
+  outline-color: var(--act);
+}
+
+.terminal-pane-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+}
+
+.pane-splitter {
+  flex: 0 0 6px;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.pane-splitter.horizontal {
+  cursor: ns-resize;
 }
 
 .terminal-instance,

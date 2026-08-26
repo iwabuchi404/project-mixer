@@ -11,7 +11,7 @@
     "build": "node build.cjs",
     "build:renderer": "node build.cjs",
     "build:renderer:watch": "node build.cjs --watch",
-    "test": "npm run test:phase0 && npm run test:phase1 && npm run test:phase2 && npm run test:phase2.5 && npm run test:phase3 && npm run test:phase4 && npm run test:phase5 && npm run test:codemirror && npm run test:agent-notifications && npm run test:devin-notifications && npm run test:refactor-r0 && npm run test:refactor-r2 && npm run test:refactor-r4",
+    "test": "npm run test:phase0 && npm run test:phase1 && npm run test:phase2 && npm run test:phase2.5 && npm run test:phase3 && npm run test:phase4 && npm run test:phase5 && npm run test:codemirror && npm run test:agent-notifications && npm run test:devin-notifications && npm run test:refactor-r0 && npm run test:refactor-r2 && npm run test:refactor-r4 && npm run test:phase8",
     "test:phase0": "node --test test/hook-settings.test.cjs",
     "test:phase1": "node --test test/phase1.test.cjs",
     "test:phase2": "node --test test/phase2.test.cjs",
@@ -37,7 +37,8 @@
     "dist:win": "electron-builder --win",
     "dist:win:portable": "electron-builder --win portable",
     "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux"
+    "dist:linux": "electron-builder --linux",
+    "test:phase8": "node --test test/phase8-pane.test.cjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",

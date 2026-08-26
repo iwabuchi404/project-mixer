@@ -327,12 +327,126 @@ function showMainSurface(kind) {
   // S3: the find bar only applies to editor/preview surfaces (the scratch
   // bar survives surface switches — the composer is always visible).
   if (findOpen && findMode !== 'scratch' && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
+
+  if (panes.length > 1) {
+    showMainSurfaceMultiPane(kind);
+    return;
+  }
+
   terminalPane.classList.toggle('hidden', kind !== 'terminal');
   fileEditorPane.classList.toggle('hidden', kind !== 'file');
   previewPane.classList.toggle('hidden', kind !== 'preview');
   searchPane.classList.toggle('hidden', kind !== 'search');
   mainSurface.dataset.surface = kind;
   requestAnimationFrame(handleResize);
+}
+
+// B1 multi-pane: the focused pane hosts the non-terminal surface (editor /
+// preview / search) while every other pane keeps showing its active
+// terminal. Surface nodes are moved into the pane body — <webview> reloads
+// on the move (spec §4.2); scroll position is restored afterwards.
+const surfaceHomeSlots = new Map(); // element -> { parent, nextSibling }
+
+function rememberSurfaceHome(el) {
+  if (!surfaceHomeSlots.has(el)) {
+    surfaceHomeSlots.set(el, { parent: el.parentElement, nextSibling: el.nextSibling });
+  }
+}
+
+function restoreSurfacesToMain() {
+  surfaceHomeSlots.forEach((slot, el) => {
+    // The saved nextSibling may have moved (e.g. it was hosted in a pane).
+    // Fall back to append when it is no longer a child of the home parent,
+    // otherwise insertBefore throws NotFoundError.
+    const ref = slot.nextSibling && slot.nextSibling.parentElement === slot.parent
+      ? slot.nextSibling
+      : null;
+    slot.parent.insertBefore(el, ref);
+    el.classList.add('hidden');
+  });
+}
+
+function surfaceNodeFor(kind) {
+  if (kind === 'file') return fileEditorPane;
+  if (kind === 'preview') return previewPane;
+  if (kind === 'search') return searchPane;
+  return null;
+}
+
+function currentSurfacePath(kind) {
+  if (kind === 'file') return activeFilePath;
+  if (kind === 'preview') return activePreviewPath;
+  return null;
+}
+
+function showAllPaneTerminals() {
+  panes.forEach((p) => {
+    p.tabIds.forEach((id) => {
+      const td = tabs.get(id);
+      if (td) td.termEl.style.display = p.activeTabId === id ? 'block' : 'none';
+    });
+  });
+}
+
+// B1: place surface nodes according to every pane's view. Surface kinds are
+// singletons (one editor / one preview / one search), but DIFFERENT kinds
+// can be hosted in different panes simultaneously — that is what keeps
+// "keyboard on the terminal, eyes on the document" possible.
+function placeSurfaces() {
+  [fileEditorPane, previewPane, searchPane].forEach(rememberSurfaceHome);
+  restoreSurfacesToMain();
+  const hostOf = {}; // kind -> pane
+  panes.forEach((p) => {
+    if (p.view && p.view.type !== 'terminal' && !hostOf[p.view.type]) {
+      hostOf[p.view.type] = p;
+    } else if (p.view && hostOf[p.view.type] && hostOf[p.view.type] !== p) {
+      p.view = null; // same-kind conflict: first pane wins
+    }
+  });
+  Object.entries(hostOf).forEach(([kind, p]) => {
+    const node = surfaceNodeFor(kind);
+    if (!node) return;
+    paneEls.get(p.id)?.body.appendChild(node);
+    node.classList.remove('hidden');
+  });
+  // A pane hosting a surface hides its terminals; every other pane shows its
+  // active terminal regardless of where the keyboard focus is.
+  panes.forEach((p) => {
+    const hosts = !!p.view;
+    p.tabIds.forEach((id) => {
+      const td = tabs.get(id);
+      if (!td) return;
+      td.termEl.style.display = (!hosts && p.activeTabId === id) ? 'block' : 'none';
+    });
+  });
+  updatePaneFocusClasses();
+  requestAnimationFrame(handleResize);
+}
+
+// B1: host a non-terminal surface inside an arbitrary pane. Only the same
+// kind is exclusive — hosting a preview in pane 2 never closes a file hosted
+// in pane 1.
+function hostSurfaceInPane(pane, kind) {
+  if (!pane) return;
+  if (kind === 'terminal') {
+    pane.view = null;
+  } else {
+    panes.forEach((p) => {
+      if (p !== pane && p.view && p.view.type === kind) p.view = null;
+    });
+    pane.view = { type: kind, path: currentSurfacePath(kind) };
+    if (kind === 'preview' && activePreviewPath) {
+      const f = previewFiles.get(activePreviewPath);
+      if (f) void restorePreviewScroll(f);
+    }
+  }
+  placeSurfaces();
+}
+
+function showMainSurfaceMultiPane(kind) {
+  const focused = focusedPane();
+  hostSurfaceInPane(focused, kind);
+  mainSurface.dataset.surface = focused.view ? focused.view.type : 'terminal';
 }
 
 const visibleToasts = new Map();
@@ -1325,6 +1439,7 @@ function showTabContextMenu(x, y, target) {
     const el = document.createElement('div');
     el.className = 'context-menu-item' + (item.danger ? ' context-menu-danger' : '');
     el.dataset.action = item.action;
+    if (item.paneIndex !== undefined) el.dataset.paneIndex = String(item.paneIndex);
     el.textContent = item.label;
     tabContextMenu.appendChild(el);
   }
@@ -1353,21 +1468,33 @@ function buildTabMenuItems(target) {
           : { action: 'bind-devin', label: 'Bind Devin Cloud Session…' });
       }
       items.push({ action: 'copy-cwd', label: 'Copy cwd' });
+      // B1: right-click move (spec §4.4 — no drag & drop).
+      if (panes.length > 1) {
+        panes.forEach((p, i) => {
+          if (p !== paneOfTab(target.tabId)) {
+            items.push({ action: 'move-to-pane', label: `Move to Pane ${i + 1}`, paneIndex: i });
+          }
+        });
+      }
       items.push({ action: 'close', label: 'Close', danger: true });
       return items;
     }
     case 'preview':
-    case 'editor-file':
-      return [
+    case 'browser':
+    case 'editor-file': {
+      const items = [
         { action: 'copy-path', label: 'Copy Path' },
         { action: 'open-os', label: 'Open in OS' },
-        { action: 'close', label: 'Close', danger: true },
       ];
-    case 'browser':
-      return [
-        { action: 'copy-path', label: 'Copy URL' },
-        { action: 'close', label: 'Close', danger: true },
-      ];
+      // B1: right-click move (spec §4.4 — no drag & drop).
+      if (panes.length > 1) {
+        panes.forEach((p, i) => {
+          items.push({ action: 'move-to-pane', label: `Move to Pane ${i + 1}`, paneIndex: i });
+        });
+      }
+      items.push({ action: 'close', label: 'Close', danger: true });
+      return items;
+    }
     case 'search':
       return [
         { action: 'close', label: 'Close', danger: true },
@@ -1400,6 +1527,14 @@ tabContextMenu.addEventListener('click', (e) => {
     if (term?.cwd) {
       window.api.clipboardWriteText(term.cwd);
       showToast({ key: 'copy-cwd', message: 'Working directory copied', detail: term.cwd });
+    }
+  } else if (action === 'move-to-pane') {
+    const paneIndex = Number(e.target.dataset.paneIndex);
+    if (t.kind === 'terminal') {
+      dispatch('tab_move_to_pane', { tabId: t.tabId, paneIndex });
+    } else {
+      // Preview / browser / editor tabs carry their path.
+      dispatch('tab_move_to_pane', { filePath: t.previewPath || t.filePath, paneIndex });
     }
   } else if (action === 'rename') {
     if (t.kind === 'terminal') renameTerminalTab(t.tabId);
@@ -1611,6 +1746,21 @@ let agentPreviewCounter = 0;
 const projectEditorStates = new Map();
 let activeEditorProjectId = null;
 let editorStateInitialized = false;
+
+// Phase 8 / B1: flat pane model (D24). No nesting — the terminal container
+// has a single direction ('row' | 'column') and panes split it evenly.
+// One pane is exactly the pre-B1 behavior.
+const MAX_PANES = 4;
+let panes = []; // [{ id, tabIds: [], activeTabId, size }] for the active project
+let activePaneId = null;
+let paneDirection = 'row'; // 'row' = side-by-side, 'column' = stacked
+let nextPaneId = 1;
+const paneEls = new Map(); // paneId -> { root, body }
+// Pane skeletons for projects that have no full editor state yet (e.g.
+// background terminals created by loadLayout before the project is opened).
+const projectPaneSkeletons = new Map(); // projectId -> { panes, activePaneId }
+// Pane skeletons persisted in layout.json from the previous session.
+let savedPaneLayouts = {};
 const SCRATCH_COMPACT_HEIGHT = 112;
 const SCRATCH_DEFAULT_EXPANDED_HEIGHT = 220;
 let savedScratchEditorHeight = SCRATCH_DEFAULT_EXPANDED_HEIGHT;
@@ -1709,6 +1859,11 @@ function saveCurrentEditorState() {
     previewReturnFilePath,
     lastSentContent,
     lastSentTabPath,
+    // B1: pane structure is per-project state.
+    panes: panes.map((p) => ({ id: p.id, tabIds: [...p.tabIds], activeTabId: p.activeTabId, size: p.size })),
+    activePaneId,
+    paneDirection,
+    nextPaneId,
   });
 }
 
@@ -1741,6 +1896,24 @@ function switchProjectEditor(projectId) {
       : null;
     lastSentContent = state.lastSentContent;
     lastSentTabPath = state.lastSentTabPath;
+    // B1: restore pane structure (validated against live tabs).
+    panes = Array.isArray(state.panes) && state.panes.length > 0
+      ? state.panes
+        .map((p) => ({
+          id: p.id,
+          tabIds: (p.tabIds || []).filter((id) => tabs.has(id)),
+          activeTabId: p.activeTabId !== null && tabs.has(p.activeTabId) ? p.activeTabId : null,
+          size: Number(p.size) || 0,
+          view: null,
+        }))
+        .filter((p) => p.tabIds.length > 0)
+      : [];
+    if (panes.length === 0) {
+      panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0 }];
+    }
+    nextPaneId = Math.max(Number(state.nextPaneId) || 1, ...panes.map((p) => p.id + 1));
+    activePaneId = panes.some((p) => p.id === state.activePaneId) ? state.activePaneId : panes[0].id;
+    paneDirection = state.paneDirection === 'column' ? 'column' : 'row';
     openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
   } else {
     openFiles = new Map();
@@ -1754,6 +1927,14 @@ function switchProjectEditor(projectId) {
     previewReturnFilePath = null;
     lastSentContent = '';
     lastSentTabPath = null;
+    // B1: adopt a pane skeleton if background terminals were already filed
+    // into this project before it was ever opened.
+    const sk = projectPaneSkeletons.get(projectId);
+    panes = sk && sk.panes.length > 0
+      ? sk.panes.map((p) => ({ ...p, view: null }))
+      : [];
+    activePaneId = sk ? sk.activePaneId : null;
+    projectPaneSkeletons.delete(projectId);
     editorStateInitialized = true;
     initScratchTab();
     saveCurrentEditorState();
@@ -1780,6 +1961,11 @@ function switchProjectEditor(projectId) {
     if (terminalId !== undefined && tabs.has(terminalId)) switchTab(terminalId, { focus: false });
     else showMainSurface('terminal');
   }
+
+  // B1: rebuild the pane DOM for the restored project and show each pane's
+  // active terminal.
+  renderPanes();
+  showPaneActiveTerminals();
 }
 
 function removeProjectEditorState(projectId) {
@@ -1814,6 +2000,11 @@ function removeProjectEditorState(projectId) {
     previewReturnFilePath = null;
     lastSentContent = '';
     lastSentTabPath = null;
+    panes = [];
+    activePaneId = null;
+    paneDirection = 'row';
+    nextPaneId = 1;
+    paneEls.clear();
     switchProjectEditor(null);
   }
 }
@@ -2959,6 +3150,29 @@ function buildPushFocusContext({ project, activeFilePath, isPreview, selectedTex
   return parts.join('\n');
 }
 
+// Phase 8 / D24 minimal verification: append the visible pane composition
+// so the agent receives the attention distribution at send time. Describes
+// what is ACTUALLY on screen per pane (terminal or hosted surface); returns
+// '' when the main area is not split (single pane = no distribution).
+function buildPaneContextSummary() {
+  if (panes.length <= 1) return '';
+  const dir = paneDirection === 'column' ? 'vertically stacked' : 'side-by-side';
+  const lines = panes.map((p, i) => {
+    let label;
+    if (p.view && p.view.type !== 'terminal') {
+      label = p.view.type === 'preview' ? `preview: ${p.view.path || '?'}` : `${p.view.type}: ${p.view.path || '?'}`;
+    } else {
+      const tid = p.activeTabId !== null && tabs.has(p.activeTabId)
+        ? p.activeTabId
+        : p.tabIds[p.tabIds.length - 1];
+      const t = tabs.get(tid);
+      label = t ? `terminal: ${t.label}` : 'empty';
+    }
+    return `- pane ${i + 1}${p.id === activePaneId ? ' [keyboard focus]' : ''}: ${label}`;
+  });
+  return ['--- panes ---', `${panes.length} panes ${dir}:`, ...lines, '--- end panes ---'].join('\n');
+}
+
 function sendToTerminal(text, tabId) {
   if (tabId !== undefined) {
     switchTab(tabId);
@@ -2991,6 +3205,13 @@ function sendToTerminal(text, tabId) {
     if (ctx) {
       contentToSend = contentToSend + '\n' + ctx;
     }
+  }
+  // B1 / D24: visible pane composition rides along on every send when the
+  // main area is split (independent of the context checkbox — it describes
+  // the layout, not the file focus).
+  const paneCtx = buildPaneContextSummary();
+  if (paneCtx) {
+    contentToSend = contentToSend + '\n' + paneCtx;
   }
 
   const lineCount = contentToSend.split('\n').length;
@@ -3258,7 +3479,18 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   const termEl = document.createElement('div');
   termEl.className = 'terminal-instance';
   termEl.style.display = 'block';
-  terminalContainer.appendChild(termEl);
+  // B1: only the terminal's own project may host it in a visible pane.
+  // Background-project terminals (loadLayout restores every project) stay
+  // detached from pane bodies and hidden until their project is selected.
+  const targetIsActive = projectId === activeProjectId;
+  if (targetIsActive) {
+    ensureDefaultPane();
+    const ownerPane = focusedPane() || panes[0];
+    (paneEls.get(ownerPane.id)?.body || terminalContainer).appendChild(termEl);
+  } else {
+    termEl.style.display = 'none';
+    terminalContainer.appendChild(termEl);
+  }
 
   await new Promise((resolve) => requestAnimationFrame(resolve));
   terminal.open(termEl);
@@ -3374,6 +3606,19 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     userScrollActive: false,
   });
 
+  // B1: register the tab in a pane of its OWN project. For the active
+  // project that is the currently focused pane; for background projects it
+  // is the persisted pane state (so loadLayout restores stay per-project).
+  if (targetIsActive) {
+    const createdPane = focusedPane() || panes[0];
+    createdPane.tabIds.push(tabId);
+    createdPane.activeTabId = tabId;
+    const createdBody = paneEls.get(createdPane.id)?.body;
+    if (createdBody && termEl.parentElement !== createdBody) createdBody.appendChild(termEl);
+  } else {
+    registerBackgroundTabPane(projectId, tabId);
+  }
+
   // xterm onData also carries terminal-generated protocol replies such as
   // focus-in (ESC [ I). Treat only actual keyboard, paste, and composition
   // events as user input so opening a focused TUI tab cannot clear waiting.
@@ -3487,19 +3732,299 @@ function showProjectTabs(projectId) {
     commitAttention({ activeTerminalTabId: null });
     updateSendTarget();
   }
+  // B1: every visible pane shows its own active terminal.
+  showPaneActiveTerminals();
+}
+
+// ============================================================
+// Phase 8 / B1: panes
+// ============================================================
+
+function ensureDefaultPane() {
+  if (panes.length === 0) {
+    panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
+  }
+  if (!panes.some((p) => p.id === activePaneId)) {
+    activePaneId = panes[0].id;
+  }
+}
+
+function getPane(id) {
+  return panes.find((p) => p.id === id) || null;
+}
+
+function focusedPane() {
+  ensureDefaultPane();
+  return getPane(activePaneId);
+}
+
+function paneOfTab(tabId) {
+  return panes.find((p) => p.tabIds.includes(tabId)) || null;
+}
+
+// B1: file a background-project terminal into that project's persisted pane
+// state so it can never bleed into the visible panes of another project.
+function registerBackgroundTabPane(projectId, tabId) {
+  const state = projectEditorStates.get(projectId);
+  if (state && Array.isArray(state.panes) && state.panes.length > 0) {
+    const p = state.panes.find((x) => x.id === state.activePaneId) || state.panes[0];
+    p.tabIds.push(tabId);
+    p.activeTabId = tabId;
+    return;
+  }
+  let sk = projectPaneSkeletons.get(projectId);
+  if (!sk || sk.panes.length === 0) {
+    sk = { panes: [{ id: nextPaneId, tabIds: [], activeTabId: null, size: 0 }], activePaneId: nextPaneId };
+    nextPaneId += 1;
+    projectPaneSkeletons.set(projectId, sk);
+  }
+  const p = sk.panes.find((x) => x.id === sk.activePaneId) || sk.panes[0];
+  p.tabIds.push(tabId);
+  p.activeTabId = tabId;
+}
+
+function updatePaneFocusClasses() {
+  paneEls.forEach((els, id) => {
+    els.root.classList.toggle('focused', id === activePaneId && panes.length > 1);
+  });
+}
+
+function applyPaneSizes() {
+  const horizontal = paneDirection !== 'column';
+  panes.forEach((p) => {
+    const els = paneEls.get(p.id);
+    if (!els) return;
+    if (p.size > 0) {
+      if (horizontal) els.root.style.width = p.size + 'px';
+      else els.root.style.height = p.size + 'px';
+    }
+  });
+}
+
+function addPaneSplitter(leftPane, rightPane) {
+  const leftEls = paneEls.get(leftPane.id);
+  const rightEls = paneEls.get(rightPane.id);
+  // Validate BEFORE touching the DOM so a missing element can never leave a
+  // stray splitter at the end of the container.
+  if (!leftEls || !rightEls) return;
+  const splitterEl = document.createElement('div');
+  splitterEl.className = 'pane-splitter' + (paneDirection === 'column' ? ' horizontal' : '');
+  // Insert between the two panes.
+  terminalContainer.insertBefore(splitterEl, rightEls.root);
+  const persist = () => {
+    leftPane.size = paneDirection === 'column' ? leftEls.root.offsetHeight : leftEls.root.offsetWidth;
+    saveCurrentEditorState();
+  };
+  if (paneDirection === 'column') {
+    makeHSplitter(splitterEl, leftEls.root, terminalContainer, 100, 100, persist);
+  } else {
+    makeVSplitter(splitterEl, leftEls.root, rightEls.root, 120, 120, persist);
+  }
+}
+
+function renderPanes() {
+  ensureDefaultPane();
+  terminalContainer.innerHTML = '';
+  paneEls.clear();
+  terminalContainer.style.flexDirection = paneDirection === 'column' ? 'column' : 'row';
+  panes.forEach((pane, i) => {
+    const root = document.createElement('div');
+    root.className = 'terminal-pane-item';
+    root.dataset.paneId = String(pane.id);
+    const body = document.createElement('div');
+    body.className = 'terminal-pane-body';
+    root.appendChild(body);
+    terminalContainer.appendChild(root);
+    paneEls.set(pane.id, { root, body });
+    // Splitter goes BETWEEN adjacent panes (inserted before this root).
+    if (i > 0) addPaneSplitter(panes[i - 1], pane);
+    // Move member terminals into this pane's body (xterm tolerates DOM
+    // moves; fit() is re-run by handleResize afterwards).
+    pane.tabIds.forEach((tabId) => {
+      const t = tabs.get(tabId);
+      if (t && t.termEl.parentElement !== body) body.appendChild(t.termEl);
+    });
+    root.addEventListener('mousedown', () => {
+      setFocusedPane(pane.id);
+    });
+  });
+  applyPaneSizes();
+  updatePaneFocusClasses();
+  // Re-home any hosted surface nodes (renderPanes wiped the pane bodies).
+  if (panes.length > 1) placeSurfaces();
+}
+
+// Show every pane's active terminal (used on project switch / restore).
+function showPaneActiveTerminals() {
+  tabs.forEach((td) => {
+    const p = paneOfTab(td.id);
+    td.termEl.style.display = p && p.activeTabId === td.id ? 'block' : 'none';
+  });
+  requestAnimationFrame(handleResize);
+}
+
+async function splitFocusedPane(direction) {
+  ensureDefaultPane();
+  // Soft limit (spec §4.1): warn but do not hard-block above MAX_PANES.
+  if (panes.length >= MAX_PANES) {
+    showToast({ key: 'pane-limit', type: 'warn', message: `More than ${MAX_PANES} panes may impact memory` });
+  }
+  if (direction === 'row' || direction === 'column') {
+    paneDirection = direction;
+  } else {
+    paneDirection = paneDirection === 'row' ? 'column' : 'row';
+  }
+  const pane = { id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null };
+  panes.push(pane);
+  activePaneId = pane.id;
+  renderPanes();
+  saveCurrentEditorState();
+  // The new pane is empty: spawn a terminal in it.
+  const p = projects.get(activeProjectId);
+  await dispatch('create_terminal', { command: defaultShell(), cwd: p?.path, projectId: activeProjectId });
+  requestAnimationFrame(handleResize);
+}
+
+function closeFocusedPane() {
+  ensureDefaultPane();
+  if (panes.length <= 1) return;
+  const idx = panes.findIndex((p) => p.id === activePaneId);
+  const [gone] = panes.splice(idx, 1);
+  const target = panes[Math.max(0, idx - 1)];
+  // Tabs survive: they move to the remaining pane (spec §4.4).
+  target.tabIds.push(...gone.tabIds.filter((id) => tabs.has(id)));
+  if (gone.activeTabId !== null && tabs.has(gone.activeTabId)) {
+    target.activeTabId = gone.activeTabId;
+  } else if (target.activeTabId === null && target.tabIds.length > 0) {
+    target.activeTabId = target.tabIds[target.tabIds.length - 1];
+  }
+  gone.tabIds.forEach((id) => {
+    const t = tabs.get(id);
+    if (t) t.termEl.style.display = 'none';
+  });
+  activePaneId = target.id;
+  renderPanes();
+  if (target.activeTabId !== null && tabs.has(target.activeTabId)) {
+    switchTab(target.activeTabId, { focus: false });
+  } else {
+    projectActiveTab.set(activeProjectId, null);
+    commitAttention({ activeTerminalTabId: null });
+    // The closed pane may have hosted a surface node — re-place everything.
+    placeSurfaces();
+    mainSurface.dataset.surface = 'terminal';
+    updateSendTarget();
+  }
+  saveCurrentEditorState();
+}
+
+function focusPaneByIndex(index) {
+  ensureDefaultPane();
+  const pane = panes[index];
+  if (!pane) return;
+  setFocusedPane(pane.id);
+  const tid = pane.activeTabId !== null && tabs.has(pane.activeTabId)
+    ? pane.activeTabId
+    : pane.tabIds[pane.tabIds.length - 1];
+  if (tid !== undefined && tabs.has(tid)) switchTab(tid);
+}
+
+// B1: move keyboard focus to a pane. This changes ONLY where the keyboard
+// is — surfaces hosted in other panes stay visible (D24: "keyboard on the
+// terminal, eyes on the document" must survive focus moves).
+function setFocusedPane(id) {
+  if (activePaneId === id) return;
+  activePaneId = id;
+  updatePaneFocusClasses();
+  saveCurrentEditorState();
+  const pane = getPane(id);
+  mainSurface.dataset.surface = pane && pane.view ? pane.view.type : 'terminal';
+}
+
+// B1: tab_move_to_pane (spec §4.4). Terminal tabs are physically moved into
+// the destination pane; editor/preview tabs re-host their surface there
+// (webview reloads on the move — accepted by spec §4.2).
+async function moveTabToPane(target, paneIndex) {
+  ensureDefaultPane();
+  const dest = panes[paneIndex];
+  if (!dest) return;
+
+  if (target.tabId !== undefined && target.tabId !== null) {
+    const t = tabs.get(target.tabId);
+    if (!t || t.projectId !== activeProjectId) return;
+    const from = paneOfTab(target.tabId);
+    if (from === dest) return;
+    from.tabIds = from.tabIds.filter((id) => id !== target.tabId);
+    if (from.activeTabId === target.tabId) {
+      from.activeTabId = from.tabIds.length > 0 ? from.tabIds[from.tabIds.length - 1] : null;
+    }
+    from.view = null;
+    dest.tabIds.push(target.tabId);
+    renderPanes();
+    switchTab(target.tabId);
+    saveCurrentEditorState();
+    return;
+  }
+
+  if (target.filePath) {
+    await dispatch('switch_tab', { filePath: target.filePath });
+    const kind = mainSurface.dataset.surface;
+    if (kind === 'terminal') return;
+    const focused = focusedPane();
+    focused.view = null;
+    hostSurfaceInPane(dest, kind);
+    activePaneId = dest.id;
+    updatePaneFocusClasses();
+    saveCurrentEditorState();
+  }
+}
+
+// Detach a closed terminal from its pane. Returns true if the pane became
+// empty and was removed.
+function detachTabFromPanes(tabId) {
+  const pane = paneOfTab(tabId);
+  if (!pane) return false;
+  pane.tabIds = pane.tabIds.filter((id) => id !== tabId);
+  if (pane.activeTabId === tabId) {
+    pane.activeTabId = pane.tabIds.length > 0 ? pane.tabIds[pane.tabIds.length - 1] : null;
+  }
+  if (pane.tabIds.length === 0 && panes.length > 1) {
+    panes = panes.filter((p) => p.id !== pane.id);
+    if (activePaneId === pane.id) activePaneId = panes[0].id;
+    renderPanes();
+    return true;
+  }
+  return false;
 }
 
 function switchTab(tabId, { focus = true } = {}) {
   const t = tabs.get(tabId);
   if (!t) return;
+  ensureDefaultPane();
 
-  // Hide all terminal elements (across all projects)
+  // B1: every pane keeps its active terminal visible simultaneously.
+  // Write the new activeTabId BEFORE computing visibility, otherwise the
+  // previously active tab stays display:block alongside the new one.
+  const pane = paneOfTab(tabId) || focusedPane();
+  pane.activeTabId = tabId;
+  if (!pane.tabIds.includes(tabId)) pane.tabIds.push(tabId);
+  activePaneId = pane.id;
+  pane.view = null;
+
+  tabs.forEach((td) => setTabSelected(td.tabElement, false));
+  panes.forEach((p) => {
+    p.tabIds.forEach((otherId) => {
+      const td = tabs.get(otherId);
+      if (td) td.termEl.style.display = p.activeTabId === otherId ? 'block' : 'none';
+    });
+  });
+  // Tabs that belong to no pane (e.g. background projects) stay hidden.
   tabs.forEach((td) => {
-    td.termEl.style.display = 'none';
-    setTabSelected(td.tabElement, false);
+    if (!paneOfTab(td.id)) td.termEl.style.display = 'none';
   });
 
   t.termEl.style.display = 'block';
+  setTabSelected(t.tabElement, true);
+  updatePaneFocusClasses();
   activateMainTab(t.tabElement);
   showMainSurface('terminal');
   activeMainView = 'terminal';
@@ -3561,6 +4086,7 @@ function closeTerminal(tabId) {
   dispatch('agent_session_unbound', { tabId });
   tabs.delete(tabId);
   dispatch('terminal_clear_attention', { tabId });
+  detachTabFromPanes(tabId);
 
   if (activeTabId === tabId) {
     // Find next tab in the same project
@@ -3632,6 +4158,15 @@ function updateProjectStatus(projectId) {
 // ============================================================
 
 const newTabMenu = document.getElementById('new-tab-menu');
+
+document.getElementById('split-pane-btn').addEventListener('click', () => {
+  dispatch('pane_split', {});
+});
+// Right-click the split button closes the focused pane (pane_close UI entry).
+document.getElementById('split-pane-btn').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  dispatch('pane_close', {});
+});
 
 newTabBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -3834,14 +4369,14 @@ let resizeTimeout;
 function handleResize() {
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(() => {
-    if (activeTabId !== null) {
-      const t = tabs.get(activeTabId);
-      if (t && t.termEl.style.display !== 'none') {
-        const shouldFollow = t.pinnedToBottom;
-        resizeTerminalToContainer(t);
-        t.pinnedToBottom = shouldFollow;
-      }
-    }
+    // B1: fit every visible terminal, not just the globally active one —
+    // each visible pane has its own live xterm instance.
+    tabs.forEach((t) => {
+      if (t.termEl.style.display === 'none') return;
+      const shouldFollow = t.pinnedToBottom;
+      resizeTerminalToContainer(t);
+      t.pinnedToBottom = shouldFollow;
+    });
   }, 50);
 }
 window.addEventListener('resize', handleResize);
@@ -4112,16 +4647,50 @@ document.addEventListener('drop', (e) => {
 // ============================================================
 
 async function saveLayout() {
+  // B1: persist pane structure per project INCLUDING tab membership.
+  // Members are stored as indices into the saved `tabs` array (stable
+  // across restarts — tabIds are regenerated on startup).
+  const tabsOut = Array.from(tabs.values()).map(t => ({
+    command: t.command,
+    label: t.label,
+    cwd: t.cwd,
+    projectId: t.projectId,
+  }));
+  const tabIndex = new Map();
+  Array.from(tabs.values()).forEach((t, i) => tabIndex.set(t.id, i));
+
+  const serializePanes = (dir, arr, act) => ({
+    direction: dir === 'column' ? 'column' : 'row',
+    activeIndex: Math.max(0, arr.findIndex((p) => p.id === act)),
+    panes: arr.map((p) => ({
+      size: p.size || 0,
+      members: p.tabIds.map((id) => tabIndex.get(id)).filter((i) => i !== undefined),
+      active: p.activeTabId !== null && tabIndex.has(p.activeTabId) ? tabIndex.get(p.activeTabId) : null,
+    })),
+  });
+
+  const paneLayouts = {};
+  if (activeEditorProjectId && (panes.length > 1 || paneDirection === 'column')) {
+    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId);
+  }
+  projectEditorStates.forEach((st, pid) => {
+    if (Array.isArray(st.panes) && st.panes.length > 0
+      && (st.panes.length > 1 || st.paneDirection === 'column')) {
+      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId);
+    }
+  });
+  projectPaneSkeletons.forEach((sk, pid) => {
+    if (sk.panes.length > 1) {
+      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId);
+    }
+  });
+
   const layout = {
     activeProjectId,
-    tabs: Array.from(tabs.values()).map(t => ({
-      command: t.command,
-      label: t.label,
-      cwd: t.cwd,
-      projectId: t.projectId,
-    })),
+    tabs: tabsOut,
     terminalSendModes,
     pushFocusEnabled: pushFocusCheckbox.checked,
+    paneLayouts,
   };
   await window.api.layoutSave(layout);
 }
@@ -4136,18 +4705,67 @@ async function loadLayout() {
   if (typeof layout.pushFocusEnabled === 'boolean') {
     pushFocusCheckbox.checked = layout.pushFocusEnabled;
   }
+  // B1: pane skeletons from the previous session.
+  savedPaneLayouts = (layout.paneLayouts && typeof layout.paneLayouts === 'object')
+    ? layout.paneLayouts
+    : {};
   if (layout.activeProjectId && projects.has(layout.activeProjectId)) {
     await dispatch('select_project', { projectId: layout.activeProjectId });
   }
   if (layout.tabs && layout.tabs.length > 0) {
+    // B1: creation order matches the saved tabs array, giving us a stable
+    // oldIndex -> newTabId map for pane membership restore.
+    const idMap = [];
     for (const tab of layout.tabs) {
-      await dispatch('create_terminal', tab);
+      const newId = await dispatch('create_terminal', tab);
+      idMap.push(newId);
     }
+    applySavedPaneLayouts(layout.activeProjectId, idMap);
     // After restoring all tabs, show the active project's tabs
     if (activeProjectId) {
       showProjectTabs(activeProjectId);
     }
   }
+}
+
+// B1: rebuild pane structures from the previous session using the saved
+// membership (old tab indices mapped to the freshly created tabIds). Panes
+// are rebuilt from scratch — never appended to startup defaults.
+function applySavedPaneLayouts(activePid, idMap) {
+  Object.entries(savedPaneLayouts).forEach(([pid, saved]) => {
+    if (!saved || !Array.isArray(saved.panes) || saved.panes.length < 2) return;
+    const mapMember = (oldIdx) => {
+      const id = idMap[oldIdx];
+      return id !== undefined && tabs.has(id) ? id : null;
+    };
+    const build = () => saved.panes.map((sp, i) => {
+      const members = (sp.members || []).map(mapMember).filter((id) => id !== null);
+      let act = sp.active !== null && sp.active !== undefined ? mapMember(sp.active) : null;
+      if (act === null) act = members.length > 0 ? members[members.length - 1] : null;
+      return {
+        id: nextPaneId++,
+        tabIds: members,
+        activeTabId: act,
+        size: Number(sp.size) || 0,
+        view: null,
+      };
+    });
+    if (pid === activePid) {
+      paneDirection = saved.direction === 'column' ? 'column' : 'row';
+      panes = build();
+      if (panes.length === 0) {
+        panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
+      }
+      activePaneId = panes[Math.min(Number(saved.activeIndex) || 0, panes.length - 1)].id;
+      renderPanes();
+    } else {
+      const built = build();
+      projectPaneSkeletons.set(pid, {
+        panes: built,
+        activePaneId: built[Math.min(Number(saved.activeIndex) || 0, built.length - 1)]?.id ?? built[0]?.id,
+      });
+    }
+  });
 }
 
 // ============================================================
@@ -4328,6 +4946,28 @@ register('undo_last_send', () => {
 // focus_terminal: switch to a terminal tab
 register('focus_terminal', ({ tabId }) => {
   switchTab(tabId);
+});
+
+// Phase 8 B1: pane operations (not exposed to MCP — D11)
+register('pane_split', ({ direction } = {}) => {
+  return splitFocusedPane(direction);
+});
+
+register('pane_close', () => {
+  closeFocusedPane();
+});
+
+register('focus_pane', ({ index }) => {
+  focusPaneByIndex(index);
+});
+
+register('focus_pane_1', () => focusPaneByIndex(0));
+register('focus_pane_2', () => focusPaneByIndex(1));
+register('focus_pane_3', () => focusPaneByIndex(2));
+register('focus_pane_4', () => focusPaneByIndex(3));
+
+register('tab_move_to_pane', ({ tabId, filePath, paneIndex }) => {
+  return moveTabToPane({ tabId, filePath }, paneIndex);
 });
 
 // ============================================================
@@ -5346,6 +5986,8 @@ function escapeHtml(text) {
     setScratchCollapsed(false);
   }
   await loadProjects();
+  ensureDefaultPane();
+  renderPanes();
   await loadLayout();
   if (tabs.size === 0 && projects.size > 0) {
     const p = projects.values().next().value;

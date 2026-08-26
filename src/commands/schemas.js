@@ -86,4 +86,13 @@ export const COMMAND_SCHEMAS = {
   find_next: p({}),
   find_prev: p({}),
   find_close: p({}),
+  // Phase 8 B1: flat pane operations. Not exposed to MCP (D11).
+  pane_split: p({ direction: optStr }),
+  pane_close: p({}),
+  focus_pane: p({ index: z.number() }),
+  focus_pane_1: p({}),
+  focus_pane_2: p({}),
+  focus_pane_3: p({}),
+  focus_pane_4: p({}),
+  tab_move_to_pane: p({ tabId: optNum, filePath: optStr, paneIndex: z.number() }),
 };
