@@ -347,8 +347,22 @@ Golden Layout / Dockview / FlexLayout はいずれも**タブの状態を自分�
 
 ### Phase B
 
-- [ ] B0 完了 —
-- [ ] B1 完了 —
-- [ ] B2 完了 —
-- [ ] B3 完了 —
-- [ ] B4 完了 —
+> **仕様**: `docs/MULTI_PANE_PROPOSAL.md`（Context Mixer `17_マルチペインと注意の観測`）が正仕様。以下の旧仕様（2分割固定）は経緯。
+
+- [x] B0 完了 — 2026-08-25。`MULTI_PANE_PROPOSAL.md` を Phase B 正仕様として採用（コミット `b75d97b`）。旧2分割固定仕様は経緯扱い。フラット可変ペイン（入れ子禁止・ソフト上限4）、プレビュー/ブラウザも任意ペインへ配置可、get_focus v2 は含めない（D13 再々改訂の未決のため）、ドラッグ&ドロップ含めない（右クリック移動のみ）
+- [x] B1 完了 — 2026-08-25。`panes: Pane[]` モデル導入（`renderer.js`）。各ペインは `{ id, tabIds, activeTabId, size, view }`。`projectEditorStates` がペイン状態をプロジェクト別に退避・復元。`layout.json` の `paneLayouts` で永続化 + 旧形式（1グループ）からの自動移行（`applySavedPaneLayouts`）。`ensureDefaultPane` / `focusedPane` / `paneOfTab` / `registerBackgroundTabPane`。`MAX_PANES = 4`（ソフト上限・警告のみ）。`switchTab` は「全ペインのアクティブターミナル同時表示」へ変更（`p.activeTabId === otherId ? 'block' : 'none'`）。`handleResize` は全可視ターミナルへ `resizeTerminalToContainer`
+- [x] B2 完了 — 2026-08-25。`renderPanes` が `#terminal-container` を flex コンテナ（`flexDirection: row/column`）へ組み立て。各ペインは `.terminal-pane-item`（`.terminal-pane-body` を内包）。スプリッターは `addPaneSplitter` で縦横両方向へ対応（`makeVSplitter` / `makeHSplitter` 流用）。`.terminal-pane-item.focused` がキーボードフォーカス表示（`--act` の outline）。`placeSurfaces` でエディタ/プレビュー表面をペインへ再配置。`#split-pane-btn` を `#main-tab-bar` へ追加（`Ctrl+\` で分割、右クリックで閉じる）
+- [x] B3 完了 — 2026-08-25。`pane_split` / `pane_close` / `focus_pane` / `focus_pane_1`〜`4` / `tab_move_to_pane` を `types.js` **かつ** `schemas.js` の両方に定義（D19）。MCP 非公開（D11）。キーバインドは `!terminalFocus` に制限（ターミナルのキーを削らない — B1_HANDOFF §5）。タブ右クリックメニューから `tab_move_to_pane` へ配線（`renderer.js:1534, 1537`）。`splitFocusedPane` は新ペイン作成後に `create_terminal` で端末をspawn。`closeFocusedPane` はタブを残存ペインへ移動（タブは失わない）
+- [x] B4 完了 — 2026-08-25。`buildPaneContextSummary()` がペイン分割時に可視ペイン構成を生成（`--- panes ---` ブロック・5行）。`sendToTerminal` の本文へ追加（`renderer.js:3212`）。push チェックボックスとは独立 — レイアウト記述でありファイルフォーカスではないため。単一ペイン時は空文字を返し何も追加しない
+
+**B5 検証記録（2026-08-25、kamox 実機駆動）**:
+
+- `npm test`: 全スイート合格（`test/phase8-pane.test.cjs` 7件含む）/ `npm run build:renderer`: 成功
+- **横2枚**: `pane_split({ direction: 'row' })` → 2ペイン + スプリッター1。両ペインのターミナルが `display: block` で同時描画 ✅
+- **縦3枚**: `pane_split({ direction: 'column' })` → 3ペイン + スプリッター2、`flexDirection: column`。全ペインのターミナルが `display: block` ✅
+- **focus_pane**: `focus_pane({ index: 0 })` → ペイン0のみ `.terminal-pane-item.focused`。他ペインはフォーカスクラスなし ✅
+- **pane_close**: 3→2→1 ペインへ縮小。タブは残存ペインへ移動（タブ喪失なし）✅
+- **プロジェクト切替**: 2ペイン状態 → 別プロジェクト切替（1ペイン）→ 元プロジェクト復帰（2ペイン復元）✅
+- **push 拡張**: `ptyWrite` をインターセプトし `confirm` で送信内容を確認。49行のテキスト → 54行（ペイン構成5行が追加）。`buildPaneContextSummary` が `--- panes ---` ブロックを生成 ✅
+- **実 Electron 起動**: ランタイムエラー 0件（GPU キャッシュ警告のみ・既知の無害な警告）✅
+- **未検証**: プレビューの別ペイン移動時の再読込 + スクロール復元、非表示タブの webview 破棄とメモリ比例、旧 `layout.json` からの起動（移行検証）— 今後の日常使用で確認予定
