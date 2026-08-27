@@ -184,7 +184,8 @@ test('runtime metrics share the global status bar', () => {
 
 test('hidden main surfaces stay mounted and the webview is reused', () => {
   const css = read('styles.css');
-  assert.match(css, /#main-surface\s*>\s*\.main-surface-pane\.hidden\s*\{[\s\S]*display:\s*block;[\s\S]*visibility:\s*hidden/);
+  // B6: surface panes can be hosted in #main-surface OR .terminal-pane-body.
+  assert.match(css, /#main-surface\s*>\s*\.main-surface-pane\.hidden,\s*\n\s*\.terminal-pane-body\s*>\s*\.main-surface-pane\.hidden\s*\{[\s\S]*display:\s*block;[\s\S]*visibility:\s*hidden/);
   const renderer = read('renderer.js');
   assert.doesNotMatch(renderer, /createElement\(['"]webview['"]\)/);
   assert.doesNotMatch(renderer, /previewWebview\.remove\(\)/);

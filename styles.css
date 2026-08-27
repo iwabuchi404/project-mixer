@@ -721,7 +721,8 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
-#main-surface > .main-surface-pane {
+#main-surface > .main-surface-pane,
+.terminal-pane-body > .main-surface-pane {
   position: absolute;
   inset: 0;
   display: block;
@@ -735,7 +736,8 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
-#main-surface > .main-surface-pane.hidden {
+#main-surface > .main-surface-pane.hidden,
+.terminal-pane-body > .main-surface-pane.hidden {
   display: block;
   visibility: hidden;
   opacity: 0;
