@@ -3880,6 +3880,10 @@ function addPaneSplitter(leftPane, rightPane) {
 
 function renderPanes() {
   ensureDefaultPane();
+  // B6: rescue surface nodes (preview/editor/search) from pane bodies BEFORE
+  // clearing the terminal container. Without this, innerHTML='' destroys the
+  // <webview> guest WebContents and the preview goes blank/reloads.
+  restoreSurfacesToMain();
   terminalContainer.innerHTML = '';
   paneEls.clear();
   terminalContainer.style.flexDirection = paneDirection === 'column' ? 'column' : 'row';
