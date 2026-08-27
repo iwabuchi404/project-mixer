@@ -48,6 +48,7 @@ let activeTabId = null;
 let tabCounter = 0;
 const projectActiveTab = new Map(); // projectId -> last active tabId
 let draggedTerminalTab = null;
+let draggedNonTerminalTab = null; // B6: file/preview/browser tab being dragged
 
 const IS_WIN = navigator.userAgent.includes('Windows');
 const IS_MAC = /Macintosh|MacIntel|MacPPC|Mac68K/.test(navigator.userAgent);
@@ -250,7 +251,7 @@ function setTabSelected(tabEl, selected) {
 }
 
 function activateMainTab(tabEl) {
-  tabBar.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === tabEl));
+  document.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === tabEl));
 }
 
 // R3: shared tab element factory. The 4 tab kinds (preview, browser,
@@ -317,6 +318,22 @@ function createMainTab({ kind, ident, label, closeSelector, actions, extraInner 
     e.stopPropagation();
     actions.onContext(ident.value, e.clientX, e.clientY);
   });
+  // B6: make non-terminal tabs draggable for pane-to-pane move (spec §4.4 rev).
+  // Terminal tabs handle their own drag setup in createTerminal.
+  if (kind !== 'terminal' && kind !== 'search') {
+    tabEl.draggable = true;
+    tabEl.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(ident.value));
+      draggedNonTerminalTab = tabEl;
+      tabEl.classList.add('dragging');
+    });
+    tabEl.addEventListener('dragend', () => {
+      tabEl.classList.remove('dragging');
+      document.querySelectorAll('.pane-tab-bar-drag-over').forEach((el) => el.classList.remove('pane-tab-bar-drag-over'));
+      draggedNonTerminalTab = null;
+    });
+  }
   return tabEl;
 }
 
@@ -1755,7 +1772,7 @@ let panes = []; // [{ id, tabIds: [], activeTabId, size }] for the active projec
 let activePaneId = null;
 let paneDirection = 'row'; // 'row' = side-by-side, 'column' = stacked
 let nextPaneId = 1;
-const paneEls = new Map(); // paneId -> { root, body }
+const paneEls = new Map(); // paneId -> { root, header, tabBar, body }
 // Pane skeletons for projects that have no full editor state yet (e.g.
 // background terminals created by loadLayout before the project is opened).
 const projectPaneSkeletons = new Map(); // projectId -> { panes, activePaneId }
@@ -3483,9 +3500,10 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   // Background-project terminals (loadLayout restores every project) stay
   // detached from pane bodies and hidden until their project is selected.
   const targetIsActive = projectId === activeProjectId;
+  let ownerPane = null;
   if (targetIsActive) {
     ensureDefaultPane();
-    const ownerPane = focusedPane() || panes[0];
+    ownerPane = focusedPane() || panes[0];
     (paneEls.get(ownerPane.id)?.body || terminalContainer).appendChild(termEl);
   } else {
     termEl.style.display = 'none';
@@ -3565,7 +3583,8 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   });
   tabEl.addEventListener('dragend', () => {
     tabEl.classList.remove('dragging');
-    tabBar.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+    document.querySelectorAll('.pane-tab-bar-drag-over').forEach((el) => el.classList.remove('pane-tab-bar-drag-over'));
     draggedTerminalTab = null;
   });
   tabEl.addEventListener('dragover', (e) => {
@@ -3585,10 +3604,18 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     e.preventDefault();
     tabEl.classList.remove('drag-over');
     if (!draggedTerminalTab || draggedTerminalTab === tabEl) return;
-    tabBar.insertBefore(draggedTerminalTab, tabEl);
+    // B6: reorder within whatever tab bar the dragged tab currently lives in.
+    const parent = draggedTerminalTab.parentElement;
+    if (parent && parent.contains(tabEl)) parent.insertBefore(draggedTerminalTab, tabEl);
   });
 
-  tabBar.insertBefore(tabEl, newTabBtn);
+  // B6: place the tab in the focused pane's tab bar (or shared bar as fallback).
+  // Background-project terminals (ownerPane === null) stay in the shared bar
+  // — they are hidden until their project is selected, at which point
+  // showProjectTabs / renderPanes moves them into the correct pane tab bar.
+  const ownerPaneEl = ownerPane ? paneEls.get(ownerPane.id) : null;
+  if (ownerPaneEl?.tabBar) ownerPaneEl.tabBar.appendChild(tabEl);
+  else tabBar.insertBefore(tabEl, newTabBtn);
 
   tabs.set(tabId, {
     id: tabId,
@@ -3711,6 +3738,13 @@ function showProjectTabs(projectId) {
     t.termEl.style.display = 'none'; // always hide terminal, switchTab will show the active one
     t.tabElement.classList.remove('active');
   });
+  // B6: move visible terminal tabs into their owner pane's tab bar.
+  tabs.forEach((t) => {
+    if (t.projectId !== projectId) return;
+    const pane = paneOfTab(t.id);
+    const dest = pane ? paneEls.get(pane.id)?.tabBar : null;
+    if (dest && t.tabElement.parentElement !== dest) dest.appendChild(t.tabElement);
+  });
 
   // Restore last active tab for this project, or pick first visible
   let restoreId = projectActiveTab.get(projectId);
@@ -3831,27 +3865,151 @@ function renderPanes() {
     const root = document.createElement('div');
     root.className = 'terminal-pane-item';
     root.dataset.paneId = String(pane.id);
+
+    // B6: pane header with per-pane tab bar + direction toggle + close.
+    const header = document.createElement('div');
+    header.className = 'pane-header';
+    const paneTabBar = document.createElement('div');
+    paneTabBar.className = 'pane-tab-bar';
+    paneTabBar.dataset.paneId = String(pane.id);
+    header.appendChild(paneTabBar);
+    // Direction toggle / split button (Step 3).
+    const dirBtn = document.createElement('button');
+    dirBtn.className = 'pane-dir-btn';
+    dirBtn.title = panes.length > 1 ? 'Toggle split direction' : 'Split pane';
+    dirBtn.innerHTML = paneDirection === 'column' ? '&#x2502;' : '&#x2500;';
+    dirBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setFocusedPane(pane.id);
+      if (panes.length > 1) {
+        // Toggle direction without creating a new pane.
+        paneDirection = paneDirection === 'row' ? 'column' : 'row';
+        renderPanes();
+        saveCurrentEditorState();
+        requestAnimationFrame(handleResize);
+      } else {
+        dispatch('pane_split', {});
+      }
+    });
+    header.appendChild(dirBtn);
+    // Close button (Step 2). Disabled when only one pane exists.
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'pane-close-btn';
+    closeBtn.title = 'Close pane';
+    closeBtn.innerHTML = '&times;';
+    closeBtn.disabled = panes.length <= 1;
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setFocusedPane(pane.id);
+      dispatch('pane_close', {});
+    });
+    header.appendChild(closeBtn);
+    root.appendChild(header);
+
     const body = document.createElement('div');
     body.className = 'terminal-pane-body';
     root.appendChild(body);
     terminalContainer.appendChild(root);
-    paneEls.set(pane.id, { root, body });
+    paneEls.set(pane.id, { root, header, tabBar: paneTabBar, body });
     // Splitter goes BETWEEN adjacent panes (inserted before this root).
     if (i > 0) addPaneSplitter(panes[i - 1], pane);
     // Move member terminals into this pane's body (xterm tolerates DOM
     // moves; fit() is re-run by handleResize afterwards).
     pane.tabIds.forEach((tabId) => {
       const t = tabs.get(tabId);
-      if (t && t.termEl.parentElement !== body) body.appendChild(t.termEl);
+      if (!t) return;
+      if (t.termEl.parentElement !== body) body.appendChild(t.termEl);
+      // B6: move the tab element into this pane's tab bar.
+      if (t.tabElement.parentElement !== paneTabBar) paneTabBar.appendChild(t.tabElement);
     });
     root.addEventListener('mousedown', () => {
       setFocusedPane(pane.id);
     });
+    // B6: pane tab bar as a drop target for tab drag & drop (spec §4.4 rev).
+    setupPaneTabBarDnd(paneTabBar, pane);
   });
   applyPaneSizes();
   updatePaneFocusClasses();
   // Re-home any hosted surface nodes (renderPanes wiped the pane bodies).
   if (panes.length > 1) placeSurfaces();
+  // B6: file/preview/browser/search tabs live in the focused pane's tab bar.
+  reparentNonTerminalTabs();
+}
+
+// B6: move non-terminal tabs (file/preview/browser/search) into the focused
+// pane's tab bar. Terminal tabs are already placed by renderPanes via
+// pane.tabIds. Non-terminal tabs have no pane membership in the data model
+// yet — they follow the keyboard focus.
+function reparentNonTerminalTabs() {
+  const focused = focusedPane();
+  const dest = paneEls.get(focused?.id || panes[0]?.id)?.tabBar;
+  if (!dest) return;
+  tabBar.querySelectorAll('.main-tab:not(.tab)').forEach((el) => {
+    // .tab is the terminal class; .editor-tab / .preview-tab / .search-tab
+    // are non-terminal. Skip the search tab — it is a singleton that lives
+    // in the shared bar alongside newTabBtn.
+    if (el.classList.contains('search-tab')) return;
+    if (el.parentElement !== dest) dest.appendChild(el);
+  });
+}
+
+// B6: wire a pane tab bar as a drop target for tab drag & drop (spec §4.4 rev).
+// Accepts terminal tabs, non-terminal tabs (file/preview/browser), and file
+// tree items dragged from the sidebar.
+function setupPaneTabBarDnd(barEl, pane) {
+  barEl.addEventListener('dragover', (e) => {
+    const types = Array.from(e.dataTransfer.types || []);
+    const isTabDrag = draggedTerminalTab || draggedNonTerminalTab;
+    const isTreeFileDrag = types.includes(INTERNAL_FILE_MIME);
+    if (!isTabDrag && !isTreeFileDrag) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = isTreeFileDrag ? 'copy' : 'move';
+    barEl.classList.add('pane-tab-bar-drag-over');
+  });
+  barEl.addEventListener('dragleave', (e) => {
+    // Only clear if the pointer left the bar itself (not a child element).
+    if (e.relatedTarget && barEl.contains(e.relatedTarget)) return;
+    barEl.classList.remove('pane-tab-bar-drag-over');
+  });
+  barEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    barEl.classList.remove('pane-tab-bar-drag-over');
+    const destPane = pane;
+    // B6: file tree drop — open the file in the destination pane.
+    const treePath = e.dataTransfer.getData(INTERNAL_FILE_MIME);
+    if (treePath && !draggedTerminalTab && !draggedNonTerminalTab) {
+      setFocusedPane(destPane.id);
+      const name = treePath.split(/[/\\]/).pop();
+      const ext = name.lastIndexOf('.') >= 0
+        ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
+      if (PREVIEW_EXTENSIONS.has(ext)) {
+        dispatch('open_preview', { path: treePath, name });
+      } else {
+        dispatch('open_file', { path: treePath, name });
+      }
+      return;
+    }
+    // Tab move between panes.
+    const srcPane = draggedTerminalTab
+      ? paneOfTab(Number(draggedTerminalTab.dataset.id))
+      : draggedNonTerminalTab
+        ? paneOfTab(draggedNonTerminalTab.dataset.filePath || draggedNonTerminalTab.dataset.previewPath)
+        : null;
+    if (srcPane && srcPane.id === destPane.id) return; // same pane — no-op
+    if (draggedTerminalTab) {
+      const tabId = Number(draggedTerminalTab.dataset.id);
+      if (tabs.has(tabId)) {
+        const paneIndex = panes.findIndex((p) => p.id === destPane.id);
+        if (paneIndex >= 0) dispatch('tab_move_to_pane', { tabId, paneIndex });
+      }
+    } else if (draggedNonTerminalTab) {
+      const filePath = draggedNonTerminalTab.dataset.filePath || draggedNonTerminalTab.dataset.previewPath;
+      if (filePath) {
+        const paneIndex = panes.findIndex((p) => p.id === destPane.id);
+        if (paneIndex >= 0) dispatch('tab_move_to_pane', { filePath, paneIndex });
+      }
+    }
+  });
 }
 
 // Show every pane's active terminal (used on project switch / restore).
@@ -3938,6 +4096,8 @@ function setFocusedPane(id) {
   saveCurrentEditorState();
   const pane = getPane(id);
   mainSurface.dataset.surface = pane && pane.view ? pane.view.type : 'terminal';
+  // B6: non-terminal tabs follow the keyboard focus.
+  reparentNonTerminalTabs();
 }
 
 // B1: tab_move_to_pane (spec §4.4). Terminal tabs are physically moved into

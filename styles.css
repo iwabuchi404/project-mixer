@@ -879,6 +879,7 @@ textarea:focus-visible,
   min-width: 120px;
   min-height: 100px;
   display: flex;
+  flex-direction: column;
   overflow: hidden;
   border-radius: var(--r-1);
   outline: 1px solid transparent;
@@ -886,6 +887,71 @@ textarea:focus-visible,
 
 .terminal-pane-item.focused {
   outline-color: var(--act);
+}
+
+/* B6: pane header with tab bar + direction toggle + close */
+.pane-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 2px var(--s-1);
+  background: var(--g-0);
+  border-bottom: 1px solid var(--g-2);
+  min-height: 28px;
+}
+
+.pane-tab-bar {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.pane-tab-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.pane-tab-bar::-webkit-scrollbar-thumb {
+  background: var(--g-3);
+  border-radius: var(--r-1);
+}
+
+.pane-tab-bar .main-tab {
+  flex: 0 0 auto;
+}
+
+.pane-tab-bar-drag-over {
+  background: var(--g-2);
+  outline: 1px dashed var(--act);
+  outline-offset: -1px;
+}
+
+.pane-dir-btn,
+.pane-close-btn {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--t-2);
+  font-size: var(--t-sm);
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--r-1);
+  cursor: pointer;
+}
+
+.pane-dir-btn:hover,
+.pane-close-btn:hover {
+  background: var(--g-2);
+  color: var(--t-1);
+}
+
+.pane-close-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .terminal-pane-body {

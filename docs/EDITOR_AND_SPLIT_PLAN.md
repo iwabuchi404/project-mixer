@@ -366,3 +366,23 @@ Golden Layout / Dockview / FlexLayout はいずれも**タブの状態を自分�
 - **push 拡張**: `ptyWrite` をインターセプトし `confirm` で送信内容を確認。49行のテキスト → 54行（ペイン構成5行が追加）。`buildPaneContextSummary` が `--- panes ---` ブロックを生成 ✅
 - **実 Electron 起動**: ランタイムエラー 0件（GPU キャッシュ警告のみ・既知の無害な警告）✅
 - **未検証**: プレビューの別ペイン移動時の再読込 + スクロール復元、非表示タブの webview 破棄とメモリ比例、旧 `layout.json` からの起動（移行検証）— 今後の日常使用で確認予定
+
+### Phase B 追加作業（B6: 実用性改善・2026-08-25）
+
+> B1〜B4 の実装を実機で使用した結果、「使えない」UI上の問題が4つ発覚し、提案 §4.4 を改訂のうえ追加実装。
+
+- [x] B6-1 完了 — 2026-08-25。ペインヘッダー + ペインごとのタブバー。`renderPanes` が各ペインに `.pane-header > .pane-tab-bar` を構築。ターミナルタブは `pane.tabIds` に基づき対応ペインのタブバーへ配置（`showProjectTabs` で振り分け）。ファイル/プレビュー/ブラウザタブは `reparentNonTerminalTabs` がフォーカス中ペインのタブバーへ移動。`activateMainTab` を `document.querySelectorAll` に変更（全ペインの全タブから選択解除）。`createTerminal` のタブ追加先をアクティブペインのタブバーへ
+- [x] B6-2 完了 — 2026-08-25。閉じるボタン（×）をペインヘッダーへ。1ペイン時は `disabled` で無効化。従来の `split-pane-btn` 右クリックは補助的に残存
+- [x] B6-3 完了 — 2026-08-25。方向切替ボタンをペインヘッダーへ。1ペイン時は `pane_split`（分割）、2ペイン以上で `paneDirection` トグル（縦↔横）。アイコンが `─` / `│` で現在方向を表示
+- [x] B6-4 完了 — 2026-08-25。タブのドラッグ&ドロップ（ペイン間移動）。`setupPaneTabBarDnd` が各ペインのタブバーをドロップターゲットに。ターミナルタブ（既存 `draggedTerminalTab`）+ ファイル/プレビュー/ブラウザタブ（新規 `draggedNonTerminalTab`、`createMainTab` で `draggable=true`）両対応。ドロップで `tab_move_to_pane`。ドラッグ中のタブバーは `.pane-tab-bar-drag-over` でハイライト
+- [x] B6-5 完了 — 2026-08-25。ファイルツリーからのドロップ。既存のツリーアイテムドラッグ（`INTERNAL_FILE_MIME`）を `setupPaneTabBarDnd` で受信。ドロップで `setFocusedPane` + `open_file` / `open_preview` を呼び「そのペインで開く」
+
+**B6 検証記録（2026-08-25、kamox 実機駆動）**:
+
+- `npm test`: 全スイート合格 / `npm run build:renderer`: 成功
+- **ペインヘッダー**: 2ペイン状態で `.pane-header` × 2、`.pane-tab-bar` × 2 ✅
+- **ペインごとタブバー**: 分割後 ペイン0=4タブ / ペイン1=1タブ（新規ターミナル）。タブが正しく振り分けられる ✅
+- **方向切替ボタン**: `row` → クリック → `column` に切り替わる ✅
+- **閉じるボタン**: 2ペイン時 → クリック → 1ペインに縮小。1ペイン時は `disabled=true` ✅
+- **実 Electron 起動**: ランタイムエラー 0件 ✅
+- **未検証（日常使用予定）**: タブD&Dの実際のドラッグ操作、ファイルツリーからのD&D、プレビュー移動時の再読込 + スクロール復元
