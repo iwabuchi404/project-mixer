@@ -254,6 +254,23 @@ function activateMainTab(tabEl) {
   document.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === tabEl));
 }
 
+// B6: return the DOM element where a new non-terminal tab should be inserted.
+// When panes exist, tabs go into the focused pane's tab bar. Fallback is the
+// shared #main-tab-bar (before newTabBtn) for the initial pre-render state.
+function focusedPaneTabBar() {
+  const focused = focusedPane();
+  const bar = paneEls.get(focused?.id || panes[0]?.id)?.tabBar;
+  return bar || null;
+}
+
+// B6: insert a tab element into the correct pane tab bar (or shared bar as
+// fallback). Used by openFileInEditor, openFileInPreview, openBrowser, etc.
+function insertTabIntoPane(tabEl) {
+  const bar = focusedPaneTabBar();
+  if (bar) bar.appendChild(tabEl);
+  else tabBar.insertBefore(tabEl, newTabBtn);
+}
+
 // R3: shared tab element factory. The 4 tab kinds (preview, browser,
 // editor-file, terminal) previously duplicated markup + event setup 4 times.
 // This factory keeps them consistent without a base class. The terminal and
@@ -320,7 +337,9 @@ function createMainTab({ kind, ident, label, closeSelector, actions, extraInner 
   });
   // B6: make non-terminal tabs draggable for pane-to-pane move (spec §4.4 rev).
   // Terminal tabs handle their own drag setup in createTerminal.
-  if (kind !== 'terminal' && kind !== 'search') {
+  // File tabs skip this — makeEditorTabDraggable handles their drag setup
+  // and also sets draggedNonTerminalTab for pane D&D.
+  if (kind !== 'terminal' && kind !== 'search' && kind !== 'file') {
     tabEl.draggable = true;
     tabEl.addEventListener('dragstart', (e) => {
       e.dataTransfer.effectAllowed = 'move';
@@ -2032,12 +2051,15 @@ function makeEditorTabDraggable(tabEl, path) {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', path);
     draggedEditorTab = tabEl;
+    draggedNonTerminalTab = tabEl; // B6: also track for pane D&D
     tabEl.classList.add('dragging');
   });
   tabEl.addEventListener('dragend', () => {
     tabEl.classList.remove('dragging');
     tabEl.parentElement?.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('drag-over'));
+    document.querySelectorAll('.pane-tab-bar-drag-over').forEach((el) => el.classList.remove('pane-tab-bar-drag-over'));
     draggedEditorTab = null;
+    draggedNonTerminalTab = null;
   });
   tabEl.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -2523,7 +2545,7 @@ async function openBrowserUrl(value) {
   });
   tabEl.title = url;
 
-  tabBar.insertBefore(tabEl, newTabBtn);
+  insertTabIntoPane(tabEl);
   fileData.tabEl = tabEl;
   previewFiles.set(previewPath, fileData);
   await switchPreviewTab(previewPath);
@@ -2912,7 +2934,7 @@ async function openFileInEditor(filePath, name) {
   tabEl.title = `Edit — ${filePath}`;
 
   makeEditorTabDraggable(tabEl, filePath);
-  tabBar.insertBefore(tabEl, newTabBtn);
+  insertTabIntoPane(tabEl);
   fileData.tabEl = tabEl;
   openFiles.set(filePath, fileData);
 
@@ -3866,13 +3888,31 @@ function renderPanes() {
     root.className = 'terminal-pane-item';
     root.dataset.paneId = String(pane.id);
 
-    // B6: pane header with per-pane tab bar + direction toggle + close.
+    // B6: pane header with per-pane tab bar + new-tab + direction toggle + close.
     const header = document.createElement('div');
     header.className = 'pane-header';
     const paneTabBar = document.createElement('div');
     paneTabBar.className = 'pane-tab-bar';
     paneTabBar.dataset.paneId = String(pane.id);
     header.appendChild(paneTabBar);
+    // New terminal button (opens the same dropdown menu as the old new-tab-btn).
+    const addBtn = document.createElement('button');
+    addBtn.className = 'pane-add-btn';
+    addBtn.title = 'New terminal';
+    addBtn.innerHTML = '+';
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setFocusedPane(pane.id);
+      // Reuse the existing new-tab menu, positioned at this button.
+      const rect = addBtn.getBoundingClientRect();
+      const menuWidth = 140;
+      let left = rect.left;
+      if (left + menuWidth > window.innerWidth) left = window.innerWidth - menuWidth - 4;
+      newTabMenu.style.left = left + 'px';
+      newTabMenu.style.top = rect.bottom + 'px';
+      newTabMenu.classList.remove('hidden');
+    });
+    header.appendChild(addBtn);
     // Direction toggle / split button (Step 3).
     const dirBtn = document.createElement('button');
     dirBtn.className = 'pane-dir-btn';
@@ -3944,11 +3984,10 @@ function reparentNonTerminalTabs() {
   const focused = focusedPane();
   const dest = paneEls.get(focused?.id || panes[0]?.id)?.tabBar;
   if (!dest) return;
-  tabBar.querySelectorAll('.main-tab:not(.tab)').forEach((el) => {
-    // .tab is the terminal class; .editor-tab / .preview-tab / .search-tab
-    // are non-terminal. Skip the search tab — it is a singleton that lives
-    // in the shared bar alongside newTabBtn.
-    if (el.classList.contains('search-tab')) return;
+  // Move all non-terminal tabs (file/preview/browser/search) into the focused
+  // pane's tab bar. Terminal tabs (.tab) are placed by renderPanes via
+  // pane.tabIds and are not touched here.
+  document.querySelectorAll('.main-tab:not(.tab)').forEach((el) => {
     if (el.parentElement !== dest) dest.appendChild(el);
   });
 }
@@ -3993,7 +4032,7 @@ function setupPaneTabBarDnd(barEl, pane) {
     const srcPane = draggedTerminalTab
       ? paneOfTab(Number(draggedTerminalTab.dataset.id))
       : draggedNonTerminalTab
-        ? paneOfTab(draggedNonTerminalTab.dataset.filePath || draggedNonTerminalTab.dataset.previewPath)
+        ? paneOfTab(draggedNonTerminalTab.dataset.path)
         : null;
     if (srcPane && srcPane.id === destPane.id) return; // same pane — no-op
     if (draggedTerminalTab) {
@@ -4003,7 +4042,7 @@ function setupPaneTabBarDnd(barEl, pane) {
         if (paneIndex >= 0) dispatch('tab_move_to_pane', { tabId, paneIndex });
       }
     } else if (draggedNonTerminalTab) {
-      const filePath = draggedNonTerminalTab.dataset.filePath || draggedNonTerminalTab.dataset.previewPath;
+      const filePath = draggedNonTerminalTab.dataset.path;
       if (filePath) {
         const paneIndex = panes.findIndex((p) => p.id === destPane.id);
         if (paneIndex >= 0) dispatch('tab_move_to_pane', { filePath, paneIndex });
@@ -4134,6 +4173,8 @@ async function moveTabToPane(target, paneIndex) {
     hostSurfaceInPane(dest, kind);
     activePaneId = dest.id;
     updatePaneFocusClasses();
+    // B6: move the tab element into the destination pane's tab bar.
+    reparentNonTerminalTabs();
     saveCurrentEditorState();
   }
 }
@@ -5734,12 +5775,12 @@ function createSearchTab() {
       onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'search' }),
     },
   });
-  tabBar.insertBefore(searchTabEl, newTabBtn);
+  insertTabIntoPane(searchTabEl);
 }
 
 function activateSearchTab() {
   // Hide other main tabs' selection.
-  tabBar.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === searchTabEl));
+  document.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === searchTabEl));
   showMainSurface('search');
   activeMainView = 'search';
   // Hide editor/preview tabs when search is active.

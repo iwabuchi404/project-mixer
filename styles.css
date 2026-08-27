@@ -901,6 +901,11 @@ textarea:focus-visible,
   min-height: 28px;
 }
 
+/* B6: hide the shared main tab bar — pane headers own tabs and buttons now. */
+#main-tab-bar {
+  display: none !important;
+}
+
 .pane-tab-bar {
   flex: 1 1 auto;
   display: flex;
@@ -931,7 +936,8 @@ textarea:focus-visible,
 }
 
 .pane-dir-btn,
-.pane-close-btn {
+.pane-close-btn,
+.pane-add-btn {
   flex: 0 0 auto;
   background: transparent;
   border: none;
@@ -944,7 +950,8 @@ textarea:focus-visible,
 }
 
 .pane-dir-btn:hover,
-.pane-close-btn:hover {
+.pane-close-btn:hover,
+.pane-add-btn:hover {
   background: var(--g-2);
   color: var(--t-1);
 }
