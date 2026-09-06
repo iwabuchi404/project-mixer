@@ -257,11 +257,14 @@ const { buildResumeArgs } = require('../src/main/resume-args.cjs');
 
 test('buildResumeArgs picks per-agent flags and prefers a tracked session id', () => {
   assert.deepEqual(buildResumeArgs('claude', 'abc'), ['--resume', 'abc']);
-  assert.deepEqual(buildResumeArgs('claude', null), ['--continue']);
   assert.deepEqual(buildResumeArgs('codex', 's_1'), ['resume', 's_1']);
-  assert.deepEqual(buildResumeArgs('codex', null), ['resume', '--last']);
   assert.deepEqual(buildResumeArgs('opencode', 'ses_x'), ['-s', 'ses_x']);
-  assert.deepEqual(buildResumeArgs('opencode', null), ['--continue']);
+  // No tracked id means a fresh launch — the prompt's Cancel must never
+  // implicitly continue the last session.
+  assert.equal(buildResumeArgs('claude', null), null);
+  assert.equal(buildResumeArgs('codex', null), null);
+  assert.equal(buildResumeArgs('opencode', null), null);
+  assert.equal(buildResumeArgs('claude', undefined), null);
   // Devin is cloud-based — no local resume surface.
   assert.equal(buildResumeArgs('devin', 'x'), null);
   assert.equal(buildResumeArgs('pwsh.exe', null), null);
