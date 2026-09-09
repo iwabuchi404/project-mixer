@@ -531,15 +531,20 @@ textarea:focus-visible,
 
 .project-item.dragging,
 .main-tab.dragging {
-  opacity: .45;
+  opacity: .35;
+  outline: 1px dashed var(--act);
+  outline-offset: -1px;
 }
 
 .project-item.drag-over {
   box-shadow: inset 0 2px var(--act);
 }
 
+/* Reorder insertion point: the dragged tab would land before this tab.
+   A thick left accent reads as "gap opens here" better than a glow. */
 .main-tab.drag-over {
-  box-shadow: inset 2px 0 var(--act);
+  box-shadow: inset 3px 0 var(--act);
+  opacity: .55;
 }
 
 .restore-bar {
@@ -696,6 +701,12 @@ textarea:focus-visible,
   color: var(--g-6);
   background: var(--g-3);
   font-weight: 600;
+}
+
+/* B1: the tab currently rendered in its pane. Distinct from .active, which
+   marks keyboard/attention focus — with multiple panes both can differ. */
+.main-tab.shown-in-pane {
+  box-shadow: inset 2px 0 0 var(--act);
 }
 
 .preview-tab .editor-tab-name::before,
@@ -874,7 +885,9 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
-/* Phase 8 / B1: flat pane layout inside the terminal container */
+/* Phase 8 / B1: flat pane layout inside the terminal container.
+   Boundaries stay visible at all times (1px --g-2 outline); keyboard focus
+   upgrades the outline to --act. */
 .terminal-pane-item {
   position: relative;
   flex: 1 1 0%;
@@ -884,7 +897,8 @@ textarea:focus-visible,
   flex-direction: column;
   overflow: hidden;
   border-radius: var(--r-1);
-  outline: 1px solid transparent;
+  outline: 1px solid var(--g-2);
+  outline-offset: -1px;
 }
 
 .terminal-pane-item.focused {
@@ -909,32 +923,72 @@ textarea:focus-visible,
 }
 
 .pane-tab-bar {
+  position: relative;
   flex: 1 1 auto;
   display: flex;
   align-items: center;
   gap: 2px;
   overflow-x: auto;
   overflow-y: hidden;
+  /* An empty bar collapses to 0px and can never receive drops — keep a hit area. */
+  min-height: 24px;
   scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
+/* Slim overlay-style bar scrollbar: 7px hit area with a 1px visual line
+   (transparent border + content-box clip). Always visible so overflow is
+   discoverable; brightens on hover. Token-only. */
 .pane-tab-bar::-webkit-scrollbar {
-  height: 4px;
+  height: 7px;
+}
+
+.pane-tab-bar::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .pane-tab-bar::-webkit-scrollbar-thumb {
-  background: var(--g-3);
-  border-radius: var(--r-1);
+  background: var(--scrollbar-thumb);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--scrollbar-radius);
+}
+
+.pane-tab-bar::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 
 .pane-tab-bar .main-tab {
   flex: 0 0 auto;
 }
 
+/* Cross-pane drop target: the whole bar glows; a "Move here" badge floats
+   at the top of the destination pane body (on the pane root, so it does not
+   scroll away with the bar's overflow). */
 .pane-tab-bar-drag-over {
   background: var(--g-2);
-  outline: 1px dashed var(--act);
-  outline-offset: -1px;
+  outline: 2px dashed var(--act);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 1px var(--g-1);
+  border-radius: var(--r-1);
+}
+
+.terminal-pane-item.drop-target > .terminal-pane-body::before {
+  content: '\2192 Move here';
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 2px var(--s-2);
+  background: var(--act);
+  color: var(--g-0);
+  font-size: var(--t-xs);
+  border-radius: var(--r-1);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .pane-dir-btn,
@@ -972,13 +1026,24 @@ textarea:focus-visible,
 }
 
 .pane-splitter {
-  flex: 0 0 6px;
-  background: transparent;
+  flex: 0 0 7px;
   cursor: ew-resize;
+  background: linear-gradient(to right, transparent 3px, var(--g-3) 3px, var(--g-3) 4px, transparent 4px);
 }
 
 .pane-splitter.horizontal {
   cursor: ns-resize;
+  background: linear-gradient(to bottom, transparent 3px, var(--g-3) 3px, var(--g-3) 4px, transparent 4px);
+}
+
+.pane-splitter:hover,
+.pane-splitter.dragging {
+  background: linear-gradient(to right, transparent 2px, var(--act) 2px, var(--act) 5px, transparent 5px);
+}
+
+.pane-splitter.horizontal:hover,
+.pane-splitter.horizontal.dragging {
+  background: linear-gradient(to bottom, transparent 2px, var(--act) 2px, var(--act) 5px, transparent 5px);
 }
 
 .terminal-instance,

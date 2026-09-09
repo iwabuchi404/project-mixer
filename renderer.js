@@ -155,6 +155,7 @@ const navigationPane = document.getElementById('navigation-pane');
 const tabBar = document.getElementById('main-tab-bar');
 const mainSurface = document.getElementById('main-surface');
 const terminalContainer = document.getElementById('terminal-container');
+const terminalParking = document.getElementById('terminal-parking');
 const terminalPane = document.getElementById('terminal-pane');
 const newTabBtn = document.getElementById('new-tab-btn');
 const editorPane = document.getElementById('editor-pane');
@@ -330,6 +331,13 @@ function createMainTab({ kind, ident, label, closeSelector, actions, extraInner 
       actions.onClose(ident.value);
     }
   });
+  // Middle-click autoscroll starts on mousedown (before auxclick fires),
+  // so it must be suppressed here — middle-click closes the tab instead.
+  tabEl.addEventListener('mousedown', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+    }
+  });
   tabEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -350,7 +358,23 @@ function createMainTab({ kind, ident, label, closeSelector, actions, extraInner 
     tabEl.addEventListener('dragend', () => {
       tabEl.classList.remove('dragging');
       document.querySelectorAll('.pane-tab-bar-drag-over').forEach((el) => el.classList.remove('pane-tab-bar-drag-over'));
+      document.querySelectorAll('.terminal-pane-item.drop-target').forEach((el) => el.classList.remove('drop-target'));
       draggedNonTerminalTab = null;
+    });
+    // Same-bar reorder for tab kinds without their own drop handler
+    // (preview/browser). Consumed here; foreign drops bubble to the bar.
+    tabEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    tabEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (!draggedNonTerminalTab || draggedNonTerminalTab === tabEl) return;
+      const parent = draggedNonTerminalTab.parentElement;
+      if (parent && parent.contains(tabEl)) {
+        e.stopPropagation();
+        parent.insertBefore(draggedNonTerminalTab, tabEl);
+      }
     });
   }
   return tabEl;
@@ -374,6 +398,7 @@ function showMainSurface(kind) {
   previewPane.classList.toggle('hidden', kind !== 'preview');
   searchPane.classList.toggle('hidden', kind !== 'search');
   mainSurface.dataset.surface = kind;
+  markShownTabs();
   requestAnimationFrame(handleResize);
 }
 
@@ -390,22 +415,20 @@ function rememberSurfaceHome(el) {
 }
 
 function restoreSurfacesToMain() {
-  surfaceHomeSlots.forEach((slot, el) => {
-    // The saved nextSibling may have moved (e.g. it was hosted in a pane).
-    // Fall back to append when it is no longer a child of the home parent,
-    // otherwise insertBefore throws NotFoundError.
-    const ref = slot.nextSibling && slot.nextSibling.parentElement === slot.parent
-      ? slot.nextSibling
-      : null;
-    slot.parent.insertBefore(el, ref);
-    el.classList.add('hidden');
-  });
+  [fileEditorPane, previewPane, searchPane].forEach(restoreSurfaceToMain);
 }
 
 function surfaceNodeFor(kind) {
   if (kind === 'file') return fileEditorPane;
   if (kind === 'preview') return previewPane;
   if (kind === 'search') return searchPane;
+  return null;
+}
+
+function kindOfSurfaceNode(node) {
+  if (node === fileEditorPane) return 'file';
+  if (node === previewPane) return 'preview';
+  if (node === searchPane) return 'search';
   return null;
 }
 
@@ -428,9 +451,13 @@ function showAllPaneTerminals() {
 // singletons (one editor / one preview / one search), but DIFFERENT kinds
 // can be hosted in different panes simultaneously — that is what keeps
 // "keyboard on the terminal, eyes on the document" possible.
+//
+// Diff placement: a surface node is moved ONLY when its host pane actually
+// changed. Moving a <webview> destroys and recreates the guest, so the old
+// "home everything then re-place" churn reloaded the preview on every pane
+// operation (split/close/move/project-switch).
 function placeSurfaces() {
   [fileEditorPane, previewPane, searchPane].forEach(rememberSurfaceHome);
-  restoreSurfacesToMain();
   const hostOf = {}; // kind -> pane
   panes.forEach((p) => {
     if (p.view && p.view.type !== 'terminal' && !hostOf[p.view.type]) {
@@ -439,11 +466,20 @@ function placeSurfaces() {
       p.view = null; // same-kind conflict: first pane wins
     }
   });
-  Object.entries(hostOf).forEach(([kind, p]) => {
-    const node = surfaceNodeFor(kind);
-    if (!node) return;
-    paneEls.get(p.id)?.body.appendChild(node);
-    node.classList.remove('hidden');
+  [fileEditorPane, previewPane, searchPane].forEach((node) => {
+    const kind = kindOfSurfaceNode(node);
+    const host = hostOf[kind];
+    if (host) {
+      const body = paneEls.get(host.id)?.body;
+      if (body && node.parentElement !== body) body.appendChild(node);
+      if (node.classList.contains('hidden')) node.classList.remove('hidden');
+    } else if (node.parentElement !== null) {
+      // No host: return home hidden — but only when actually displaced.
+      const slot = surfaceHomeSlots.get(node);
+      const home = slot ? slot.parent : null;
+      const atHomeHidden = home && node.parentElement === home && node.classList.contains('hidden');
+      if (!atHomeHidden) restoreSurfaceToMain(node);
+    }
   });
   // A pane hosting a surface hides its terminals; every other pane shows its
   // active terminal regardless of where the keyboard focus is.
@@ -455,8 +491,22 @@ function placeSurfaces() {
       td.termEl.style.display = (!hosts && p.activeTabId === id) ? 'block' : 'none';
     });
   });
+  layoutNonTerminalTabs();
+  markShownTabs();
   updatePaneFocusClasses();
   requestAnimationFrame(handleResize);
+}
+
+// Return a single surface node home (hidden). Validates the saved anchor so
+// a moved sibling can never cause insertBefore NotFoundError.
+function restoreSurfaceToMain(node) {
+  const slot = surfaceHomeSlots.get(node);
+  if (!slot || !slot.parent) return;
+  const ref = slot.nextSibling && slot.nextSibling.parentElement === slot.parent
+    ? slot.nextSibling
+    : null;
+  slot.parent.insertBefore(node, ref);
+  node.classList.add('hidden');
 }
 
 // B1: host a non-terminal surface inside an arbitrary pane. Only the same
@@ -471,6 +521,16 @@ function hostSurfaceInPane(pane, kind) {
       if (p !== pane && p.view && p.view.type === kind) p.view = null;
     });
     pane.view = { type: kind, path: currentSurfacePath(kind) };
+    // The hosted tab's bar membership follows the surface — otherwise the
+    // tab stays behind in the old pane's bar while its content moved.
+    const hostedPath = pane.view.path;
+    if (kind === 'file' && hostedPath) {
+      const entry = openFiles.get(hostedPath);
+      if (entry) entry.paneId = pane.id;
+    } else if (kind === 'preview' && hostedPath) {
+      const entry = previewFiles.get(hostedPath);
+      if (entry) entry.paneId = pane.id;
+    }
     if (kind === 'preview' && activePreviewPath) {
       const f = previewFiles.get(activePreviewPath);
       if (f) void restorePreviewScroll(f);
@@ -1922,7 +1982,11 @@ function switchProjectEditor(projectId) {
     activeComposerPath = state.activeComposerPath && state.openFiles.has(state.activeComposerPath)
       ? state.activeComposerPath
       : SCRATCH_PATH;
-    activeMainView = state.activeMainView || 'terminal';
+    // 'search' is a live-only value (single search instance) — restoring it
+    // would show the terminal while the focus context still says search.
+    activeMainView = ['terminal', 'file', 'preview'].includes(state.activeMainView)
+      ? state.activeMainView
+      : 'terminal';
     activeMainFilePath = state.activeMainFilePath && state.openFiles.has(state.activeMainFilePath)
       ? state.activeMainFilePath
       : null;
@@ -1947,7 +2011,10 @@ function switchProjectEditor(projectId) {
     if (panes.length === 0) {
       panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0 }];
     }
-    nextPaneId = Math.max(Number(state.nextPaneId) || 1, ...panes.map((p) => p.id + 1));
+    // Monotonic raise ONLY — per-project counters can be much lower, and a
+    // lowered global counter makes splitFocusedPane allocate ids that
+    // collide with skeleton/state panes adopted later.
+    nextPaneId = Math.max(nextPaneId, Number(state.nextPaneId) || 1, ...panes.map((p) => p.id + 1));
     activePaneId = panes.some((p) => p.id === state.activePaneId) ? state.activePaneId : panes[0].id;
     paneDirection = state.paneDirection === 'column' ? 'column' : 'row';
     openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
@@ -1969,6 +2036,11 @@ function switchProjectEditor(projectId) {
     panes = sk && sk.panes.length > 0
       ? sk.panes.map((p) => ({ ...p, view: null }))
       : [];
+    // Skeleton pane ids came from the global counter — never let the next
+    // allocation collide with them.
+    if (panes.length > 0) {
+      nextPaneId = Math.max(nextPaneId, ...panes.map((p) => p.id + 1));
+    }
     activePaneId = sk ? sk.activePaneId : null;
     projectPaneSkeletons.delete(projectId);
     editorStateInitialized = true;
@@ -1996,10 +2068,12 @@ function switchProjectEditor(projectId) {
     const terminalId = projectActiveTab.get(projectId);
     if (terminalId !== undefined && tabs.has(terminalId)) switchTab(terminalId, { focus: false });
     else showMainSurface('terminal');
+    activeMainView = 'terminal';
   }
 
   // B1: rebuild the pane DOM for the restored project and show each pane's
   // active terminal.
+  validatePaneViews();
   renderPanes();
   showPaneActiveTerminals();
 }
@@ -2058,6 +2132,7 @@ function makeEditorTabDraggable(tabEl, path) {
     tabEl.classList.remove('dragging');
     tabEl.parentElement?.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('drag-over'));
     document.querySelectorAll('.pane-tab-bar-drag-over').forEach((el) => el.classList.remove('pane-tab-bar-drag-over'));
+    document.querySelectorAll('.terminal-pane-item.drop-target').forEach((el) => el.classList.remove('drop-target'));
     draggedEditorTab = null;
     draggedNonTerminalTab = null;
   });
@@ -2079,8 +2154,12 @@ function makeEditorTabDraggable(tabEl, path) {
     tabEl.classList.remove('drag-over');
     if (!draggedEditorTab || draggedEditorTab === tabEl) return;
     if (draggedEditorTab.parentElement === tabEl.parentElement) {
+      // Same-bar reorder — consume here so the pane bar's cross-pane
+      // handler doesn't also fire and steal focus.
+      e.stopPropagation();
       tabEl.parentElement.insertBefore(draggedEditorTab, tabEl);
     }
+    // Different bar: let it bubble to the pane bar for cross-pane move.
   });
 }
 
@@ -2247,10 +2326,9 @@ previewWebview.addEventListener('dom-ready', () => {
   previewWebview.insertCSS(getPreviewScrollbarCss()).catch((error) => {
     console.warn('[preview] Failed to apply scrollbar style:', error);
   });
-  previewWebview.executeJavaScript(PREVIEW_ANCHOR_SCRIPT).catch((error) => {
+  guestJs(previewWebview.executeJavaScript(PREVIEW_ANCHOR_SCRIPT), 2000, 'bind in-page anchors').catch((error) => {
     console.warn('[preview] Failed to bind in-page anchors:', error);
-  });
-});
+  });});
 
 // プレビュー内のナビゲーションを制御する。
 // ゲストページ側でクリックを preventDefault しているので、
@@ -2311,7 +2389,7 @@ previewWebview.addEventListener('contextmenu', async (e) => {
   e.preventDefault();
   // ゲストページから contextmenu 情報を取得
   try {
-    const info = await previewWebview.executeJavaScript(`window.__pmContextMenu || null`);
+    const info = await guestJs(previewWebview.executeJavaScript(`window.__pmContextMenu || null`), 1500, 'context menu info');
     previewContextInfo = info;
   } catch {
     previewContextInfo = null;
@@ -2407,7 +2485,7 @@ previewContextMenu.addEventListener('click', async (e) => {
 
 async function openFileInPreview(filePath, name, options = {}) {
   const projectId = options.projectId ?? activeEditorProjectId;
-  const activate = options.activate !== false;
+  let activate = options.activate !== false;
   const allowOs = options.allowOs !== false;
   const previewPath = options.previewPath || makePreviewPath(projectId, filePath);
   if (shouldOpenInOsByName(name)) {
@@ -2437,6 +2515,11 @@ async function openFileInPreview(filePath, name, options = {}) {
     if (!result.success) {
       return { shown: false, previewPath: null, reason: result.error || 'failed to read file' };
     }
+    // The user may have switched projects while the read was in flight —
+    // park the preview in its own project, never in the new project's panes.
+    if (activeEditorProjectId !== projectId) {
+      activate = false;
+    }
     if (result.isBinary) {
       if (allowOs) {
         await window.api.openInOs(filePath);
@@ -2456,6 +2539,7 @@ async function openFileInPreview(filePath, name, options = {}) {
     projectId,
     initialContent,
     scrollPosition: { x: 0, y: 0 },
+    paneId: focusedPane()?.id ?? null,
   };
 
   const tabEl = createMainTab({
@@ -2471,8 +2555,9 @@ async function openFileInPreview(filePath, name, options = {}) {
   // A6: tooltip with full path
   tabEl.title = `Preview — ${filePath}`;
 
-  previewTabBar.insertBefore(tabEl, newTabBtn);
+  insertTabIntoPane(tabEl);
   fileData.tabEl = tabEl;
+  fileData.paneId = fileData.paneId ?? focusedPane()?.id ?? null;
   previewFiles.set(previewPath, fileData);
 
   // Tabs belonging to another project are prepared in the background. They
@@ -2480,7 +2565,11 @@ async function openFileInPreview(filePath, name, options = {}) {
   tabEl.style.display = projectId === activeEditorProjectId ? '' : 'none';
 
   if (activate && projectId === activeEditorProjectId) {
-    showPreviewPane();
+    // NOTE: do NOT showPreviewPane() here. At this point activePreviewPath
+    // still points at the PREVIOUS preview, so hosting would re-host the old
+    // file into the focused pane and rewrite its tab's paneId — the "first
+    // tab migrates to the other pane" bug. switchPreviewTab sets
+    // activePreviewPath first and shows the pane itself.
     try {
       const loaded = await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention });
       if (!loaded || activePreviewPath !== previewPath) {
@@ -2532,6 +2621,7 @@ async function openBrowserUrl(value) {
     previewPath,
     projectId,
     scrollPosition: { x: 0, y: 0 },
+    paneId: focusedPane()?.id ?? null,
   };
   const tabEl = createMainTab({
     kind: 'browser',
@@ -2555,13 +2645,29 @@ let pendingPreviewLoad = null;
 let pendingPreviewScrollCapture = Promise.resolve();
 let previewSwitchSerial = 0;
 
+// A guest executeJavaScript can hang forever (never resolve NOR reject)
+// when the guest WebContents was destroyed mid-flight (pane moves, aborted
+// loads). Anything awaiting such a promise freezes that whole flow —
+// notably switchPreviewTab awaits the shared pendingPreviewScrollCapture,
+// so one poisoned capture kills ALL later preview switches. Every guest
+// call site must go through this timeout.
+function guestJs(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => {
+      console.warn(`[preview] guest call timed out after ${ms}ms: ${label}`);
+      resolve(null);
+    }, ms)),
+  ]);
+}
+
 async function capturePreviewScroll(f) {
   if (!f) return;
   try {
-    const position = await previewWebview.executeJavaScript(`(() => {
+    const position = await guestJs(previewWebview.executeJavaScript(`(() => {
       const root = document.scrollingElement || document.documentElement;
       return { x: root.scrollLeft || window.scrollX || 0, y: root.scrollTop || window.scrollY || 0 };
-    })()`);
+    })()`), 1500, 'capture scroll');
     if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) {
       f.scrollPosition = { x: position.x, y: position.y };
     }
@@ -2581,12 +2687,12 @@ async function restorePreviewScroll(f) {
   const { x, y } = f.scrollPosition;
   if (!x && !y) return;
   try {
-    await previewWebview.executeJavaScript(`(() => {
+    await guestJs(previewWebview.executeJavaScript(`(() => {
       const root = document.scrollingElement || document.documentElement;
       root.scrollLeft = ${Number(x) || 0};
       root.scrollTop = ${Number(y) || 0};
       return { x: root.scrollLeft, y: root.scrollTop };
-    })()`);
+    })()`), 1500, 'restore scroll');
   } catch (error) {
     console.warn('[preview] Failed to restore scroll position:', error);
   }
@@ -2596,6 +2702,38 @@ function loadPreviewUrl(url, revealRange = null, scrollPosition = null) {
   // Assigning src is safe before the webview's initial dom-ready event.
   // loadURL() would reject until the guest WebContents has been created.
   if (pendingPreviewLoad) pendingPreviewLoad.cancel();
+  // Same document already loaded (e.g. re-showing after a pane move that
+  // kept the guest alive): skip the reload, just re-apply scroll/reveal.
+  // Re-assigning an identical src aborts the current load (ERR_ABORTED noise)
+  // and restarts the whole settling pipeline for no benefit.
+  try {
+    if (previewWebview.getURL() === url) {
+      previewWebview.classList.add('settling');
+      const done = (async () => {
+        try {
+          if (revealRange) {
+            await guestJs(previewWebview.executeJavaScript(`(() => {
+              const target = document.querySelector('[data-pm-line="${revealRange.start}"]');
+              if (target) target.scrollIntoView({ block: 'center' });
+              return !!target;
+            })()`), 2000, 'reveal line (same url)');
+          } else if (scrollPosition && (scrollPosition.x || scrollPosition.y)) {
+            await guestJs(previewWebview.executeJavaScript(`(() => {
+              const root = document.scrollingElement || document.documentElement;
+              root.scrollLeft = ${Number(scrollPosition.x) || 0};
+              root.scrollTop = ${Number(scrollPosition.y) || 0};
+              return true;
+            })()`), 2000, 'restore scroll (same url)');
+          }
+        } catch (error) {
+          console.warn('[preview] Failed to re-apply scroll:', error);
+        }
+        previewWebview.classList.remove('settling');
+        return true;
+      })();
+      return guestJs(done, 4000, 'same-url reposition');
+    }
+  } catch { /* getURL unavailable before first load — fall through */ }
   // スクロール位置は dom-ready のうちに当てる。読み込み完了後に当てると
   // 先頭で描画されてから動くため、その移動が見えてしまう。
   // 位置が確定するまではゲストページ内で visibility:hidden にして
@@ -2616,30 +2754,30 @@ function loadPreviewUrl(url, revealRange = null, scrollPosition = null) {
     const onReady = async () => {
       // ゲストページを隠す（スクロール前に隠さないと先頭が見える）
       try {
-        await previewWebview.executeJavaScript(`(() => {
+        await guestJs(previewWebview.executeJavaScript(`(() => {
           document.documentElement.style.visibility = 'hidden';
           return true;
-        })()`);
+        })()`), 2000, 'hide guest');
       } catch { /* 初回 dom-ready ではゲストが準備中の可能性 */ }
 
       if (revealRange) {
         try {
-          await previewWebview.executeJavaScript(`(() => {
+          await guestJs(previewWebview.executeJavaScript(`(() => {
             const target = document.querySelector('[data-pm-line="${revealRange.start}"]');
             if (target) target.scrollIntoView({ block: 'center' });
             return !!target;
-          })()`);
+          })()`), 2000, 'reveal line');
         } catch (error) {
           console.warn('[preview] Failed to reveal line:', error);
         }
       } else if (scrollPosition && (scrollPosition.x || scrollPosition.y)) {
         try {
-          await previewWebview.executeJavaScript(`(() => {
+          await guestJs(previewWebview.executeJavaScript(`(() => {
             const root = document.scrollingElement || document.documentElement;
             root.scrollLeft = ${Number(scrollPosition.x) || 0};
             root.scrollTop = ${Number(scrollPosition.y) || 0};
             return { x: root.scrollLeft, y: root.scrollTop };
-          })()`);
+          })()`), 2000, 'restore scroll on load');
         } catch (error) {
           console.warn('[preview] Failed to restore scroll position:', error);
         }
@@ -2647,10 +2785,10 @@ function loadPreviewUrl(url, revealRange = null, scrollPosition = null) {
 
       // スクロール位置が確定してからゲストページを表示
       try {
-        await previewWebview.executeJavaScript(`(() => {
+        await guestJs(previewWebview.executeJavaScript(`(() => {
           document.documentElement.style.visibility = '';
           return true;
-        })()`);
+        })()`), 2000, 'unhide guest');
       } catch { /* ゲストが既に破棄されている場合は無視 */ }
 
       finish(true);
@@ -2710,7 +2848,18 @@ function buildSafePreviewDocument(source, baseUrl, extraStyle = '', { headingIds
 }
 
 function isActivePreview(f) {
-  return activeEditorProjectId === f.projectId && activePreviewPath === f.previewPath;
+  if (!f || activeEditorProjectId !== f.projectId) return false;
+  if (activePreviewPath === f.previewPath) return true;
+  // B1: a preview hosted (visible) in ANY pane keeps loading even when the
+  // global attention moved elsewhere — otherwise touching another pane
+  // aborts this pane's in-flight load.
+  return panes.some((p) => p.view && p.view.type === 'preview' && p.view.path === f.previewPath);
+}
+
+function isPreviewVisibleAnywhere(f) {
+  if (!f) return false;
+  if (mainSurface.dataset.surface === 'preview' && activePreviewPath === f.previewPath) return true;
+  return panes.some((p) => p.view && p.view.type === 'preview' && p.view.path === f.previewPath);
 }
 
 async function readPreviewText(f, allowOs = true) {
@@ -2816,9 +2965,14 @@ async function switchPreviewTab(previewPath, { preserveAttention = false, reveal
   if (!isPreviewForProject(f, activeEditorProjectId)) return false;
 
   const serial = ++previewSwitchSerial;
-  await pendingPreviewScrollCapture;
+  // Belt-and-braces: the shared capture promise always settles (guestJs
+  // timeout inside capturePreviewScroll), but never let a stuck capture
+  // block tab switching — a missed scroll position is cosmetic.
+  await guestJs(pendingPreviewScrollCapture, 2500, 'pre-switch capture gate');
   const previous = previewFiles.get(activePreviewPath);
-  if (mainSurface.dataset.surface === 'preview' && previous) {
+  // Capture the outgoing preview's scroll wherever it is visible (focused
+  // surface or a hosted pane), not just the legacy single surface.
+  if (previous && isPreviewVisibleAnywhere(previous)) {
     await capturePreviewScroll(previous);
   }
   if (serial !== previewSwitchSerial) return false;
@@ -2854,6 +3008,9 @@ function closePreviewTab(previewPath) {
   const f = previewFiles.get(previewPath);
   if (!f) return;
 
+  // B1: the pane that hosted this preview (if any). Closing must only affect
+  // that pane — never reset the focused pane's layout as a side effect.
+  const hostPane = panes.find((p) => p.view && p.view.type === 'preview' && p.view.path === previewPath) || null;
   const wasPreviewVisible = activeMainView === 'preview';
   const projectId = f.projectId;
   f.tabEl.remove();
@@ -2867,7 +3024,12 @@ function closePreviewTab(previewPath) {
     } else {
       activePreviewPath = null;
       activeSurface = 'editor';
-      if (!wasPreviewVisible) {
+      if (hostPane) {
+        // Clear only the hosting pane; other panes (incl. focused) untouched.
+        hostPane.view = null;
+        placeSurfaces();
+        mainSurface.dataset.surface = focusedPane()?.view?.type || 'terminal';
+      } else if (!wasPreviewVisible) {
         // A background preview can close without moving the human's current main tab.
       } else if (previewReturnView === 'file' && previewReturnFilePath && openFiles.has(previewReturnFilePath)) {
         switchEditorTab(previewReturnFilePath, { focus: false });
@@ -2936,6 +3098,7 @@ async function openFileInEditor(filePath, name) {
   makeEditorTabDraggable(tabEl, filePath);
   insertTabIntoPane(tabEl);
   fileData.tabEl = tabEl;
+  fileData.paneId = focusedPane()?.id ?? null;
   openFiles.set(filePath, fileData);
 
   switchEditorTab(filePath);
@@ -2989,10 +3152,20 @@ function closeEditorTab(filePath) {
   }
   const f = openFiles.get(filePath);
   if (!f || f.isScratch) return;
+  // B1: the pane hosting this file (if any) — closing affects only it.
+  const hostPane = panes.find((p) => p.view && p.view.type === 'file' && p.view.path === filePath) || null;
   const wasMainFile = !f.isScratch && activeMainView === 'file' && activeMainFilePath === filePath;
 
   f.tabEl.remove();
   openFiles.delete(filePath);
+
+  // Any pane still hosting this file's view must drop it — the document is
+  // gone. Mirrors closePreviewTab.
+  if (hostPane) {
+    hostPane.view = null;
+    placeSurfaces();
+    mainSurface.dataset.surface = focusedPane()?.view?.type || 'terminal';
+  }
 
   if (f.isScratch && activeComposerPath === filePath) {
     activeComposerPath = SCRATCH_PATH;
@@ -3212,12 +3385,23 @@ function buildPaneContextSummary() {
   return ['--- panes ---', `${panes.length} panes ${dir}:`, ...lines, '--- end panes ---'].join('\n');
 }
 
+// B1: the send destination follows the focused pane. When the focused pane
+// hosts a surface or is empty, fall back to the global activeTabId.
+function sendTargetTabId() {
+  const focused = focusedPane();
+  if (focused && focused.activeTabId !== null && tabs.has(focused.activeTabId)) {
+    return focused.activeTabId;
+  }
+  return activeTabId;
+}
+
 function sendToTerminal(text, tabId) {
   if (tabId !== undefined) {
     switchTab(tabId);
   }
-  if (activeTabId === null) return;
-  const t = tabs.get(activeTabId);
+  const targetId = sendTargetTabId();
+  if (targetId === null) return;
+  const t = tabs.get(targetId);
   if (!t) return;
 
   const hasExplicitText = typeof text === 'string';
@@ -3291,7 +3475,7 @@ function sendToTerminal(text, tabId) {
       onAction: () => dispatch('undo_last_send'),
     });
     // Move focus to the receiving terminal so the user can immediately interact.
-    switchTab(activeTabId);
+    switchTab(targetId);
   }
 }
 
@@ -3315,11 +3499,12 @@ sendBtn.addEventListener('click', () => dispatch('send_to_terminal', {}));
 pushFocusCheckbox.addEventListener('change', () => saveLayout());
 
 function updateSendTarget() {
-  if (activeTabId === null) {
+  const targetId = sendTargetTabId();
+  if (targetId === null) {
     sendTarget.innerHTML = `${tabIcon('terminal')}<span>no terminal</span>`;
     sendBtn.disabled = true;
   } else {
-    const t = tabs.get(activeTabId);
+    const t = tabs.get(targetId);
     if (t) {
       sendTarget.innerHTML = `${tabIcon('terminal')}<span>${escapeHtml(t.label)}</span>`;
       sendTarget.title = `Send destination: ${t.label}`;
@@ -3519,8 +3704,9 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   termEl.className = 'terminal-instance';
   termEl.style.display = 'block';
   // B1: only the terminal's own project may host it in a visible pane.
-  // Background-project terminals (loadLayout restores every project) stay
-  // detached from pane bodies and hidden until their project is selected.
+  // Background-project terminals (loadLayout restores every project) park in
+  // #terminal-parking — OUTSIDE #terminal-container so renderPanes' rebuild
+  // can never destroy them — hidden until their project is selected.
   const targetIsActive = projectId === activeProjectId;
   let ownerPane = null;
   if (targetIsActive) {
@@ -3529,7 +3715,7 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     (paneEls.get(ownerPane.id)?.body || terminalContainer).appendChild(termEl);
   } else {
     termEl.style.display = 'none';
-    terminalContainer.appendChild(termEl);
+    terminalParking.appendChild(termEl);
   }
 
   await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -3607,6 +3793,7 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     tabEl.classList.remove('dragging');
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
     document.querySelectorAll('.pane-tab-bar-drag-over').forEach((el) => el.classList.remove('pane-tab-bar-drag-over'));
+    document.querySelectorAll('.terminal-pane-item.drop-target').forEach((el) => el.classList.remove('drop-target'));
     draggedTerminalTab = null;
   });
   tabEl.addEventListener('dragover', (e) => {
@@ -3627,8 +3814,13 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     tabEl.classList.remove('drag-over');
     if (!draggedTerminalTab || draggedTerminalTab === tabEl) return;
     // B6: reorder within whatever tab bar the dragged tab currently lives in.
+    // Consume same-bar drops so the pane bar's cross-pane handler doesn't
+    // also fire; foreign drops bubble up for cross-pane move.
     const parent = draggedTerminalTab.parentElement;
-    if (parent && parent.contains(tabEl)) parent.insertBefore(draggedTerminalTab, tabEl);
+    if (parent && parent.contains(tabEl)) {
+      e.stopPropagation();
+      parent.insertBefore(draggedTerminalTab, tabEl);
+    }
   });
 
   // B6: place the tab in the focused pane's tab bar (or shared bar as fallback).
@@ -3658,13 +3850,25 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   // B1: register the tab in a pane of its OWN project. For the active
   // project that is the currently focused pane; for background projects it
   // is the persisted pane state (so loadLayout restores stay per-project).
-  if (targetIsActive) {
+  // Re-check AFTER the ptyCreate await: the user may have switched projects
+  // while the PTY was spawning, and the pre-await flag is then stale.
+  if (projectId === activeProjectId) {
+    ensureDefaultPane();
     const createdPane = focusedPane() || panes[0];
-    createdPane.tabIds.push(tabId);
+    if (!createdPane.tabIds.includes(tabId)) createdPane.tabIds.push(tabId);
     createdPane.activeTabId = tabId;
     const createdBody = paneEls.get(createdPane.id)?.body;
     if (createdBody && termEl.parentElement !== createdBody) createdBody.appendChild(termEl);
+    // The tab element may have been placed in another pane's bar while the
+    // PTY was spawning (ownerPane was captured pre-await). Re-home it so
+    // element and membership never disagree.
+    const createdBar = paneEls.get(createdPane.id)?.tabBar;
+    if (createdBar && tabEl.parentElement !== createdBar) createdBar.appendChild(tabEl);
   } else {
+    // The project went to background mid-spawn: park the terminal outside
+    // the pane container so re-renders can never destroy it.
+    if (termEl.parentElement !== terminalParking) terminalParking.appendChild(termEl);
+    termEl.style.display = 'none';
     registerBackgroundTabPane(projectId, tabId);
   }
 
@@ -3818,13 +4022,63 @@ function paneOfTab(tabId) {
   return panes.find((p) => p.tabIds.includes(tabId)) || null;
 }
 
+// B1: normalize pane membership — drop ids of dead terminals, dedupe ids
+// claimed by multiple panes (first pane wins), and repair dangling
+// activeTabIds. Without this, a single corrupted array makes tabs render in
+// the wrong pane or jump panes on close.
+function normalizePaneMembership() {
+  const seen = new Set();
+  panes.forEach((p) => {
+    p.tabIds = p.tabIds.filter((id) => {
+      if (!tabs.has(id) || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    if (p.activeTabId === null || !p.tabIds.includes(p.activeTabId)) {
+      p.activeTabId = p.tabIds.length > 0 ? p.tabIds[p.tabIds.length - 1] : null;
+    }
+  });
+  if (!panes.some((p) => p.id === activePaneId)) {
+    activePaneId = panes.length > 0 ? panes[0].id : null;
+  }
+}
+
+// B1: remap non-terminal tab membership off a retired pane id so file/
+// preview tabs don't silently migrate to the focus fallback later.
+function retirePaneMembership(deadId, survivorId) {
+  if (deadId === survivorId) return;
+  openFiles.forEach((f) => {
+    if (f.paneId === deadId) f.paneId = survivorId;
+  });
+  previewFiles.forEach((f) => {
+    if (f.paneId === deadId) f.paneId = survivorId;
+  });
+  if (typeof searchTabEl !== 'undefined' && searchTabEl && searchTabEl._paneId === deadId) {
+    searchTabEl._paneId = survivorId;
+  }
+}
+
+// B1: drop hosted views whose tab no longer exists (stale after project
+// switch / restart). Called after pane restore so placeSurfaces never shows
+// an orphaned surface.
+function validatePaneViews() {
+  panes.forEach((p) => {
+    if (!p.view || p.view.type === 'terminal') return;
+    const path = p.view.path;
+    const alive = (p.view.type === 'file' && openFiles.has(path))
+      || (p.view.type === 'preview' && previewFiles.has(path))
+      || p.view.type === 'search';
+    if (!alive) p.view = null;
+  });
+}
+
 // B1: file a background-project terminal into that project's persisted pane
 // state so it can never bleed into the visible panes of another project.
 function registerBackgroundTabPane(projectId, tabId) {
   const state = projectEditorStates.get(projectId);
   if (state && Array.isArray(state.panes) && state.panes.length > 0) {
     const p = state.panes.find((x) => x.id === state.activePaneId) || state.panes[0];
-    p.tabIds.push(tabId);
+    if (!p.tabIds.includes(tabId)) p.tabIds.push(tabId);
     p.activeTabId = tabId;
     return;
   }
@@ -3835,7 +4089,7 @@ function registerBackgroundTabPane(projectId, tabId) {
     projectPaneSkeletons.set(projectId, sk);
   }
   const p = sk.panes.find((x) => x.id === sk.activePaneId) || sk.panes[0];
-  p.tabIds.push(tabId);
+  if (!p.tabIds.includes(tabId)) p.tabIds.push(tabId);
   p.activeTabId = tabId;
 }
 
@@ -3847,12 +4101,21 @@ function updatePaneFocusClasses() {
 
 function applyPaneSizes() {
   const horizontal = paneDirection !== 'column';
-  panes.forEach((p) => {
+  panes.forEach((p, index) => {
     const els = paneEls.get(p.id);
     if (!els) return;
+    // Width/height alone lose to the flex-basis:0% in .terminal-pane-item —
+    // always set flexBasis so restored sizes actually apply. Sized panes are
+    // pinned with grow:0 (except the last, which absorbs slack); unsized
+    // panes share the remainder equally.
     if (p.size > 0) {
-      if (horizontal) els.root.style.width = p.size + 'px';
-      else els.root.style.height = p.size + 'px';
+      if (horizontal) {
+        els.root.style.width = p.size + 'px';
+      } else {
+        els.root.style.height = p.size + 'px';
+      }
+      els.root.style.flexBasis = p.size + 'px';
+      els.root.style.flexGrow = index === panes.length - 1 ? 1 : 0;
     }
   });
 }
@@ -3864,26 +4127,93 @@ function addPaneSplitter(leftPane, rightPane) {
   // stray splitter at the end of the container.
   if (!leftEls || !rightEls) return;
   const splitterEl = document.createElement('div');
-  splitterEl.className = 'pane-splitter' + (paneDirection === 'column' ? ' horizontal' : '');
+  const horizontal = paneDirection === 'column';
+  splitterEl.className = 'pane-splitter' + (horizontal ? ' horizontal' : '');
   // Insert between the two panes.
   terminalContainer.insertBefore(splitterEl, rightEls.root);
-  const persist = () => {
-    leftPane.size = paneDirection === 'column' ? leftEls.root.offsetHeight : leftEls.root.offsetWidth;
-    saveCurrentEditorState();
+  makePaneSplitter(splitterEl, leftEls.root, rightEls.root, leftPane, rightPane, horizontal);
+}
+
+// B1: dedicated pane splitter. Unlike the shared makeVSplitter/makeHSplitter
+// it (a) clamps against the terminal container instead of the whole window
+// (sidebar/tree widths must not leak into pane geometry), (b) uses pointer
+// capture so mouseup is never missed (a missed mouseup left document-level
+// mousemove handlers driving the layout on mere hover), (c) owns no
+// document listeners, so re-renders cannot accumulate ghost handlers, and
+// (d) pins both sides with flex-grow:0 — with grow:1 everywhere the leftover
+// space is shared equally and the edge never lands on the cursor.
+function makePaneSplitter(splitterEl, prevRoot, nextRoot, prevState, nextState, horizontal) {
+  const MIN = 120;
+  const isLastNext = () => {
+    const items = [...terminalContainer.querySelectorAll(':scope > .terminal-pane-item')];
+    return items.length > 0 && items[items.length - 1] === nextRoot;
   };
-  if (paneDirection === 'column') {
-    makeHSplitter(splitterEl, leftEls.root, terminalContainer, 100, 100, persist);
-  } else {
-    makeVSplitter(splitterEl, leftEls.root, rightEls.root, 120, 120, persist);
-  }
+  const pin = (root, v, grow) => {
+    if (horizontal) {
+      root.style.height = v + 'px';
+    } else {
+      root.style.width = v + 'px';
+    }
+    // Flex containers honor flex-basis over width/height.
+    root.style.flexBasis = v + 'px';
+    root.style.flexGrow = grow;
+  };
+  splitterEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    try { splitterEl.setPointerCapture(e.pointerId); } catch { /*_mouse input */ }
+    splitterEl.classList.add('dragging');
+    document.body.style.cursor = horizontal ? 'ns-resize' : 'ew-resize';
+    const startPos = horizontal ? e.clientY : e.clientX;
+    const startBasis = horizontal ? prevRoot.offsetHeight : prevRoot.offsetWidth;
+    const onMove = (ev) => {
+      // Pointer capture retargets all moves here; ignore buttonless moves
+      // (e.g. capture lost after an outside-window release).
+      if (ev.buttons !== undefined && ev.buttons !== null && (ev.buttons & 1) === 0 && ev.type === 'pointermove' && !splitterEl.hasPointerCapture?.(ev.pointerId)) return;
+      const containerSize = horizontal ? terminalContainer.clientHeight : terminalContainer.clientWidth;
+      const splitSize = horizontal ? splitterEl.offsetHeight : splitterEl.offsetWidth;
+      const delta = (horizontal ? ev.clientY : ev.clientX) - startPos;
+      const max = Math.max(MIN, containerSize - MIN - splitSize);
+      const v = Math.max(MIN, Math.min(startBasis + delta, max));
+      pin(prevRoot, v, 0);
+      // Pin the neighbor too (measured live), except the last pane which
+      // keeps grow:1 to absorb rounding slack.
+      const nextSize = horizontal ? nextRoot.offsetHeight : nextRoot.offsetWidth;
+      pin(nextRoot, Math.max(MIN, nextSize), isLastNext() ? 1 : 0);
+      handleResize();
+    };
+    const onUp = () => {
+      splitterEl.classList.remove('dragging');
+      document.body.style.cursor = '';
+      const v = horizontal ? prevRoot.offsetHeight : prevRoot.offsetWidth;
+      const nv = horizontal ? nextRoot.offsetHeight : nextRoot.offsetWidth;
+      prevState.size = v;
+      if (nextState) nextState.size = nv;
+      saveCurrentEditorState();
+      splitterEl.removeEventListener('pointermove', onMove);
+      splitterEl.removeEventListener('pointerup', onUp);
+      splitterEl.removeEventListener('pointercancel', onUp);
+    };
+    splitterEl.addEventListener('pointermove', onMove);
+    splitterEl.addEventListener('pointerup', onUp);
+    splitterEl.addEventListener('pointercancel', onUp);
+  });
 }
 
 function renderPanes() {
   ensureDefaultPane();
-  // B6: rescue surface nodes (preview/editor/search) from pane bodies BEFORE
-  // clearing the terminal container. Without this, innerHTML='' destroys the
-  // <webview> guest WebContents and the preview goes blank/reloads.
-  restoreSurfacesToMain();
+  normalizePaneMembership();
+  // Rescue hosted surface nodes BEFORE clearing the container. Detach (not
+  // home) so re-placement costs a single move — homing first would move
+  // twice and reload the <webview> guest twice.
+  [fileEditorPane, previewPane, searchPane].forEach((node) => {
+    if (node.parentElement && terminalContainer.contains(node)) {
+      node.remove();
+    }
+  });
+  if (typeof pendingPreviewLoad !== 'undefined' && pendingPreviewLoad) {
+    pendingPreviewLoad.cancel();
+  }
   terminalContainer.innerHTML = '';
   paneEls.clear();
   terminalContainer.style.flexDirection = paneDirection === 'column' ? 'column' : 'row';
@@ -3968,75 +4298,162 @@ function renderPanes() {
     });
     root.addEventListener('mousedown', () => {
       setFocusedPane(pane.id);
+      // Clicking a pane moves the keyboard there when it shows a terminal.
+      // Hosted surfaces (editor/preview) manage their own focus — don't steal.
+      const p = getPane(pane.id);
+      if (p && !p.view && p.activeTabId !== null) {
+        const term = tabs.get(p.activeTabId);
+        if (term && term.termEl.style.display !== 'none') {
+          try { term.terminal.focus(); } catch { /* terminal mid-dispose */ }
+        }
+      }
     });
     // B6: pane tab bar as a drop target for tab drag & drop (spec §4.4 rev).
     setupPaneTabBarDnd(paneTabBar, pane);
   });
   applyPaneSizes();
   updatePaneFocusClasses();
-  // Re-home any hosted surface nodes (renderPanes wiped the pane bodies).
-  if (panes.length > 1) placeSurfaces();
-  // B6: file/preview/browser/search tabs live in the focused pane's tab bar.
-  reparentNonTerminalTabs();
+  // Re-place hosted surface nodes (renderPanes wiped the pane bodies).
+  if (panes.length > 1) {
+    placeSurfaces();
+  } else {
+    panes.forEach((p) => { p.view = null; });
+    restoreSurfacesToMain();
+  }
+  // B6: file/preview/browser/search tabs live in their member pane's tab bar.
+  layoutNonTerminalTabs();
 }
 
-// B6: move non-terminal tabs (file/preview/browser/search) into the focused
-// pane's tab bar. Terminal tabs are already placed by renderPanes via
-// pane.tabIds. Non-terminal tabs have no pane membership in the data model
-// yet — they follow the keyboard focus.
-function reparentNonTerminalTabs() {
-  const focused = focusedPane();
-  const dest = paneEls.get(focused?.id || panes[0]?.id)?.tabBar;
-  if (!dest) return;
-  // Move all non-terminal tabs (file/preview/browser/search) into the focused
-  // pane's tab bar. Terminal tabs (.tab) are placed by renderPanes via
-  // pane.tabIds and are not touched here.
-  document.querySelectorAll('.main-tab:not(.tab)').forEach((el) => {
-    if (el.parentElement !== dest) dest.appendChild(el);
+// B1: mark tabs that are actually rendered in a pane (.shown-in-pane).
+// Distinct from .active (keyboard/attention focus): with multiple panes the
+// focused tab and the displayed tabs can differ.
+function markShownTabs() {
+  document.querySelectorAll('.main-tab.shown-in-pane').forEach((el) => {
+    el.classList.remove('shown-in-pane');
+  });
+  panes.forEach((p) => {
+    const els = paneEls.get(p.id);
+    if (!els) return;
+    // Terminals: the pane's active tab, when visible.
+    const t = tabs.get(p.activeTabId);
+    if (t && t.termEl.style.display !== 'none' && t.tabElement) {
+      t.tabElement.classList.add('shown-in-pane');
+    }
+    // Surfaces: the tab whose path matches the hosted view. Searched across
+    // all bars — a tab may still live in the shared bar.
+    if (p.view && p.view.path) {
+      document.querySelectorAll('.main-tab').forEach((el) => {
+        if (el.dataset.path === p.view.path) el.classList.add('shown-in-pane');
+      });
+    }
   });
 }
 
+// B1: lay out non-terminal tabs (file/preview/browser/search) into their
+// member pane's tab bar. Tabs do NOT migrate on focus moves — paneId on the
+// entry is real membership. Foreign projects' entries keep their paneId
+// untouched: pane ids are per-project and remapping them here would destroy
+// their assignment for when the user switches back.
+function layoutNonTerminalTabs() {
+  const fallback = focusedPane();
+  const place = (tabEl, paneId) => {
+    if (!tabEl) return null;
+    const dest = paneEls.get(paneId)?.tabBar || paneEls.get(fallback?.id)?.tabBar;
+    if (dest && tabEl.parentElement !== dest) dest.appendChild(tabEl);
+    return dest;
+  };
+  openFiles.forEach((f) => {
+    if (!f.tabEl || f.isScratch) return;
+    if (f.projectId === activeEditorProjectId && !getPane(f.paneId)) {
+      f.paneId = fallback?.id ?? null;
+    }
+    place(f.tabEl, f.paneId);
+  });
+  previewFiles.forEach((f) => {
+    if (f.projectId === activeEditorProjectId && !getPane(f.paneId)) {
+      f.paneId = fallback?.id ?? null;
+    }
+    place(f.tabEl, f.paneId);
+  });
+  if (typeof searchTabEl !== 'undefined' && searchTabEl) {
+    if (!getPane(searchTabEl._paneId)) searchTabEl._paneId = fallback?.id ?? null;
+    place(searchTabEl, searchTabEl._paneId);
+  }
+}
+
+// B1: vertical wheel over a pane tab bar scrolls it horizontally.
+// Delegated at document level so it survives pane re-renders.
+document.addEventListener('wheel', (e) => {
+  const bar = e.target?.closest?.('.pane-tab-bar');
+  if (!bar) return;
+  if (e.ctrlKey || e.metaKey) return; // zoom gestures pass through
+  if (bar.scrollWidth <= bar.clientWidth + 1) return; // nothing to scroll
+  e.preventDefault();
+  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  bar.scrollLeft += delta;
+}, { passive: false });
+
 // B6: wire a pane tab bar as a drop target for tab drag & drop (spec §4.4 rev).
-// Accepts terminal tabs, non-terminal tabs (file/preview/browser), and file
-// tree items dragged from the sidebar.
+// Accepts terminal tabs, non-terminal tabs (file/preview/browser), file tree
+// items dragged from the sidebar, and OS Explorer files.
+function openDroppedPathInPane(destPane, filePath) {
+  setFocusedPane(destPane.id);
+  const name = filePath.split(/[/\\]/).pop();
+  const ext = name.lastIndexOf('.') >= 0
+    ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
+  if (PREVIEW_EXTENSIONS.has(ext)) {
+    dispatch('open_preview', { path: filePath, name });
+  } else {
+    dispatch('open_file', { path: filePath, name });
+  }
+}
+
 function setupPaneTabBarDnd(barEl, pane) {
+  // Drop-target highlight covers the bar AND marks the pane body, so the
+  // user can see where the tab will land even while over the bar.
+  const paneRoot = barEl.closest('.terminal-pane-item');
+  const clearDropTarget = () => {
+    barEl.classList.remove('pane-tab-bar-drag-over');
+    paneRoot?.classList.remove('drop-target');
+  };
   barEl.addEventListener('dragover', (e) => {
     const types = Array.from(e.dataTransfer.types || []);
     const isTabDrag = draggedTerminalTab || draggedNonTerminalTab;
     const isTreeFileDrag = types.includes(INTERNAL_FILE_MIME);
-    if (!isTabDrag && !isTreeFileDrag) return;
+    const isOsFileDrag = types.includes('Files');
+    if (!isTabDrag && !isTreeFileDrag && !isOsFileDrag) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = isTreeFileDrag ? 'copy' : 'move';
+    e.dataTransfer.dropEffect = (isTreeFileDrag || isOsFileDrag) ? 'copy' : 'move';
     barEl.classList.add('pane-tab-bar-drag-over');
+    paneRoot?.classList.add('drop-target');
   });
   barEl.addEventListener('dragleave', (e) => {
     // Only clear if the pointer left the bar itself (not a child element).
     if (e.relatedTarget && barEl.contains(e.relatedTarget)) return;
-    barEl.classList.remove('pane-tab-bar-drag-over');
+    clearDropTarget();
   });
   barEl.addEventListener('drop', (e) => {
     e.preventDefault();
-    barEl.classList.remove('pane-tab-bar-drag-over');
+    clearDropTarget();
     const destPane = pane;
-    // B6: file tree drop — open the file in the destination pane.
-    const treePath = e.dataTransfer.getData(INTERNAL_FILE_MIME);
-    if (treePath && !draggedTerminalTab && !draggedNonTerminalTab) {
-      setFocusedPane(destPane.id);
-      const name = treePath.split(/[/\\]/).pop();
-      const ext = name.lastIndexOf('.') >= 0
-        ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
-      if (PREVIEW_EXTENSIONS.has(ext)) {
-        dispatch('open_preview', { path: treePath, name });
-      } else {
-        dispatch('open_file', { path: treePath, name });
-      }
+    // File drops (sidebar tree or OS Explorer) — open in the destination pane.
+    const droppedPaths = getDroppedFilePaths(e);
+    if (droppedPaths.length > 0 && !draggedTerminalTab && !draggedNonTerminalTab) {
+      e.stopPropagation();
+      droppedPaths.forEach((filePath) => openDroppedPathInPane(destPane, filePath));
       return;
     }
     // Tab move between panes.
+    // NOTE: paneOfTab() only knows terminal tab ids — non-terminal source
+    // panes come from the tab entry's paneId instead.
+    const nonTermPath = draggedNonTerminalTab?.dataset.path;
+    const nonTermEntry = nonTermPath
+      ? (openFiles.get(nonTermPath) || previewFiles.get(nonTermPath))
+      : null;
     const srcPane = draggedTerminalTab
       ? paneOfTab(Number(draggedTerminalTab.dataset.id))
-      : draggedNonTerminalTab
-        ? paneOfTab(draggedNonTerminalTab.dataset.path)
+      : nonTermEntry
+        ? getPane(nonTermEntry.paneId)
         : null;
     if (srcPane && srcPane.id === destPane.id) return; // same pane — no-op
     if (draggedTerminalTab) {
@@ -4061,6 +4478,7 @@ function showPaneActiveTerminals() {
     const p = paneOfTab(td.id);
     td.termEl.style.display = p && p.activeTabId === td.id ? 'block' : 'none';
   });
+  markShownTabs();
   requestAnimationFrame(handleResize);
 }
 
@@ -4093,7 +4511,8 @@ function closeFocusedPane() {
   const [gone] = panes.splice(idx, 1);
   const target = panes[Math.max(0, idx - 1)];
   // Tabs survive: they move to the remaining pane (spec §4.4).
-  target.tabIds.push(...gone.tabIds.filter((id) => tabs.has(id)));
+  // Dedupe: a corrupted duplicate must not end up claimed twice.
+  target.tabIds.push(...gone.tabIds.filter((id) => tabs.has(id) && !target.tabIds.includes(id)));
   if (gone.activeTabId !== null && tabs.has(gone.activeTabId)) {
     target.activeTabId = gone.activeTabId;
   } else if (target.activeTabId === null && target.tabIds.length > 0) {
@@ -4104,8 +4523,22 @@ function closeFocusedPane() {
     if (t) t.termEl.style.display = 'none';
   });
   activePaneId = target.id;
+  // Non-terminal tabs follow the merged terminals explicitly — never via
+  // the focus fallback.
+  retirePaneMembership(gone.id, target.id);
+  const survivingViewType = target.view ? target.view.type : null;
   renderPanes();
-  if (target.activeTabId !== null && tabs.has(target.activeTabId)) {
+  if (survivingViewType && panes.length === 1) {
+    // Down to one pane = legacy single-surface mode. renderPanes homed the
+    // surface node; keep the document on screen via the main surface.
+    showMainSurface(survivingViewType);
+    updateSendTarget();
+  } else if (target.view) {
+    // The surviving pane hosts a surface — keep it on screen. switchTab
+    // would clear view and drop the document the user is reading.
+    updatePaneFocusClasses();
+    updateSendTarget();
+  } else if (target.activeTabId !== null && tabs.has(target.activeTabId)) {
     switchTab(target.activeTabId, { focus: false });
   } else {
     projectActiveTab.set(activeProjectId, null);
@@ -4139,8 +4572,8 @@ function setFocusedPane(id) {
   saveCurrentEditorState();
   const pane = getPane(id);
   mainSurface.dataset.surface = pane && pane.view ? pane.view.type : 'terminal';
-  // B6: non-terminal tabs follow the keyboard focus.
-  reparentNonTerminalTabs();
+  markShownTabs();
+  updateSendTarget();
 }
 
 // B1: tab_move_to_pane (spec §4.4). Terminal tabs are physically moved into
@@ -4156,11 +4589,13 @@ async function moveTabToPane(target, paneIndex) {
     if (!t || t.projectId !== activeProjectId) return;
     const from = paneOfTab(target.tabId);
     if (from === dest) return;
-    from.tabIds = from.tabIds.filter((id) => id !== target.tabId);
-    if (from.activeTabId === target.tabId) {
-      from.activeTabId = from.tabIds.length > 0 ? from.tabIds[from.tabIds.length - 1] : null;
+    if (from) {
+      from.tabIds = from.tabIds.filter((id) => id !== target.tabId);
+      if (from.activeTabId === target.tabId) {
+        from.activeTabId = from.tabIds.length > 0 ? from.tabIds[from.tabIds.length - 1] : null;
+      }
+      from.view = null;
     }
-    from.view = null;
     dest.tabIds.push(target.tabId);
     renderPanes();
     switchTab(target.tabId);
@@ -4169,16 +4604,27 @@ async function moveTabToPane(target, paneIndex) {
   }
 
   if (target.filePath) {
+    // Project guard: only tabs of the active project move between panes.
+    const entry0 = openFiles.get(target.filePath) || previewFiles.get(target.filePath);
+    if (entry0 && entry0.projectId !== undefined && entry0.projectId !== activeEditorProjectId) return;
     await dispatch('switch_tab', { filePath: target.filePath });
+    // Panes may have changed while the switch was in flight.
+    if (!panes.includes(dest)) return;
     const kind = mainSurface.dataset.surface;
     if (kind === 'terminal') return;
-    const focused = focusedPane();
-    focused.view = null;
+    const entry = openFiles.get(target.filePath) || previewFiles.get(target.filePath);
+    if (entry) entry.paneId = dest.id;
+    if (typeof searchTabEl !== 'undefined' && searchTabEl?.dataset.path === target.filePath) {
+      searchTabEl._paneId = dest.id;
+    }
+    // Clear only the pane that previously hosted the target surface, not
+    // whatever happens to be focused after the await.
+    const prevHost = panes.find((p) => p !== dest && p.view && p.view.type === kind);
+    if (prevHost) prevHost.view = null;
     hostSurfaceInPane(dest, kind);
     activePaneId = dest.id;
     updatePaneFocusClasses();
-    // B6: move the tab element into the destination pane's tab bar.
-    reparentNonTerminalTabs();
+    layoutNonTerminalTabs();
     saveCurrentEditorState();
   }
 }
@@ -4193,8 +4639,10 @@ function detachTabFromPanes(tabId) {
     pane.activeTabId = pane.tabIds.length > 0 ? pane.tabIds[pane.tabIds.length - 1] : null;
   }
   if (pane.tabIds.length === 0 && panes.length > 1) {
+    const survivorId = panes.find((p) => p.id !== pane.id)?.id ?? null;
     panes = panes.filter((p) => p.id !== pane.id);
     if (activePaneId === pane.id) activePaneId = panes[0].id;
+    if (survivorId !== null) retirePaneMembership(pane.id, survivorId);
     renderPanes();
     return true;
   }
@@ -4204,6 +4652,10 @@ function detachTabFromPanes(tabId) {
 function switchTab(tabId, { focus = true } = {}) {
   const t = tabs.get(tabId);
   if (!t) return;
+  // Project guard: a background project's terminal must never be adopted
+  // into the active project's panes (e.g. send_to_terminal with an explicit
+  // tabId while another project is shown).
+  if (t.projectId !== activeProjectId) return;
   ensureDefaultPane();
 
   // B1: every pane keeps its active terminal visible simultaneously.
@@ -4291,13 +4743,23 @@ function closeTerminal(tabId) {
   dispatch('agent_session_unbound', { tabId });
   tabs.delete(tabId);
   dispatch('terminal_clear_attention', { tabId });
+  const closedPane = paneOfTab(tabId);
   detachTabFromPanes(tabId);
 
   if (activeTabId === tabId) {
-    // Find next tab in the same project
+    // Prefer the next tab in the SAME pane so focus doesn't jump across
+    // panes as a side effect of closing. Fall back to project-wide order.
     let nextId = null;
-    for (const [tid, td] of tabs) {
-      if (td.projectId === projectId) { nextId = tid; break; }
+    if (closedPane) {
+      for (const tid of closedPane.tabIds) {
+        const td = tabs.get(tid);
+        if (td && td.projectId === projectId) { nextId = tid; break; }
+      }
+    }
+    if (nextId === null) {
+      for (const [tid, td] of tabs) {
+        if (td.projectId === projectId) { nextId = tid; break; }
+      }
     }
     if (nextId !== null) {
       switchTab(nextId);
@@ -4814,7 +5276,7 @@ terminalContainer.addEventListener('drop', (e) => {
     if (t) {
       const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, t.command));
       t.terminal.paste(quotedPaths.join(' '));
-      clearTerminalWaitingForUserInput(activeTabId);
+  clearTerminalWaitingForUserInput(targetId);
       // Focus the terminal only when it is already the visible surface,
       // so dropping on a hidden terminal does not yank the user's view.
       if (mainSurface.dataset.surface === 'terminal') t.terminal.focus();
@@ -4871,6 +5333,7 @@ async function saveLayout() {
       size: p.size || 0,
       members: p.tabIds.map((id) => tabIndex.get(id)).filter((i) => i !== undefined),
       active: p.activeTabId !== null && tabIndex.has(p.activeTabId) ? tabIndex.get(p.activeTabId) : null,
+      view: p.view && p.view.type !== 'terminal' ? { type: p.view.type, path: p.view.path || null } : null,
     })),
   });
 
@@ -4919,11 +5382,18 @@ async function loadLayout() {
   }
   if (layout.tabs && layout.tabs.length > 0) {
     // B1: creation order matches the saved tabs array, giving us a stable
-    // oldIndex -> newTabId map for pane membership restore.
+    // oldIndex -> newTabId map for pane membership restore. One failed
+    // create must not abort the whole restore or shift the idMap — push a
+    // null sentinel so indices stay aligned (mapMember drops nulls).
     const idMap = [];
     for (const tab of layout.tabs) {
-      const newId = await dispatch('create_terminal', tab);
-      idMap.push(newId);
+      try {
+        const newId = await dispatch('create_terminal', tab);
+        idMap.push(newId);
+      } catch (error) {
+        console.error('[layout] Failed to restore terminal tab:', error);
+        idMap.push(null);
+      }
     }
     applySavedPaneLayouts(layout.activeProjectId, idMap);
     // After restoring all tabs, show the active project's tabs
@@ -4947,12 +5417,15 @@ function applySavedPaneLayouts(activePid, idMap) {
       const members = (sp.members || []).map(mapMember).filter((id) => id !== null);
       let act = sp.active !== null && sp.active !== undefined ? mapMember(sp.active) : null;
       if (act === null) act = members.length > 0 ? members[members.length - 1] : null;
+      // Views reference files/previews that are not restored at startup —
+      // keep the metadata, validatePaneViews() clears what has no tab.
+      const sv = sp.view && typeof sp.view === 'object' ? sp.view : null;
       return {
         id: nextPaneId++,
         tabIds: members,
         activeTabId: act,
         size: Number(sp.size) || 0,
-        view: null,
+        view: sv && sv.type !== 'terminal' ? { type: sv.type, path: sv.path || null } : null,
       };
     });
     if (pid === activePid) {
@@ -4962,6 +5435,7 @@ function applySavedPaneLayouts(activePid, idMap) {
         panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
       }
       activePaneId = panes[Math.min(Number(saved.activeIndex) || 0, panes.length - 1)].id;
+      validatePaneViews();
       renderPanes();
     } else {
       const built = build();
@@ -4987,14 +5461,25 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight, onResizeE
     startX = e.clientX;
     startWidth = leftEl.offsetWidth;
     document.body.style.cursor = 'ew-resize';
+    splitterEl.classList.add('dragging');
     e.preventDefault();
   });
 
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
+    // A mouseup outside the window never reaches us — stop driving on
+    // buttonless moves instead of resizing on mere hover.
+    if (e.buttons !== undefined && (e.buttons & 1) === 0) {
+      dragging = false;
+      document.body.style.cursor = '';
+      return;
+    }
     const delta = e.clientX - startX;
     const newWidth = Math.max(minLeft, Math.min(startWidth + delta, window.innerWidth - minRight));
     leftEl.style.width = newWidth + 'px';
+    // Flex containers honor flex-basis over width (pane items use
+    // flex: 1 1 0%, so width alone never moves them). Mirror makeHSplitter.
+    leftEl.style.flexBasis = newWidth + 'px';
     handleResize();
   });
 
@@ -5004,6 +5489,9 @@ function makeVSplitter(splitterEl, leftEl, rightEl, minLeft, minRight, onResizeE
       document.body.style.cursor = '';
       if (onResizeEnd) onResizeEnd(leftEl.offsetWidth);
     }
+    document.querySelectorAll('.pane-splitter.dragging').forEach((el) => {
+      el.classList.remove('dragging');
+    });
   });
 }
 
@@ -5017,11 +5505,18 @@ function makeHSplitter(splitterEl, topEl, containerEl, minTop, minBottom, onResi
     startY = e.clientY;
     startHeight = topEl.offsetHeight;
     document.body.style.cursor = 'ns-resize';
+    splitterEl.classList.add('dragging');
     e.preventDefault();
   });
 
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
+    // Same missed-mouseup guard as makeVSplitter.
+    if (e.buttons !== undefined && (e.buttons & 1) === 0) {
+      dragging = false;
+      document.body.style.cursor = '';
+      return;
+    }
     const maxHeight = containerEl.clientHeight - minBottom - splitterEl.offsetHeight;
     const newHeight = Math.max(minTop, Math.min(startHeight + e.clientY - startY, maxHeight));
     topEl.style.height = newHeight + 'px';
@@ -5780,6 +6275,7 @@ function createSearchTab() {
     },
   });
   insertTabIntoPane(searchTabEl);
+  searchTabEl._paneId = focusedPane()?.id ?? null;
 }
 
 function activateSearchTab() {
