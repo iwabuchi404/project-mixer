@@ -1,24 +1,30 @@
 # Project Mixer
 
-> VSCode を 5〜8 枚開かなくて済むようにするデスクトップアプリ
+> 複数プロジェクトの AI エージェント・ターミナル・ファイルを1つのウィンドウに集約するデスクトップアプリ
 
-複数プロジェクトのターミナル・ファイル・エディタを1つのウィンドウに集約する Electron 製デスクトップアプリです。Claude Code、Codex、Devin CLI などの AI エージェントを複数同時に走らせるワークフローを想定しています。
+Claude Code、Codex、Devin CLI、OpenCode などの AI エージェントを複数同時に走らせるワークフローを想定した Electron 製デスクトップアプリです。ターミナル・エディタ・ファイルプレビュー・ローカルブラウザを統合し、VSCode を複数枚開かなくてもプロジェクト横断の作業が完結します。
 
 ![Main View](screenshots/main-view.png)
 
 ## 特徴
 
-- **マルチプロジェクト管理**: サイドバーに複数プロジェクトを登録し、ワンクリックで切り替え
-- **マルチターミナル**: プロジェクトごとに複数のターミナルをタブで管理（PowerShell / Bash / Zsh / Claude Code / Codex / Devin CLI 等）
+- **マルチプロジェクト管理**: サイドバーに複数プロジェクトを登録し、ワンクリックで切り替え。各プロジェクトのタブ・エディタ・ペイン構成は自動保存・復元
+- **マルチペイン レイアウト**: メインエリアを縦横に分割し、複数のターミナル・ファイルを同時表示（最大4ペイン）。タブはペイン間ドラッグ&ドロップで移動可能
+- **マルチターミナル**: プロジェクトごとに複数のターミナルをタブで管理（PowerShell / Bash / Zsh / Claude Code / Codex / Devin CLI / OpenCode 等）
+- **CodeMirror 6 エディタ**: ファイル編集・スクラッチメモを CodeMirror 6 で提供。タブ切替で undo 履歴・カーソル・スクロール位置を保持
 - **ファイルツリー**: プロジェクト配下のファイルをツリー表示、ダブルクリックでエディタまたはプレビューで開く
 - **ファイルプレビュー**: 画像・HTML・Markdown をアプリ内でプレビュー表示
   - Markdown は `marked` + `DOMPurify` でサニタイズしてレンダリング
   - 相対パスの画像参照も `<base>` タグで解決
-- **スクラッチエディタ**: 一時的なメモ書き→ターミナルへ送信（bracketed paste 対応）
+- **ローカルブラウザ**: `localhost` / `127.0.0.1` / `[::1]` の開発サーバーをアプリ内の webview で開く
+- **スクラッチ Composer**: 画面下部に常設の編集領域。`Ctrl+Enter` でターミナルへ送信（bracketed paste 動的切り替え対応）
+- **検索バー**: エディタ・プレビュー・スクラッチ共通の検索バー（CodeMirror 検索へ委譲）
+- **エージェント通知**: Claude Code / Codex / OpenCode の入力待ち状態をタブのバッジで表示
+- **セッション履歴**: 前回のエージェントセッションを自動復元する設定（File メニューから ask / auto 切替）
 - **ファイル操作**: 新規ファイル/フォルダ作成、削除（確認ダイアログ付き）、パスコピー、OS で開く
 - **クロスプラットフォーム**: Windows / macOS / Linux に対応
 
-![Markdown Preview](screenshots/markdown-preview.png)
+![Multi-pane Layout](screenshots/multi-pane.png)
 
 ## セキュリティ
 
@@ -26,6 +32,7 @@
 
 - プレビュー用 `<webview>` は `partition="persist:preview"` でストレージ分離、`sandbox=yes` + `nodeIntegration=no`
 - Markdown は `DOMPurify.sanitize(marked.parse(content))` でスクリプトを除去
+- ローカルブラウザは `localhost` / `127.0.0.1` / `[::1]` のみ許可、リモートサイトは拒否
 
 ## 必要環境
 
@@ -75,8 +82,15 @@ npm run dist:linux
 ### ターミナル
 
 - `+ Terminal` ボタンからターミナルの種類を選択して起動
-- タブをドラッグで並び替え可能
+- タブをドラッグで並び替え可能。ペイン間へのドラッグ&ドロップにも対応
 - リサイズ時に自動でターミナルサイズを調整し、最下部にスクロール
+
+### ペイン分割
+
+- ペインヘッダーの `│` / `─` ボタンでペインを分割（縦横切替可能）
+- `Ctrl+\` で分割、`Ctrl+Shift+\` で閉じる
+- `Ctrl+1`〜`Ctrl+4` でペイン切替
+- タブはペイン間でドラッグ&ドロップ移動可能
 
 ### ファイルツリー
 
@@ -84,17 +98,15 @@ npm run dist:linux
 - ファイルをダブルクリックでエディタまたはプレビューで開く（拡張子で自動判定）
 - 右クリックでコンテキストメニュー: Open in Editor / Preview / Open in OS / Copy Path / Insert Path to Terminal / Insert Filename to Terminal / Delete
 
-![New File Prompt](screenshots/new-file-prompt.png)
-
-- ツリーヘッダーのボタン: `↻` 再読み込み / `+F` 新規ファイル / `+D` 新規フォルダ
-
 ### エディタ
 
-- **スクラッチタブ**: 一時的なメモ書き。`Ctrl+Enter` でターミナルへ送信
-- **一時タブ** (`+` ボタン): `Ctrl+S` で保存ダイアログを開き、ファイルとして保存可能
-- **ファイルタブ**: 既存ファイルを編集。`Ctrl+S` で上書き保存
+- **スクラッチ Composer**: 画面下部に常設の一時メモ領域。`Ctrl+Enter` でターミナルへ送信
+- **ファイルタブ**: 既存ファイルを CodeMirror 6 で編集。`Ctrl+S` で上書き保存
+- 選択範囲を `Ctrl+Shift+Enter` で `path:L10-L20` 形式でスクラッチへ挿入
 
 ### プレビュー
+
+![Markdown Preview](screenshots/markdown-preview.png)
 
 | 種別 | 拡張子 | 表示方法 |
 |---|---|---|
@@ -106,18 +118,30 @@ npm run dist:linux
 
 | キー | 動作 |
 |---|---|
-| `Ctrl+S` | ファイル保存（一時タブの場合は保存ダイアログ） |
-| `Ctrl+Enter` | エディタの内容をターミナルへ送信 |
-| `Ctrl+I` | スクラッチタブへ切り替え |
-| `Ctrl+Shift+Z` | 最後に送信した内容を取り消す（スクラッチタブ） |
+| `Ctrl+S` | ファイル保存 |
+| `Ctrl+Enter` | スクラッチの内容をターミナルへ送信 |
+| `Ctrl+I` | スクラッチへフォーカス |
+| `Ctrl+Shift+Z` | 最後に送信した内容を取り消す（スクラッチ） |
+| `Ctrl+F` | 検索バーを開く（エディタ・プレビュー・スクラッチ） |
+| `Ctrl+D` | 次の同じ文字列を選択に追加（エディタ・スクラッチ） |
+| `Ctrl+Shift+Enter` | 選択範囲をスクラッチへ挿入（エディタ） |
+| `Ctrl+B` | サイドバーの開閉 |
+| `Ctrl+Shift+F` | 検索ペインを開く |
+| `Ctrl+\` | ペイン分割 |
+| `Ctrl+Shift+\` | ペインを閉じる |
+| `Ctrl+1`〜`Ctrl+4` | ペイン切替 |
+| `Ctrl+Shift+C` | ターミナル コピー |
+| `Ctrl+A` | ターミナル 全選択 |
 
 ## 技術スタック
 
 - [Electron](https://www.electronjs.org/) 31
 - [xterm.js](https://xtermjs.org/) - ターミナルエミュレータ
 - [node-pty](https://github.com/microsoft/node-pty) - 疑似ターミナル
+- [CodeMirror 6](https://codemirror.net/) - コードエディタ
 - [marked](https://marked.js.org/) - Markdown パーサ
 - [DOMPurify](https://github.com/cure53/DOMPurify) - HTML サニタイザ
+- [esbuild](https://esbuild.github.io/) - レンダラバンドル
 - [electron-builder](https://www.electron.build/) - 配布ビルド
 
 ## ライセンス
