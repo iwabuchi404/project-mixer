@@ -84,20 +84,23 @@ function defaultShell() {
 }
 
 // ツール別の送信方式（D8: bracketed paste 挙動差を吸収）
-//   'paste'    : xterm.js の paste() + \r（デフォルト。mode 有効なツール全般）
+//   'paste'    : TUI の bracketed paste mode 状態を xterm.js の公開APIで実行時に判定し、
+//                有効なら \n を変換せず bracket で囲み、無効なら \n→\r 変換して送る（デフォルト）
 //   'bracketed': 強制マーカー \x1b[200~ ... \x1b[201~ + \r（mode 無効だがマーカーを理解する）
 //   'raw'      : 生テキスト + \r（マーカーを嫌うツール）
 //
-// 実測（2026-07-28）:
-//   Claude Code: paste（mode 有効）
+// 実測（2026-07-28 / 2026-08-29 改訂）:
+//   Claude Code: paste（動的切り替え・mode 有効時は bracket で囲む）
 //   Codex:       bracketed（mode 無効、マーカーで複数行OK）
-//   Devin CLI:   raw（mode 有効だがマーカーを貼り付けとして処理しない）
+//   Devin CLI:   paste（動的切り替え・旧 raw から変更。mode 有効時は bracket で囲む）
 //
 // 新ツール時はデフォルト paste で試し、ダメならここに1行足す。
 // layout.json の terminalSendModes でユーザー上書き可能。
+// 'paste' は TUI の bracketed paste mode 状態を実行時に判定して動的切り替えする
+// （xterm.js の terminal.modes.bracketedPasteMode 公開APIを使用）。raw 指定していた
+// devin も paste に統一済み — 動的切り替えが TUI の状態に追従するため。
 const DEFAULT_TERMINAL_SEND_MODES = {
   codex: 'bracketed',
-  devin: 'raw',
 };
 let terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES };
 
@@ -3445,6 +3448,11 @@ function sendToTerminal(text, tabId) {
   // D8: 複数行の指示を1回で送る（ツール別の bracketed paste 挙動差を吸収）
   // 送信方式は terminalSendModes で管理。新ツールは DEFAULT_TERMINAL_SEND_MODES に1行足すか、
   // layout.json の terminalSendModes でユーザー上書き。
+  // 'paste'（デフォルト）は TUI の bracketed paste mode 状態を xterm.js の公開API
+  // (terminal.modes.bracketedPasteMode) で実行時に判定し、有効なら \n を変換せず
+  // bracket で囲み、無効なら \n→\r 変換して送る。xterm.js の paste() が \n を \r に
+  // 変換してから bracket で囲むため bracket 内に \r が混入し TUI の実装差で挙動が
+  // 変わる問題を回避する（本来の bracketed paste は \n をそのまま送るのが仕様）。
   const cmd = (t.command || '').toLowerCase();
   const mode = terminalSendModes[cmd] || 'paste';
   if (mode === 'bracketed') {
@@ -3454,11 +3462,17 @@ function sendToTerminal(text, tabId) {
     window.api.ptyWrite(t.ptyId, contentToSend);
     window.api.ptyWrite(t.ptyId, '\r');
   } else {
-    // 'paste'（デフォルト）: xterm.js が bracketed paste mode を判定して適切に処理
-    t.terminal.paste(contentToSend);
+    // 'paste'（デフォルト）: TUI の bracketed paste mode 状態に応じて動的切り替え
+    if (t.terminal.modes && t.terminal.modes.bracketedPasteMode) {
+      // TUI が bracketed paste を有効 → \n を \r に変換せずそのまま bracket で囲む
+      window.api.ptyWrite(t.ptyId, '\x1b[200~' + contentToSend + '\x1b[201~');
+    } else {
+      // TUI が bracketed paste を無効 → \n を \r に変換して送る（shell が期待する形式）
+      window.api.ptyWrite(t.ptyId, contentToSend.replace(/\r?\n/g, '\r'));
+    }
     window.api.ptyWrite(t.ptyId, '\r');
   }
-  clearTerminalWaitingForUserInput(activeTabId);
+  clearTerminalWaitingForUserInput(targetId);
 
   if (f?.isScratch && !hasExplicitText) {
     lastSentContent = f.content;

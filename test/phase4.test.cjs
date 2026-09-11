@@ -240,3 +240,20 @@ test('browser tabs accept local HTTP origins and reject remote sites', async () 
   assert.equal(normalizeLocalBrowserUrl('file:///etc/passwd'), null);
   assert.equal(getBrowserTabLabel('http://localhost:5173/app'), 'localhost:5173/app');
 });
+
+test('sendToTerminal paste mode dynamically switches on TUI bracketed paste state', () => {
+  const renderer = read('renderer.js');
+  // paste（デフォルト）分岐が xterm.js の公開API (terminal.modes.bracketedPasteMode) を読む
+  assert.match(renderer, /t\.terminal\.modes\s*&&\s*t\.terminal\.modes\.bracketedPasteMode/);
+  // bracketed paste 有効時は \n を変換せず bracket で囲む
+  assert.match(renderer, /'paste'（デフォルト）: TUI の bracketed paste mode 状態に応じて動的切り替え/);
+  // 無効時は \n→\r 変換
+  assert.match(renderer, /contentToSend\.replace\(\/\\r\?\\n\/g, '\\r'\)/);
+  // xterm.js の paste() を呼ぶ旧経路は削除されている
+  assert.doesNotMatch(renderer, /t\.terminal\.paste\(contentToSend\)/);
+  // devin の raw 指定は削除され paste（動的切り替え）に統一
+  const modesBlock = renderer.match(/const DEFAULT_TERMINAL_SEND_MODES = \{[\s\S]*?\};/);
+  assert.ok(modesBlock, 'DEFAULT_TERMINAL_SEND_MODES block exists');
+  assert.doesNotMatch(modesBlock[0], /devin/);
+  assert.match(modesBlock[0], /codex:\s*'bracketed'/);
+});
