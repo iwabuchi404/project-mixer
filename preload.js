@@ -60,6 +60,7 @@ contextBridge.exposeInMainWorld('api', {
   // Hook-based waiting indicator
   onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),
   hookSetup: (projectPath) => ipcRenderer.invoke('hook:setup', { projectPath }),
+  getSettings: () => ipcRenderer.invoke('settings:get'),
   devinBind: (ptyId, sessionId) => ipcRenderer.invoke('devin:bind', { ptyId, sessionId }),
   devinUnbind: (ptyId) => ipcRenderer.invoke('devin:unbind', { ptyId }),
   onDevinMonitorError: (callback) => ipcRenderer.on('devin:monitor-error', (_event, data) => callback(data)),

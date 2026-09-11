@@ -68,9 +68,9 @@ test('terminal, file editor, and preview share one main tab surface', () => {
 test('scratch composer remains a separate persistent lower surface', () => {
   const html = read('index.html');
   assert.match(html, /id="main-surface"[\s\S]*id="splitter"[\s\S]*id="editor-pane"/);
-  assert.match(html, /id="scratch-header"[\s\S]*id="send-target"[\s\S]*id="send-btn"[\s\S]*id="scratch-collapse-btn"[\s\S]*id="editor-textarea"/);
-  assert.doesNotMatch(html, /id="editor-tab-bar"|id="send-bar"/);
-  assert.match(html, /id="file-editor-textarea"/);
+  assert.match(html, /id="scratch-header"[\s\S]*id="send-target"[\s\S]*id="send-btn"[\s\S]*id="scratch-collapse-btn"[\s\S]*id="scratch-editor-mount"/);
+  assert.doesNotMatch(html, /id="editor-tab-bar"|id="send-bar"|id="editor-textarea"/);
+  assert.match(html, /id="file-editor-mount"/);
   const css = read('styles.css');
   const renderer = read('renderer.js');
   assert.match(css, /#editor-pane\s*\{[\s\S]*height:\s*112px/);
@@ -184,7 +184,8 @@ test('runtime metrics share the global status bar', () => {
 
 test('hidden main surfaces stay mounted and the webview is reused', () => {
   const css = read('styles.css');
-  assert.match(css, /#main-surface\s*>\s*\.main-surface-pane\.hidden\s*\{[\s\S]*display:\s*block;[\s\S]*visibility:\s*hidden/);
+  // B6: surface panes can be hosted in #main-surface OR .terminal-pane-body.
+  assert.match(css, /#main-surface\s*>\s*\.main-surface-pane\.hidden,\s*\n\s*\.terminal-pane-body\s*>\s*\.main-surface-pane\.hidden\s*\{[\s\S]*display:\s*block;[\s\S]*visibility:\s*hidden/);
   const renderer = read('renderer.js');
   assert.doesNotMatch(renderer, /createElement\(['"]webview['"]\)/);
   assert.doesNotMatch(renderer, /previewWebview\.remove\(\)/);
@@ -238,4 +239,21 @@ test('browser tabs accept local HTTP origins and reject remote sites', async () 
   assert.equal(normalizeLocalBrowserUrl('https://example.com'), null);
   assert.equal(normalizeLocalBrowserUrl('file:///etc/passwd'), null);
   assert.equal(getBrowserTabLabel('http://localhost:5173/app'), 'localhost:5173/app');
+});
+
+test('sendToTerminal paste mode dynamically switches on TUI bracketed paste state', () => {
+  const renderer = read('renderer.js');
+  // paste（デフォルト）分岐が xterm.js の公開API (terminal.modes.bracketedPasteMode) を読む
+  assert.match(renderer, /t\.terminal\.modes\s*&&\s*t\.terminal\.modes\.bracketedPasteMode/);
+  // bracketed paste 有効時は \n を変換せず bracket で囲む
+  assert.match(renderer, /'paste'（デフォルト）: TUI の bracketed paste mode 状態に応じて動的切り替え/);
+  // 無効時は \n→\r 変換
+  assert.match(renderer, /contentToSend\.replace\(\/\\r\?\\n\/g, '\\r'\)/);
+  // xterm.js の paste() を呼ぶ旧経路は削除されている
+  assert.doesNotMatch(renderer, /t\.terminal\.paste\(contentToSend\)/);
+  // devin の raw 指定は削除され paste（動的切り替え）に統一
+  const modesBlock = renderer.match(/const DEFAULT_TERMINAL_SEND_MODES = \{[\s\S]*?\};/);
+  assert.ok(modesBlock, 'DEFAULT_TERMINAL_SEND_MODES block exists');
+  assert.doesNotMatch(modesBlock[0], /devin/);
+  assert.match(modesBlock[0], /codex:\s*'bracketed'/);
 });

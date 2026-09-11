@@ -33,6 +33,7 @@ export const COMMAND_SCHEMAS = {
     cwd: optStr,
     projectId: optStr,
     label: optStr,
+    resumeSessionId: optStr,
   }),
   close_terminal: p({ tabId: z.number() }),
   send_to_terminal: p({ text: optStr, tabId: optNum }),
@@ -74,4 +75,24 @@ export const COMMAND_SCHEMAS = {
   terminal_select_all: p({}),
   search_text: p({ query: z.string(), cwd: optStr, caseSensitive: optBool }),
   search_close: p({}),
+  // Phase 4.5 A4: point at selected editor lines from the scratch composer
+  insert_selection_to_scratch: p({}),
+  // Session resume: menu checkbox toggles the mode.
+  resume_mode_changed: p({ mode: z.enum(['ask', 'auto']) }),
+  // Phase 5 S3: shared find bar (delegates to editor / preview)
+  find_open: p({}),
+  // Editor: VSCode-style Ctrl+D (add next occurrence to selection)
+  editor_select_next_occurrence: p({}),
+  find_next: p({}),
+  find_prev: p({}),
+  find_close: p({}),
+  // Phase 8 B1: flat pane operations. Not exposed to MCP (D11).
+  pane_split: p({ direction: optStr }),
+  pane_close: p({}),
+  focus_pane: p({ index: z.number() }),
+  focus_pane_1: p({}),
+  focus_pane_2: p({}),
+  focus_pane_3: p({}),
+  focus_pane_4: p({}),
+  tab_move_to_pane: p({ tabId: optNum, filePath: optStr, paneIndex: z.number() }),
 };

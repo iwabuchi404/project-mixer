@@ -33,8 +33,26 @@ export const BINDINGS = [
   // Phase 5 additions.
   { key: 'Ctrl+Shift+F', command: 'search_text_open', when: null },
   { key: 'Slash', command: 'tree_filter_focus', when: 'treeFocus' },
-  { key: 'Escape', command: 'tree_filter_clear', when: 'treeFocus || treeFilterFocus' },
-  { key: 'Escape', command: 'search_close', when: 'searchFocus' },
+  { key: 'Escape', command: 'tree_filter_clear', when: '!findOpen && treeFocus || !findOpen && treeFilterFocus' },
+  { key: 'Escape', command: 'search_close', when: '!findOpen && searchFocus' },
+  // Phase 4.5 A4: point at selected editor lines from the scratch composer.
+  { key: 'Ctrl+Shift+Enter', command: 'insert_selection_to_scratch', when: 'editorFocus' },
+  // Phase 5 S3: shared find bar. Terminal keeps Ctrl+F (forward-char), so
+  // find_open only applies to editor/preview focus contexts.
+  { key: 'Ctrl+F', command: 'find_open', when: 'editorFocus || previewFocus || scratchFocus' },
+  { key: 'Escape', command: 'find_close', when: 'findOpen' },
+  // Editor: VSCode-style Ctrl+D (add next occurrence). editorFocus/scratch
+  // only — terminals must keep Ctrl+D (EOF).
+  { key: 'Ctrl+D', command: 'editor_select_next_occurrence', when: 'editorFocus || scratchFocus' },
+  // Phase 8 B1: pane operations. Restricted to non-terminal focus so shell
+  // keys are never taken over (B1 handoff: "ターミナルのキーを削らない").
+  // Enabling these inside terminals requires an explicit user decision.
+  { key: 'Ctrl+\\', command: 'pane_split', when: '!terminalFocus' },
+  { key: 'Ctrl+Shift+\\', command: 'pane_close', when: '!terminalFocus' },
+  { key: 'Ctrl+1', command: 'focus_pane_1', when: '!terminalFocus' },
+  { key: 'Ctrl+2', command: 'focus_pane_2', when: '!terminalFocus' },
+  { key: 'Ctrl+3', command: 'focus_pane_3', when: '!terminalFocus' },
+  { key: 'Ctrl+4', command: 'focus_pane_4', when: '!terminalFocus' },
 ];
 
 // --- Key normalization ---

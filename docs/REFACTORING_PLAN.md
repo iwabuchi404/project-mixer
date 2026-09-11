@@ -2,7 +2,7 @@
 
 **作成日**: 2026-08-12
 
-**状態**: R0実装、R1概ね完了、R2–R4部分実装（2026-08-12）。R5の実Electron検証は未実施。下記「実装ログ」参照。
+**状態**: R0実装、R1概ね完了、**R2完了（2026-08-22）**、R3–R4部分実装。R5の実Electron検証は未実施。下記「実装ログ」参照。
 
 **対象ブランチ**: `v2`
 
@@ -226,14 +226,33 @@ StoreにはID・文字列・boolean・配列・plain objectだけを置く。DOM
 - `main.js` `dispatchToRenderer`: エラーを握り潰さずlog出力してre-throw。
 - Gate: 自動テスト成功。installed/dev同時起動による配送確認はR5で必要。
 
-### R2: Storeをsingle source of truthに（部分実装）
+### R2: Storeをsingle source of truthに（完了・2026-08-22）
 - `src/store/index.js`: `projectBadges` と `waitingTabs` を追加。selector `getProjectBadge`/`getWaitingSummary`/`isTabWaiting` を追加。
 - `renderer.js` `project_set_badge` handler: storeを更新し、DOMはstoreから描画。
 - `renderer.js` `renderProjectList`: 再描画後にstoreからbadge/waiting状態を復元。
 - `renderer.js` `updateTabStatus`/`updateProjectStatus`: storeと同期。
 - `renderer.js` `closeTerminal`: storeからwaiting状態を削除。
-- **残作業**: `activeProjectId`、active file/preview/terminal、project別scratch/open file identityはrenderer globalとの二重管理が残る。store subscriptionによる描画も未導入。
-- Gate: badge/waitingの自動テスト成功。R2全体のGateは未達。
+- **完了（2026-08-22）**: attention状態（`activeProjectId` / `activeFilePath` / `activeTerminalTabId`）の書き込みを `commitAttention(patch)` チョークポイントに集約。renderer側の同名変数は派生キャッシュに降格し、storeとキャッシュが乖離する経路を構造的に排除。二重書き込みサイト（selectProject / removeProject / switchEditorTab / selectComposerTab / switchTab / closeTerminal / showProjectTabs）をすべて移行。`switchProjectEditor` / `initScratchTab` 内の一時値は後続のswitch系関数・selectProjectがコミットで収束するため直書きのまま（設計コメントに記載）。
+- **store subscription描画を導入**: `projectBadges` 変更→`renderProjectList()`、`terminalAttention` 変更→全タブの `updateTabStatus()`。タイトルバーは `updateTitleBar()` がコミット済みattention状態から生成。
+- テスト: `test/refactor-r2.test.cjs`（6件、`npm run test:refactor-r2`、`npm test` に組込み）。store購読の意味論（同期通知・変更時のみ通知・getStateはコピー）+ 配線の静的検査（commitAttention存在・二重書き込みの不在・subscription描画・タイトル生成）。
+- kamox実機検証（2026-08-22）: プロジェクト切替 A→B→A でタブ選択・エディタ内容・scratch内容・タイトルバーが復元。エラーログなし。`npm test`: 174件成功。
+- **Gate達成**: badge/status/focusがstoreの状態から再描画され、project list再生成で状態が失われない。attention状態の正本はstoreに一箇所。
+
+### R2 と Phase 8（マルチペイン）の整合性確認（2026-08-25）
+
+Phase 8（B0〜B6完了）と R2（store = SSOT）の整合性を確認した。**即時バグはないが、R2 の規律からは逸脱箇所がある**。影響は軽微（現状で壊れない）だが、将来の drift リスクとして記録する。
+
+| 項目 | 現状 | R2 規律との関係 |
+| --- | --- | --- |
+| `activePaneId`（キーボード保持先 = D24 の `hasFocus`） | **renderer グローバル変数**。`setFocusedPane` が直接代入し、`commitAttention` を通らない | **逸脱**。D24「注意は可視対象の集合 + キーボード保持先」の後者は attention 状態の一部。`commitAttention({ activePaneId })` へ載せるのが規律どおり |
+| `panes` / `paneDirection`（ペイン構成） | **renderer グローバル変数**。`projectEditorStates` がプロジェクト別に退避・復元 | **灰色**。レイアウト状態は R2 の対象（`activeFilePath` 等）と同種だが、store への移行は未実装。`projectEditorStates` が実質的な SSOT として機能しているため現状は壊れない |
+| `projectEditorStates`（ペイン状態の永続化） | renderer 側の `Map`。store とは別経路 | **灰色**。プロジェクト切替の退避・復元はここで完結しており、store の attention 状態とは同期しない。`commitAttention` が `activeFilePath` を更新するが、ペインのタブ構成は `projectEditorStates` から復元されるため、両者が一時的に乖離する窓がある |
+
+**対応方針**: 即時修正は不要（現状で壊れない）。ただし以下の条件で R2 の規律へ載せる必要がある:
+- `get_focus` v2（D13 再々改訂）着手時 — D24 の「ペイン集合 + `hasFocus`」を返すため、`activePaneId` と `panes` が store に無いと selector で生成できない
+- ペイン状態の badge / status 表示を store から描画する要件が出た場合
+
+**詳細**: Phase 8 の実装記録は `docs/EDITOR_AND_SPLIT_PLAN.md` Phase B（B0〜B6）、D24 は `docs/MULTI_PANE_PROPOSAL.md` §3 および Context Mixer `11_決定と根拠 v2` D24 を参照。
 
 ### R3: Rendererの責務をfeature単位に抽出（部分実装）
 - `renderer.js` `createMainTab` factoryを追加。4種類のtab（preview/browser/file/terminal）の重複markup + event setupを統合。

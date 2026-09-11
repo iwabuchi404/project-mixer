@@ -7,8 +7,10 @@ const http = require('http');
 const pty = require('node-pty');
 const { execSync, spawn } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
+const { PLUGIN_SOURCE: OPENCODE_PLUGIN_SOURCE } = require('./src/main/opencode-plugin-source.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
+const { buildResumeArgs } = require('./src/main/resume-args.cjs');
 const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, ConfigParseError } = require('./src/main/config-service.cjs');
@@ -45,6 +47,24 @@ const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
 const layoutFile = path.join(configDir, 'layout.json');
 const portFile = path.join(configDir, 'port.json');
+const settingsFile = path.join(configDir, 'settings.json');
+// Session-resume mode: 'ask' shows the confirm modal per new agent tab;
+// 'auto' resumes silently when a previous session is known.
+let appSettings = { resumeMode: 'ask' };
+function loadAppSettings() {
+  try {
+    const data = readConfig(settingsFile, { resumeMode: 'ask' });
+    if (data && typeof data === 'object' && (data.resumeMode === 'ask' || data.resumeMode === 'auto')) {
+      appSettings = data;
+    }
+  } catch (e) {
+    console.warn(`[Project Mixer] ${e.message}; using default settings`);
+  }
+}
+function saveAppSettings() {
+  ensureConfigDir();
+  writeConfig(settingsFile, appSettings);
+}
 
 function ensureConfigDir() {
   if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
@@ -209,6 +229,17 @@ function setupApplicationMenu() {
           click: () => dispatchToRenderer('save_active_file'),
         },
         { type: 'separator' },
+        {
+          type: 'checkbox',
+          label: 'Auto-Resume Previous Sessions',
+          checked: appSettings.resumeMode === 'auto',
+          click: (menuItem) => {
+            appSettings.resumeMode = menuItem.checked ? 'auto' : 'ask';
+            saveAppSettings();
+            dispatchToRenderer('resume_mode_changed', { mode: appSettings.resumeMode });
+          },
+        },
+        { type: 'separator' },
         isMac ? { role: 'close', label: 'Close Window' } : { role: 'quit', label: 'Exit' },
       ],
     },
@@ -313,9 +344,12 @@ app.whenReady().then(() => {
   // Windows toast notifications require an AppUserModelID so the notification
   // shows the correct app name and icon. Without this, Windows falls back to
   // a generic "Electron" label. Must be set before any Notification is shown.
-  if (process.platform === 'win32') {
-    app.setAppUserModelId('com.projectmixer.app');
-  }
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.projectmixer.app');
+    }
+
+    loadAppSettings();
+
 
   // R4: startup guard — if projects.json is corrupt, stop startup and show
   // an error dialog instead of overwriting the corrupt file with defaults.
@@ -388,7 +422,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols, rows }) => {
+ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols, rows, resumeSessionId }) => {
   const id = ++ptyCounter;
   const shellCwd = cwd || os.homedir();
   const mcpPort = MCP_PORT || await mcpReady;
@@ -399,6 +433,10 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
     }) : null;
   const mcpUrl = mcpToken ? `http://127.0.0.1:${mcpPort}/s/${mcpToken}` : null;
   const requestedArgs = args || [];
+  // Resume-previous-session: prepend the agent's resume flags before
+  // user-supplied args (they compose with the MCP injection args).
+  const resumeArgs = buildResumeArgs(command, resumeSessionId);
+  const effectiveArgs = resumeArgs ? [...resumeArgs, ...requestedArgs] : requestedArgs;
   const agentMcpArgs = buildAgentMcpArgs(command, mcpUrl);
 
   const isWin = os.platform() === 'win32';
@@ -408,13 +446,13 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
   let shell, shellArgs;
   if (!command) {
     shell = isWin ? 'pwsh.exe' : 'bash';
-    shellArgs = requestedArgs;
+    shellArgs = effectiveArgs;
   } else if (isWin && winShells.includes(command)) {
     shell = command;
-    shellArgs = requestedArgs;
+    shellArgs = effectiveArgs;
   } else if (!isWin && unixShells.includes(command)) {
     shell = command;
-    shellArgs = requestedArgs;
+    shellArgs = effectiveArgs;
   } else {
     // claude, codex, etc. — wrap in pwsh -NoExit -Command on Windows
     if (isWin) {
@@ -422,11 +460,11 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
       shellArgs = [
         '-NoExit',
         '-Command',
-        buildPowerShellInvocation(command, [...requestedArgs, ...agentMcpArgs]),
+        buildPowerShellInvocation(command, [...effectiveArgs, ...agentMcpArgs]),
       ];
     } else {
       shell = command;
-      shellArgs = [...requestedArgs, ...agentMcpArgs];
+      shellArgs = [...effectiveArgs, ...agentMcpArgs];
     }
   }
 
@@ -449,6 +487,9 @@ ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols
         PROJECT_MIXER_PTY_ID: String(id),
         // 3.5: inject a per-PTY MCP URL so agents discover only their session.
         ...(mcpUrl ? { PM_MCP_URL: mcpUrl } : {}),
+        // OpenCode plugin bridge: POST /hook target for lifecycle events
+        // (session.status idle -> stop, permission.asked, question.asked).
+        ...(HOOK_PORT ? { PM_HOOK_URL: `http://127.0.0.1:${HOOK_PORT}/hook` } : {}),
         ...opencodeEnv,
       },
     });
@@ -531,8 +572,9 @@ ipcMain.handle('mem:get', async () => {
 
 // --- Command availability check ---
 
-ipcMain.handle('command:check', async (event, { commands }) => {
-  const result = {};
+ipcMain.handle('settings:get', () => ({ ...appSettings }));
+
+ipcMain.handle('command:check', async (event, { commands }) => {  const result = {};
   // The --version fallback is restricted to known agent commands that may
   // be installed as shell functions or aliases not discoverable by where/which.
   // Allowing arbitrary commands here would let hook data execute any binary.
@@ -609,6 +651,7 @@ function handleHookNotification(data) {
     reason: notification.reason,
     title: notification.title,
     message: notification.message,
+    sessionId: notification.sessionId,
     cwd: notification.cwd,
     ...target,
   });
@@ -1158,9 +1201,18 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
   // user's command, while project hooks require an explicit trust review.
   results.push({ tool: 'codex', success: true, note: 'Ready for Codex notify or trusted project hooks' });
 
-  // OpenCode: MCP is injected via OPENCODE_CONFIG_CONTENT env var at PTY
-  // creation time, so no project-level hook setup is needed.
-  results.push({ tool: 'opencode', success: true, note: 'MCP injected via OPENCODE_CONFIG_CONTENT env var' });
+  // OpenCode: install the notification bridge plugin into the project.
+  // The plugin is inert unless the PTY env provides PM_HOOK_URL (injected at
+  // terminal creation), so writing it is side-effect free for other setups.
+  const opencodePluginDir = path.join(projectPath, '.opencode', 'plugins');
+  const opencodePluginPath = path.join(opencodePluginDir, 'project-mixer.js');
+  try {
+    if (!fs.existsSync(opencodePluginDir)) fs.mkdirSync(opencodePluginDir, { recursive: true });
+    fs.writeFileSync(opencodePluginPath, OPENCODE_PLUGIN_SOURCE, 'utf-8');
+    results.push({ tool: 'opencode', success: true, path: opencodePluginPath });
+  } catch (e) {
+    results.push({ tool: 'opencode', success: false, error: e.message });
+  }
 
   return results;
 });

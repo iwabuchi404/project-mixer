@@ -4,3 +4,4 @@ dist/
 .kamox/
 .claude/project-mixer-hook.cjs
 .claude/settings.local.json
+.opencode/plugins/project-mixer.js

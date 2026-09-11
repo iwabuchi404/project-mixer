@@ -56,7 +56,7 @@ export const COMMAND_TYPES = {
     returns: 'void',
   },
   create_terminal: {
-    args: { command: 'string?', cwd: 'string?', projectId: 'string?', label: 'string?' },
+    args: { command: 'string?', cwd: 'string?', projectId: 'string?', label: 'string?', resumeSessionId: 'string?' },
     returns: 'number',
   },
   close_terminal: {
@@ -180,6 +180,59 @@ export const COMMAND_TYPES = {
   },
   search_close: {
     args: {},
+    returns: 'void',
+  },
+  // Phase 4.5 A4: point at selected editor lines from the scratch composer
+  insert_selection_to_scratch: {
+    args: {},
+    returns: 'void',
+  },
+  // Session resume: menu checkbox toggles the mode.
+  resume_mode_changed: {
+    args: { mode: 'ask | auto' },
+    returns: 'void',
+  },
+  // Phase 5 S3: shared find bar (delegates to editor / preview)
+  find_open: {
+    args: {},
+    returns: 'void',
+  },
+  // Editor: VSCode-style Ctrl+D (add next occurrence to selection)
+  editor_select_next_occurrence: {
+    args: {},
+    returns: 'void',
+  },
+  find_next: {
+    args: {},
+    returns: 'void',
+  },
+  find_prev: {
+    args: {},
+    returns: 'void',
+  },
+  find_close: {
+    args: {},
+    returns: 'void',
+  },
+  // Phase 8 B1: flat pane operations. Not exposed to MCP (D11).
+  pane_split: {
+    args: { direction: "'row' | 'column' | 'toggle'?" },
+    returns: 'void',
+  },
+  pane_close: {
+    args: {},
+    returns: 'void',
+  },
+  focus_pane: {
+    args: { index: 'number' },
+    returns: 'void',
+  },
+  focus_pane_1: { args: {}, returns: 'void' },
+  focus_pane_2: { args: {}, returns: 'void' },
+  focus_pane_3: { args: {}, returns: 'void' },
+  focus_pane_4: { args: {}, returns: 'void' },
+  tab_move_to_pane: {
+    args: { tabId: 'number?', filePath: 'string?', paneIndex: 'number' },
     returns: 'void',
   },
 };

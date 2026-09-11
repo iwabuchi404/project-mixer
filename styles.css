@@ -174,6 +174,80 @@ textarea:focus-visible,
   display: none;
 }
 
+/* Phase 5 S3: shared find bar (editor / preview delegation).
+   Sits between the main tab bar and #main-surface — it pushes content
+   down instead of overlaying it. */
+#find-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-1) var(--s-2);
+  border-bottom: 1px solid var(--g-2);
+  background: var(--g-1);
+  flex: 0 0 auto;
+}
+
+#find-bar.hidden {
+  display: none;
+}
+
+#find-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px var(--s-2);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  outline: none;
+}
+
+#find-input:focus {
+  border-color: var(--g-4);
+}
+
+#find-count {
+  flex: 0 0 auto;
+  padding: 2px var(--s-2);
+  border-radius: var(--r-1);
+  background: var(--g-2);
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+#find-bar button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--g-4);
+  cursor: pointer;
+}
+
+#find-bar button:hover {
+  border-color: var(--g-2);
+  color: var(--g-5);
+}
+
+#find-bar button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 #tree-filter-input-wrap {
   position: relative;
   flex: 1;
@@ -457,15 +531,20 @@ textarea:focus-visible,
 
 .project-item.dragging,
 .main-tab.dragging {
-  opacity: .45;
+  opacity: .35;
+  outline: 1px dashed var(--act);
+  outline-offset: -1px;
 }
 
 .project-item.drag-over {
   box-shadow: inset 0 2px var(--act);
 }
 
+/* Reorder insertion point: the dragged tab would land before this tab.
+   A thick left accent reads as "gap opens here" better than a glow. */
 .main-tab.drag-over {
-  box-shadow: inset 2px 0 var(--act);
+  box-shadow: inset 3px 0 var(--act);
+  opacity: .55;
 }
 
 .restore-bar {
@@ -624,6 +703,12 @@ textarea:focus-visible,
   font-weight: 600;
 }
 
+/* B1: the tab currently rendered in its pane. Distinct from .active, which
+   marks keyboard/attention focus — with multiple panes both can differ. */
+.main-tab.shown-in-pane {
+  box-shadow: inset 2px 0 0 var(--act);
+}
+
 .preview-tab .editor-tab-name::before,
 .preview-tab.notified .editor-tab-name::before {
   content: none;
@@ -647,7 +732,8 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
-#main-surface > .main-surface-pane {
+#main-surface > .main-surface-pane,
+.terminal-pane-body > .main-surface-pane {
   position: absolute;
   inset: 0;
   display: block;
@@ -661,7 +747,8 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
-#main-surface > .main-surface-pane.hidden {
+#main-surface > .main-surface-pane.hidden,
+.terminal-pane-body > .main-surface-pane.hidden {
   display: block;
   visibility: hidden;
   opacity: 0;
@@ -782,7 +869,7 @@ textarea:focus-visible,
 #terminal-container,
 #preview-content,
 #preview-webview,
-#file-editor-textarea {
+#file-editor-mount {
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -792,9 +879,171 @@ textarea:focus-visible,
 #terminal-container {
   position: relative;
   flex: 1;
+  display: flex;
   overflow: hidden;
   padding: var(--s-2);
   background: var(--g-1);
+}
+
+/* Phase 8 / B1: flat pane layout inside the terminal container.
+   Boundaries stay visible at all times (1px --g-2 outline); keyboard focus
+   upgrades the outline to --act. */
+.terminal-pane-item {
+  position: relative;
+  flex: 1 1 0%;
+  min-width: 120px;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--r-1);
+  outline: 1px solid var(--g-2);
+  outline-offset: -1px;
+}
+
+.terminal-pane-item.focused {
+  outline-color: var(--act);
+}
+
+/* B6: pane header with tab bar + direction toggle + close */
+.pane-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 2px var(--s-1);
+  background: var(--g-0);
+  border-bottom: 1px solid var(--g-2);
+  min-height: 28px;
+}
+
+/* B6: hide the shared main tab bar — pane headers own tabs and buttons now. */
+#main-tab-bar {
+  display: none !important;
+}
+
+.pane-tab-bar {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* An empty bar collapses to 0px and can never receive drops — keep a hit area. */
+  min-height: 24px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+/* Slim overlay-style bar scrollbar: 7px hit area with a 1px visual line
+   (transparent border + content-box clip). Always visible so overflow is
+   discoverable; brightens on hover. Token-only. */
+.pane-tab-bar::-webkit-scrollbar {
+  height: 7px;
+}
+
+.pane-tab-bar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.pane-tab-bar::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--scrollbar-radius);
+}
+
+.pane-tab-bar::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+.pane-tab-bar .main-tab {
+  flex: 0 0 auto;
+}
+
+/* Cross-pane drop target: the whole bar glows; a "Move here" badge floats
+   at the top of the destination pane body (on the pane root, so it does not
+   scroll away with the bar's overflow). */
+.pane-tab-bar-drag-over {
+  background: var(--g-2);
+  outline: 2px dashed var(--act);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 1px var(--g-1);
+  border-radius: var(--r-1);
+}
+
+.terminal-pane-item.drop-target > .terminal-pane-body::before {
+  content: '\2192 Move here';
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 2px var(--s-2);
+  background: var(--act);
+  color: var(--g-0);
+  font-size: var(--t-xs);
+  border-radius: var(--r-1);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.pane-dir-btn,
+.pane-close-btn,
+.pane-add-btn {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--t-2);
+  font-size: var(--t-sm);
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--r-1);
+  cursor: pointer;
+}
+
+.pane-dir-btn:hover,
+.pane-close-btn:hover,
+.pane-add-btn:hover {
+  background: var(--g-2);
+  color: var(--t-1);
+}
+
+.pane-close-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.terminal-pane-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+}
+
+.pane-splitter {
+  flex: 0 0 7px;
+  cursor: ew-resize;
+  background: linear-gradient(to right, transparent 3px, var(--g-3) 3px, var(--g-3) 4px, transparent 4px);
+}
+
+.pane-splitter.horizontal {
+  cursor: ns-resize;
+  background: linear-gradient(to bottom, transparent 3px, var(--g-3) 3px, var(--g-3) 4px, transparent 4px);
+}
+
+.pane-splitter:hover,
+.pane-splitter.dragging {
+  background: linear-gradient(to right, transparent 2px, var(--act) 2px, var(--act) 5px, transparent 5px);
+}
+
+.pane-splitter.horizontal:hover,
+.pane-splitter.horizontal.dragging {
+  background: linear-gradient(to bottom, transparent 2px, var(--act) 2px, var(--act) 5px, transparent 5px);
 }
 
 .terminal-instance,
@@ -828,25 +1077,95 @@ textarea:focus-visible,
   visibility: hidden;
 }
 
-#file-editor-textarea,
-#editor-textarea {
+#file-editor-mount,
+#scratch-editor-mount {
   display: block;
   width: 100%;
   height: 100%;
-  resize: none;
   color: var(--g-5);
   background: var(--g-1);
-  border: 0;
-  border-radius: 0;
-  outline: 0;
+}
+
+/* Scratch composer CM6 surface: mirrors the main editor styles. */
+
+/* CodeMirror 6 (Phase 4.5 A1): match the previous textarea look.
+   Padding moved from the textarea to the mount so the gutter aligns
+   with the content edge. */
+#file-editor-mount {
+  padding: var(--s-4);
+  box-sizing: border-box;
+}
+
+#file-editor-mount .cm-editor {
+  height: 100%;
+  background: var(--g-1);
+  color: var(--g-5);
   font: var(--t-md)/1.55 var(--mono);
-  tab-size: 2;
-  white-space: pre;
+}
+
+#file-editor-mount .cm-editor.cm-focused {
+  outline: none;
+}
+
+#file-editor-mount .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.55;
   overflow: auto;
 }
 
-#file-editor-textarea {
-  padding: var(--s-4);
+#file-editor-mount .cm-content {
+  caret-color: var(--g-5);
+  padding: 0;
+}
+
+#file-editor-mount .cm-gutters {
+  background: var(--g-1);
+  color: var(--g-4);
+  border-right: 1px solid var(--g-2);
+}
+
+/* Semi-transparent: an opaque active-line background paints OVER the
+   selection layer (CM6 draws selection behind the text when focused) and
+   hides keyboard selections on the cursor's line. */
+#file-editor-mount .cm-activeLine {
+  background: var(--active-line);
+}
+
+#file-editor-mount .cm-activeLineGutter {
+  background: var(--active-line);
+  color: var(--g-5);
+}
+
+#file-editor-mount .cm-cursor,
+#file-editor-mount .cm-dropCursor {
+  border-left-color: var(--g-5);
+}
+
+/* Selection: VSCode-dark-like blue so keyboard (shift) selection is clearly
+   visible. The old --g-3 was nearly identical to the background. */
+#file-editor-mount .cm-selectionBackground {
+  background: var(--sel-soft) !important;
+}
+
+#file-editor-mount .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--sel) !important;
+}
+
+/* Phase 5 S3 follow-up: search match highlights. @codemirror/search tags
+   matches with these classes but ships no styles of its own. */
+#file-editor-mount .cm-searchMatch {
+  background: var(--attn-soft);
+}
+
+#file-editor-mount .cm-searchMatch-selected {
+  background: var(--match);
+  outline: 1px solid var(--match-edge);
+}
+
+/* A3: persistent line reveal highlight (show_file pointing). */
+#file-editor-mount .cm-line.pm-line-reveal-highlight {
+  background: var(--attn-soft);
+  box-shadow: inset 3px 0 var(--attn);
 }
 
 #file-editor-pane {
@@ -1246,4 +1565,63 @@ textarea:focus-visible,
 .toast-dismiss {
   color: var(--g-4);
   text-decoration: none;
+}
+
+/* ============================================================
+   Scratch composer CM6 surface (Phase: scratch editor migration)
+   Mirrors #file-editor-mount so the composer gets the same
+   selection / active-line / search-match rendering.
+   ============================================================ */
+
+#scratch-editor-mount {
+  padding: var(--s-3);
+  box-sizing: border-box;
+}
+
+#scratch-editor-mount .cm-editor {
+  height: 100%;
+  background: transparent;
+  color: var(--g-5);
+  font: var(--t-md)/1.55 var(--mono);
+}
+
+#scratch-editor-mount .cm-editor.cm-focused {
+  outline: none;
+}
+
+#scratch-editor-mount .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.55;
+  overflow: auto;
+}
+
+#scratch-editor-mount .cm-content {
+  caret-color: var(--g-5);
+  padding: 0;
+}
+
+#scratch-editor-mount .cm-cursor,
+#scratch-editor-mount .cm-dropCursor {
+  border-left-color: var(--g-5);
+}
+
+#scratch-editor-mount .cm-selectionBackground {
+  background: var(--sel-soft) !important;
+}
+
+#scratch-editor-mount .cm-editor.cm-focused .cm-selectionBackground {
+  background: var(--sel) !important;
+}
+
+#scratch-editor-mount .cm-activeLine {
+  background: var(--active-line);
+}
+
+#scratch-editor-mount .cm-searchMatch {
+  background: var(--attn-soft);
+}
+
+#scratch-editor-mount .cm-searchMatch-selected {
+  background: var(--match);
+  outline: 1px solid var(--match-edge);
 }

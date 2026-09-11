@@ -7,10 +7,16 @@
   --g-5: #c8ccd4;
   --g-6: var(--g-5);
   --attn: #c08b4d;
+  --attn-soft: rgba(192, 139, 77, .18);
+  --active-line: rgba(46, 51, 59, .5);
   --act: #5b9691;
   --act-ink: #0d1412;
   --err: #b56b66;
   --ok: #5f9278;
+  --sel: #264f78;
+  --sel-soft: #2a3f55;
+  --match: #3d5a7a;
+  --match-edge: #6b93c4;
   --s-1: 4px;
   --s-2: 8px;
   --s-3: 12px;

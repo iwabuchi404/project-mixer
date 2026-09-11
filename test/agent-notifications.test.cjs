@@ -23,6 +23,7 @@ test('normalizes agent hook payloads into canonical lifecycle events', () => {
     reason: 'input',
     title: null,
     message: null,
+    sessionId: null,
     source: 'claude',
     cwd: 'D:\\work\\app',
     ptyId: 7,
@@ -246,4 +247,120 @@ test('turn start clears stale attention and failure is summarized separately', a
     sessionId: 'devin-123',
     unread: true,
   }), {});
+});
+
+// ============================================================
+// Session resume (previous-session restore on tab open)
+// ============================================================
+
+const { buildResumeArgs } = require('../src/main/resume-args.cjs');
+
+test('buildResumeArgs picks per-agent flags and prefers a tracked session id', () => {
+  assert.deepEqual(buildResumeArgs('claude', 'abc'), ['--resume', 'abc']);
+  assert.deepEqual(buildResumeArgs('codex', 's_1'), ['resume', 's_1']);
+  assert.deepEqual(buildResumeArgs('opencode', 'ses_x'), ['-s', 'ses_x']);
+  // No tracked id means a fresh launch — the prompt's Cancel must never
+  // implicitly continue the last session.
+  assert.equal(buildResumeArgs('claude', null), null);
+  assert.equal(buildResumeArgs('codex', null), null);
+  assert.equal(buildResumeArgs('opencode', null), null);
+  assert.equal(buildResumeArgs('claude', undefined), null);
+  // Devin is cloud-based — no local resume surface.
+  assert.equal(buildResumeArgs('devin', 'x'), null);
+  assert.equal(buildResumeArgs('pwsh.exe', null), null);
+  // .exe suffix normalized.
+  assert.deepEqual(buildResumeArgs('Claude.exe', 'abc'), ['--resume', 'abc']);
+});
+
+test('hook payloads expose session_id for resume tracking and routing', () => {
+  const notification = normalizeAgentNotification({
+    hook_event_type: 'Stop',
+    session_id: 'sess-abc',
+    cwd: 'D:\\work\\app',
+  });
+  assert.equal(notification.sessionId, 'sess-abc');
+  assert.equal(normalizeAgentNotification({ type: 'stop' }).sessionId, null);
+  // OpenCode plugin payload shape (sessionId key).
+  assert.equal(normalizeAgentNotification({ type: 'stop', sessionId: 'ses_1' }).sessionId, 'ses_1');
+});
+
+test('renderer tracks last sessions and prompts only for supported agents', () => {
+  const renderer = require('fs').readFileSync(require('path').join(__dirname, '..', 'renderer.js'), 'utf-8');
+  assert.match(renderer, /pm-last-agent-sessions/);
+  assert.match(renderer, /rememberAgentSession\(t\.projectId, t\.command, sessionId\)/);
+  // The prompt only fires for explicit menu-created terminals.
+  assert.match(renderer, /resumePrompt: true/);
+  const detect = renderer.match(/if \(resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED\.has\(cmd\)\)/);
+  assert.ok(detect);
+});
+
+test('main process prepends resume args and passes them through pty:create', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
+  assert.match(main, /buildResumeArgs\(command, resumeSessionId\)/);
+  assert.match(main, /\[\.\.\.resumeArgs, \.\.\.requestedArgs\]/);
+});
+
+// ============================================================
+// OpenCode notification bridge (plugin -> /hook)
+// ============================================================
+
+test('opencode payloads map onto the canonical lifecycle kinds', () => {
+  // session.status idle -> stop -> turn_completed (white unread badge)
+  const completed = normalizeAgentNotification({ type: 'stop', agent_source: 'opencode', pty_id: 12, cwd: 'D:\\work\\app' });
+  assert.equal(completed.kind, 'turn_completed');
+  assert.equal(completed.source, 'opencode');
+  assert.equal(completed.ptyId, 12);
+
+  // permission.asked -> permissionrequest -> needs_attention / approval (amber)
+  const approval = normalizeAgentNotification({
+    type: 'permissionrequest',
+    agent_source: 'opencode',
+    tool_name: 'bash',
+    message: 'rm -rf dist',
+  });
+  assert.equal(approval.kind, 'needs_attention');
+  assert.equal(approval.reason, 'approval');
+  assert.equal(approval.title, null);
+  assert.equal(approval.message, 'rm -rf dist');
+
+  // question.asked -> notification -> needs_attention / input
+  const question = normalizeAgentNotification({ type: 'notification', agent_source: 'opencode' });
+  assert.equal(question.kind, 'needs_attention');
+  assert.equal(question.reason, 'input');
+
+  // session.error -> stopfailure -> turn_failed
+  assert.equal(normalizeAgentNotification({ type: 'stopfailure', agent_source: 'opencode' }).kind, 'turn_failed');
+});
+
+test('opencode plugin source is self-contained ESM with no local imports', () => {
+  const { PLUGIN_SOURCE } = require('../src/main/opencode-plugin-source.cjs');
+  // No relative imports: OpenCode requires plugins to be self-contained.
+  assert.doesNotMatch(PLUGIN_SOURCE, /from\s+['"]\.\.?\/|require\(['"]\.\.?\//);
+  // Subscribes via the `event` hook and switches on bus event types —
+  // top-level "session.idle" style handlers would be dead code.
+  assert.match(PLUGIN_SOURCE, /export const ProjectMixerPlugin/);
+  assert.match(PLUGIN_SOURCE, /event:\s*async \(\{ event \}\)/);
+  assert.match(PLUGIN_SOURCE, /session\.status/);
+  assert.match(PLUGIN_SOURCE, /permission\.asked/);
+  assert.match(PLUGIN_SOURCE, /question\.asked/);
+  // Endpoint comes from the PTY env; without it the plugin is inert.
+  assert.match(PLUGIN_SOURCE, /process\.env\.PM_HOOK_URL/);
+  assert.match(PLUGIN_SOURCE, /PROJECT_MIXER_PTY_ID/);
+});
+
+test('main process injects PM_HOOK_URL into the PTY env and installs the plugin in hook:setup', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
+  // PTY env carries the /hook endpoint so the plugin can post lifecycle events.
+  assert.match(main, /PM_HOOK_URL: `http:\/\/127\.0\.0\.1:\$\{HOOK_PORT\}\/hook`/);
+  // hook:setup writes the bridge into the project's OpenCode plugin dir.
+  assert.match(main, /OPENCODE_PLUGIN_SOURCE/);
+  assert.match(main, /\.opencode', 'plugins'\)/);
+  assert.match(main, /project-mixer\.js/);
+
+  // The screen-scrape heuristic must NOT include opencode: real events now
+  // drive waiting/completion, and scraping caused false amber dots.
+  const renderer = require('fs').readFileSync(require('path').join(__dirname, '..', 'renderer.js'), 'utf-8');
+  const detect = renderer.match(/function detectWaiting\(command, data\) \{[\s\S]*?\n\}/)[0];
+  assert.match(detect, /command === 'claude' \|\| command === 'codex'/);
+  assert.doesNotMatch(detect, /=== 'opencode'/);
 });
