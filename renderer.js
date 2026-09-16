@@ -391,18 +391,12 @@ function showMainSurface(kind) {
   // bar survives surface switches — the composer is always visible).
   if (findOpen && findMode !== 'scratch' && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
 
-  if (panes.length > 1) {
-    showMainSurfaceMultiPane(kind);
-    return;
-  }
-
-  terminalPane.classList.toggle('hidden', kind !== 'terminal');
-  fileEditorPane.classList.toggle('hidden', kind !== 'file');
-  previewPane.classList.toggle('hidden', kind !== 'preview');
-  searchPane.classList.toggle('hidden', kind !== 'search');
-  mainSurface.dataset.surface = kind;
-  markShownTabs();
-  requestAnimationFrame(handleResize);
+  // B6: always host surfaces in pane bodies — even with a single pane. The
+  // pane tab bar lives inside #terminal-pane; the legacy single-surface
+  // toggle (classList.toggle('hidden')) set visibility:hidden on it, which
+  // made every tab vanish the moment a file/preview/search surface was shown.
+  // Hosting keeps the pane header (tab bar) visible regardless of surface.
+  showMainSurfaceMultiPane(kind);
 }
 
 // B1 multi-pane: the focused pane hosts the non-terminal surface (editor /
@@ -415,10 +409,6 @@ function rememberSurfaceHome(el) {
   if (!surfaceHomeSlots.has(el)) {
     surfaceHomeSlots.set(el, { parent: el.parentElement, nextSibling: el.nextSibling });
   }
-}
-
-function restoreSurfacesToMain() {
-  [fileEditorPane, previewPane, searchPane].forEach(restoreSurfaceToMain);
 }
 
 function surfaceNodeFor(kind) {
@@ -2960,7 +2950,15 @@ function showPreviewPane() {
 }
 
 function hidePreviewPane() {
-  showMainSurface(activeMainFilePath ? 'file' : 'terminal');
+  // B6: switchEditorTab sets activeFilePath = activeMainFilePath before
+  // showMainSurface('file'), so hostSurfaceInPane picks the correct path.
+  // Calling showMainSurface('file') directly would use activeFilePath, which
+  // may still point at the preview path being hidden.
+  if (activeMainFilePath && openFiles.has(activeMainFilePath)) {
+    switchEditorTab(activeMainFilePath, { focus: false });
+  } else {
+    showMainSurface('terminal');
+  }
 }
 
 async function switchPreviewTab(previewPath, { preserveAttention = false, reveal = null } = {}) {
@@ -4328,12 +4326,11 @@ function renderPanes() {
   applyPaneSizes();
   updatePaneFocusClasses();
   // Re-place hosted surface nodes (renderPanes wiped the pane bodies).
-  if (panes.length > 1) {
-    placeSurfaces();
-  } else {
-    panes.forEach((p) => { p.view = null; });
-    restoreSurfacesToMain();
-  }
+  // B6: always use placeSurfaces — even with a single pane. The old
+  // single-pane branch cleared views and homed surfaces, which left the
+  // pane tab bar stranded inside the hidden #terminal-pane on the next
+  // non-terminal surface show.
+  placeSurfaces();
   // B6: file/preview/browser/search tabs live in their member pane's tab bar.
   layoutNonTerminalTabs();
 }
@@ -4543,8 +4540,8 @@ function closeFocusedPane() {
   const survivingViewType = target.view ? target.view.type : null;
   renderPanes();
   if (survivingViewType && panes.length === 1) {
-    // Down to one pane = legacy single-surface mode. renderPanes homed the
-    // surface node; keep the document on screen via the main surface.
+    // Down to one pane. renderPanes kept the surface hosted via placeSurfaces;
+    // re-confirm the hosting so the pane header (tab bar) stays visible.
     showMainSurface(survivingViewType);
     updateSendTarget();
   } else if (target.view) {
