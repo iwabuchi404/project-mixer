@@ -475,3 +475,20 @@ test('A2: update_editor_content fires from the CM6 updateListener', () => {
   // A4 pointing and get_focus read stale selections.
   assert.match(renderer, /onSelectionChanged: \(update\) => \{[\s\S]*?f\.state = update\.state;[\s\S]*?dispatch\('update_editor_selection'\)/);
 });
+
+test('scratch gutter uses the dark theme (no CM default white leaks through)', () => {
+  const css = read('styles.css');
+  assert.match(css, /#scratch-editor-mount \.cm-gutters \{[\s\S]*?background: transparent;/);
+  assert.match(css, /#scratch-editor-mount \.cm-activeLineGutter/);
+});
+
+test('scratch composer shows char/line/approx-token counts', () => {
+  const html = read('index.html');
+  assert.match(html, /id="scratch-counts"/);
+  const css = read('styles.css');
+  assert.match(css, /#scratch-counts \{/);
+  const renderer = read('renderer.js');
+  assert.match(renderer, /function estimateTokens\(text\)/);
+  assert.match(renderer, /function updateScratchCounts\(\)/);
+  assert.match(renderer, /scratchCounts\.textContent/);
+});

@@ -1263,6 +1263,16 @@ textarea:focus-visible,
   color: var(--act);
 }
 
+#scratch-counts {
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+
+#scratch-counts:empty {
+  display: none;
+}
+
 #push-focus-toggle {
   gap: var(--s-1);
   color: var(--g-4);
@@ -1598,6 +1608,18 @@ textarea:focus-visible,
 #scratch-editor-mount .cm-content {
   caret-color: var(--g-5);
   padding: 0;
+}
+
+/* Gutters had no scratch rule, so CodeMirror's default light theme
+   (white background) leaked through — the white line numbers. */
+#scratch-editor-mount .cm-gutters {
+  background: transparent;
+  color: var(--g-4);
+}
+
+#scratch-editor-mount .cm-activeLineGutter {
+  background: var(--active-line);
+  color: var(--g-5);
 }
 
 #scratch-editor-mount .cm-cursor,

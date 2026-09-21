@@ -265,8 +265,9 @@ test('buildResumeArgs picks per-agent flags and prefers a tracked session id', (
   assert.equal(buildResumeArgs('codex', null), null);
   assert.equal(buildResumeArgs('opencode', null), null);
   assert.equal(buildResumeArgs('claude', undefined), null);
-  // Devin is cloud-based — no local resume surface.
-  assert.equal(buildResumeArgs('devin', 'x'), null);
+  // Devin cloud sessions reattach via `devin -r <id>` (layout restore).
+  assert.deepEqual(buildResumeArgs('devin', 'devin-abc123'), ['-r', 'devin-abc123']);
+  assert.equal(buildResumeArgs('devin', null), null);
   assert.equal(buildResumeArgs('pwsh.exe', null), null);
   // .exe suffix normalized.
   assert.deepEqual(buildResumeArgs('Claude.exe', 'abc'), ['--resume', 'abc']);

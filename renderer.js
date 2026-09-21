@@ -222,6 +222,7 @@ const statusRight = document.getElementById('status-right');
 const statusSystem = document.getElementById('status-system');
 const sendBtn = document.getElementById('send-btn');
 const sendTarget = document.getElementById('send-target');
+const scratchCounts = document.getElementById('scratch-counts');
 const pushFocusCheckbox = document.getElementById('push-focus-checkbox');
 const titleBarContext = document.getElementById('title-bar-context');
 const titleBarPath = document.getElementById('title-bar-path');
@@ -1900,6 +1901,8 @@ const scratchKit = createEditorKit({
     if (!f) return;
     f.content = update.state.doc.toString();
     if (f.isScratch) setState({ scratchContent: f.content });
+    if (f.path === SCRATCH_PATH) queueScratchDraftSave();
+    updateScratchCounts();
     dispatch('update_editor_content', { filePath: f.path, content: f.content });
   },
   onSelectionChanged: () => {
@@ -1908,6 +1911,27 @@ const scratchKit = createEditorKit({
   },
 });
 const scratchView = scratchKit.view;
+
+// Scratch composer stats: characters, lines, and approximate tokens.
+// Token count is a rough estimate (no tokenizer dependency): latin words
+// cost ~1.3 tokens each, CJK chars ~0.6 — always shown with ～ and an
+// explanatory tooltip.
+function estimateTokens(text) {
+  const latinWords = (text.match(/[A-Za-z0-9_]+/g) || []).length;
+  const cjkChars = (text.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/g) || []).length;
+  return Math.max(0, Math.round(latinWords * 1.3 + cjkChars * 0.6));
+}
+
+function updateScratchCounts() {
+  if (!scratchCounts) return;
+  const text = scratchView.state.doc.toString();
+  if (!text) {
+    scratchCounts.textContent = '';
+    return;
+  }
+  const lines = text.split('\n').length;
+  scratchCounts.textContent = `${text.length} chars · ${lines} lines · ～${estimateTokens(text)} tok`;
+}
 
 // Replace the whole scratch doc (composer switch, undo last send, clear).
 function setScratchDoc(content) {
@@ -2160,10 +2184,13 @@ function initScratchTab() {
   const tabEl = document.createElement('div');
   tabEl.dataset.path = SCRATCH_PATH;
 
+  // Crash-safe draft: restore unsent scratch text for this project.
+  const drafts = loadScratchDrafts();
+  const draft = activeEditorProjectId ? drafts[activeEditorProjectId] : null;
   const scratchData = {
     path: SCRATCH_PATH,
     name: 'scratch',
-    content: '',
+    content: typeof draft === 'string' ? draft : '',
     originalContent: '',
     tabEl,
     isScratch: true,
@@ -2173,6 +2200,43 @@ function initScratchTab() {
   activeComposerPath = SCRATCH_PATH;
   showEditorPane();
 }
+
+// Unsent scratch text survives app restarts (per project). Debounced so
+// typing never blocks on storage; flushed on unload for crash safety.
+const SCRATCH_DRAFTS_KEY = 'pm-scratch-drafts';
+let scratchDraftTimer = null;
+
+function loadScratchDrafts() {
+  try {
+    return JSON.parse(localStorage.getItem(SCRATCH_DRAFTS_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function flushScratchDraft() {
+  scratchDraftTimer = null;
+  if (!activeEditorProjectId) return;
+  const f = openFiles.get(SCRATCH_PATH);
+  if (!f) return;
+  try {
+    const all = loadScratchDrafts();
+    if (f.content) {
+      all[activeEditorProjectId] = f.content;
+    } else {
+      delete all[activeEditorProjectId];
+    }
+    localStorage.setItem(SCRATCH_DRAFTS_KEY, JSON.stringify(all));
+  } catch {
+    // Storage full / unavailable: drafts are best-effort.
+  }
+}
+
+function queueScratchDraftSave() {
+  if (scratchDraftTimer) clearTimeout(scratchDraftTimer);
+  scratchDraftTimer = setTimeout(flushScratchDraft, 1000);
+}
+window.addEventListener('beforeunload', flushScratchDraft);
 
 // ============================================================
 // File preview (image / html / markdown)
@@ -3137,6 +3201,7 @@ function selectComposerTab(file, { focus = true } = {}) {
   activeComposerPath = file.path;
   activeSurface = 'editor';
   setScratchDoc(file.content);
+  updateScratchCounts();
   commitAttention({ activeFilePath: file.path, isPreview: false, scratchContent: file.content });
   if (focus) {
     setScratchCollapsed(false);
@@ -5328,12 +5393,19 @@ async function saveLayout() {
   // B1: persist pane structure per project INCLUDING tab membership.
   // Members are stored as indices into the saved `tabs` array (stable
   // across restarts — tabIds are regenerated on startup).
-  const tabsOut = Array.from(tabs.values()).map(t => ({
-    command: t.command,
-    label: t.label,
-    cwd: t.cwd,
-    projectId: t.projectId,
-  }));
+  const tabsOut = Array.from(tabs.values()).map(t => {
+    const binding = getTerminalAgentBinding(t.id);
+    return {
+      command: t.command,
+      label: t.label,
+      cwd: t.cwd,
+      projectId: t.projectId,
+      // Devin cloud session link — restored with `devin -r` + silent re-bind.
+      ...(binding?.provider === 'devin' && binding.sessionId
+        ? { devinSessionId: binding.sessionId }
+        : {}),
+    };
+  });
   const tabIndex = new Map();
   Array.from(tabs.values()).forEach((t, i) => tabIndex.set(t.id, i));
 
@@ -5397,10 +5469,37 @@ async function loadLayout() {
     // create must not abort the whole restore or shift the idMap — push a
     // null sentinel so indices stay aligned (mapMember drops nulls).
     const idMap = [];
+    // Agent CLIs (claude/codex/opencode) resume their last tracked session
+    // silently — same as devin below. Startup must never block on the
+    // resume prompt, so the stored id is passed straight through.
+    const lastSessions = loadLastSessions();
     for (const tab of layout.tabs) {
       try {
-        const newId = await dispatch('create_terminal', tab);
+        // Devin tabs restore with their cloud session id so the PTY
+        // reattaches via `devin -r` instead of starting a fresh session.
+        const tracked = !tab.devinSessionId && tab.projectId && tab.command
+          ? lastSessions[`${tab.projectId}:${tab.command}`]?.sessionId
+          : null;
+        const resumeId = tab.devinSessionId || tracked || null;
+        const args = resumeId ? { ...tab, resumeSessionId: resumeId } : tab;
+        const newId = await dispatch('create_terminal', args);
         idMap.push(newId);
+        // Re-bind Devin notifications silently (best-effort: the cloud
+        // session may have ended while the app was closed).
+        if (tab.devinSessionId && newId !== null && tabs.has(newId)) {
+          try {
+            const result = await window.api.devinBind(tabs.get(newId).ptyId, tab.devinSessionId);
+            if (result?.ok) {
+              dispatch('agent_session_bound', {
+                tabId: newId,
+                provider: 'devin',
+                sessionId: tab.devinSessionId,
+              });
+            }
+          } catch {
+            // Unbound tab still works as a plain devin shell.
+          }
+        }
       } catch (error) {
         console.error('[layout] Failed to restore terminal tab:', error);
         idMap.push(null);
@@ -5762,11 +5861,12 @@ register('search_close', () => {
 //
 // Tracks the last agent session id per project+command and offers to
 // resume it when the user opens a new terminal of the same kind.
-// Resume flags per agent live in src/main/resume-args.cjs; Devin is not
-// resumable (cloud sessions) so it never gets the prompt.
+// Resume flags per agent live in src/main/resume-args.cjs (devin resumes
+// its cloud session via `devin -r <id>`).
 
 const LAST_SESSION_KEY = 'pm-last-agent-sessions';
-const RESUME_SUPPORTED = new Set(['claude', 'codex', 'opencode']);
+// Devin cloud sessions resume via `devin -r <id>` like the local CLIs.
+const RESUME_SUPPORTED = new Set(['claude', 'codex', 'opencode', 'devin']);
 
 function loadLastSessions() {
   try {

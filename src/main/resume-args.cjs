@@ -5,12 +5,12 @@
 //   claude    -> --resume <id>
 //   codex     -> resume <id>
 //   opencode  -> -s <ses_id>
-//   devin     -> unsupported (cloud sessions)
+//   devin     -> -r <ses_id>  (cloud session; reattaches via the Devin CLI)
 //
 // No tracked session id means a fresh launch (null) — the resume prompt's
 // Cancel must start clean, never implicitly continue the last session.
 
-const RESUME_SUPPORTED = new Set(['claude', 'codex', 'opencode']);
+const RESUME_SUPPORTED = new Set(['claude', 'codex', 'opencode', 'devin']);
 
 function buildResumeArgs(command, sessionId) {
   const name = String(command || '').toLowerCase().replace(/\.exe$/, '');
@@ -21,6 +21,9 @@ function buildResumeArgs(command, sessionId) {
   }
   if (name === 'codex') {
     return ['resume', String(sessionId)];
+  }
+  if (name === 'devin') {
+    return ['-r', String(sessionId)];
   }
   // opencode
   return ['-s', String(sessionId)];
