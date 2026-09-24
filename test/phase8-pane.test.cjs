@@ -241,3 +241,39 @@ test('B1 membership: normalized on render, retired with panes, same-pane close',
   // Creation never disagrees about the owning pane.
   assert.match(renderer, /Re-home it so[\s\S]*?element and membership never disagree/);
 });
+
+test('B1 usability: hosted surfaces hide terminals and keep pane focus independent', () => {
+  const renderer = read('renderer.js');
+  assert.match(renderer, /td\.termEl\.style\.display = p && !p\.view && p\.activeTabId === td\.id/);
+  const focus = renderer.match(/function focusPaneByIndex\(index\) \{[\s\S]*?\n\}/)[0];
+  assert.match(focus, /if \(pane\.view\) return;/);
+  const send = renderer.match(/function sendTargetTabId\(\) \{[\s\S]*?\n\}/)[0];
+  assert.match(send, /!focused\.view/);
+});
+
+test('B1 persistence: pane focus, direction, views, and one-pane state survive save and restore', () => {
+  const renderer = read('renderer.js');
+  assert.match(renderer, /view: p\.view && p\.view\.type !== 'terminal' \? \{ \.\.\.p\.view \} : null/);
+  assert.match(renderer, /if \(activeEditorProjectId && panes\.length > 0\)/);
+  assert.match(renderer, /saved\.panes\.length < 1/);
+  assert.match(renderer, /let restoreId = focusedPane\(\)\?\.activeTabId/);
+  assert.match(renderer, /let suppressLayoutSave = false;/);
+});
+
+test('project switching rejects stale tree and preview completions', () => {
+  const renderer = read('renderer.js');
+  assert.match(renderer, /let fileTreeLoadGeneration = 0;/);
+  assert.match(renderer, /if \(generation !== fileTreeLoadGeneration\) return;/);
+  assert.match(renderer, /activeEditorProjectId !== f\.projectId \|\| previewFiles\.get\(previewPath\) !== f\) return false/);
+  assert.match(renderer, /commitAttention\(\{ isPreview: true, activeFilePath: previewPath/);
+});
+
+test('project removal clears terminal attention, bindings, badges, and focus state', () => {
+  const renderer = read('renderer.js');
+  const body = renderer.match(/async function removeProject\(projectId\) \{[\s\S]*?\n\}/)[0];
+  assert.match(body, /dispatch\('agent_session_unbound'/);
+  assert.match(body, /dispatch\('terminal_clear_attention'/);
+  assert.match(body, /projectPaneSkeletons\.delete\(projectId\)/);
+  assert.match(body, /dispatch\('project_set_badge', \{ projectId, kind: 'clear' \}\)/);
+  assert.match(body, /scratchContent: ''/);
+});

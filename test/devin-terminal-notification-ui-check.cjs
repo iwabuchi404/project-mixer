@@ -5,7 +5,8 @@
 
 const assert = require('node:assert/strict');
 
-const debugPort = Number(process.argv[2] || 9242);
+const debugPort = Number(process.argv[2] || process.env.PM_REMOTE_DEBUGGING_PORT || 9242);
+const shell = JSON.stringify(process.platform === 'win32' ? 'pwsh.exe' : process.platform === 'darwin' ? 'zsh' : 'bash');
 
 async function connect() {
   const targets = await fetch(`http://127.0.0.1:${debugPort}/json/list`).then((response) => response.json());
@@ -73,7 +74,7 @@ async function main() {
         label: 'Devin OSC check',
       });
       const foregroundTabId = await window.__pmDispatch('create_terminal', {
-        command: 'pwsh.exe',
+        command: ${shell},
         cwd: ${projectCwd},
         projectId,
         label: 'OSC foreground',

@@ -31,6 +31,7 @@ import {
   captureExpandedPaneWidth,
   invalidateTerminalFollow,
   quotePathForCommand,
+  resolveTerminalDropTarget,
   shouldFollowTerminalOutput,
   shouldOpenInOsByName,
   updateTerminalScrollPosition,
@@ -42,6 +43,7 @@ import {
 
 const projects = new Map(); // id -> { id, name, path }
 let activeProjectId = null;
+let projectSelectionGeneration = 0;
 
 const tabs = new Map(); // tabId -> { id, projectId, terminal, fitAddon, ptyId, termEl, tabElement, command, cwd, waiting }
 let activeTabId = null;
@@ -76,6 +78,10 @@ const TERMINAL_LABELS = {
   'devin': 'Devin CLI',
   'opencode': 'OpenCode',
 };
+
+function normalizeRendererCommand(command) {
+  return String(command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+}
 
 function defaultShell() {
   if (IS_WIN) return 'pwsh.exe';
@@ -270,8 +276,8 @@ function focusedPaneTabBar() {
 
 // B6: insert a tab element into the correct pane tab bar (or shared bar as
 // fallback). Used by openFileInEditor, openFileInPreview, openBrowser, etc.
-function insertTabIntoPane(tabEl) {
-  const bar = focusedPaneTabBar();
+function insertTabIntoPane(tabEl, paneId = null) {
+  const bar = paneId === null ? focusedPaneTabBar() : paneEls.get(paneId)?.tabBar;
   if (bar) bar.appendChild(tabEl);
   else tabBar.insertBefore(tabEl, newTabBtn);
 }
@@ -390,7 +396,10 @@ function showMainSurface(kind) {
   }
   // S3: the find bar only applies to editor/preview surfaces (the scratch
   // bar survives surface switches — the composer is always visible).
-  if (findOpen && findMode !== 'scratch' && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
+  if (findOpen && kind !== 'file' && kind !== 'preview') closeFindBar({ restoreFocus: false });
+  if (findOpen && (kind === 'file' || kind === 'preview')) {
+    findMode = kind === 'preview' ? 'preview' : 'editor';
+  }
 
   // B6: always host surfaces in pane bodies — even with a single pane. The
   // pane tab bar lives inside #terminal-pane; the legacy single-surface
@@ -626,7 +635,8 @@ function detectWaiting(command, data) {
   // (.opencode/plugins/project-mixer.js, installed by hook:setup) delivers
   // real lifecycle events over /hook. Scraping the TUI caused both missed
   // prompts and false amber dots on redraws.
-  const isAgent = command === 'claude' || command === 'codex';
+  const normalizedCommand = normalizeRendererCommand(command);
+  const isAgent = normalizedCommand === 'claude' || normalizedCommand === 'codex';
   if (!isAgent) return false;
   const stripped = stripAnsi(data);
   const lines = stripped.split(/\r?\n/);
@@ -838,10 +848,15 @@ function updateTitleBar() {
 }
 
 async function selectProject(projectId) {
-  switchProjectEditor(projectId);
-  focusedTreeEntry = null;
+  const selectionGeneration = ++projectSelectionGeneration;
+  invalidateSearch();
+  closeFindBar({ restoreFocus: false });
+  closeSearchTab({ restoreSurface: false });
+  flushScratchDraft();
   commitAttention({ activeProjectId: projectId });
   dispatch('project_set_badge', { projectId, kind: 'clear' });
+  await switchProjectEditor(projectId);
+  focusedTreeEntry = null;
   updateTitleBar();
   // Update editor state in store after switching project editor
   const activePreview = previewFiles.get(activePreviewPath);
@@ -870,23 +885,34 @@ async function selectProject(projectId) {
     filterVisiblePaths = null;
     // Cancel any in-flight search and clear results so stale data
     // from the previous project doesn't reappear when reopening Search.
-    searchGeneration++;
-    if (currentSearchId) {
-      window.api.cancelSearch(currentSearchId);
-      currentSearchId = null;
-    }
+    invalidateSearch();
     if (searchResults) searchResults.innerHTML = '';
     if (searchStatus) searchStatus.textContent = '';
     if (searchInput) searchInput.value = '';
     await loadFileTree(p.path, { preserveState: false });
+    if (activeProjectId !== projectId) return;
     // Phase 5 S1: build tree index for filtering (async, non-blocking).
     buildTreeIndex(p.path);
     window.api.hookSetup(p.path);
   }
+  if (activeProjectId !== projectId || selectionGeneration !== projectSelectionGeneration) return;
   showProjectTabs(projectId);
+  saveCurrentEditorState();
+  void saveLayout();
 }
 
 async function removeProject(projectId) {
+  const wasActive = activeProjectId === projectId;
+  if (wasActive) {
+    projectSelectionGeneration++;
+    closeSearchTab({ restoreSurface: false });
+    closeFindBar({ restoreFocus: false });
+    flushScratchDraft();
+    saveCurrentEditorState();
+    fileTreeLoadGeneration++;
+    treeIndexGeneration++;
+    invalidateSearch();
+  }
   const updated = await window.api.projectRemove(projectId);
   projects.clear();
   for (const p of updated) {
@@ -900,6 +926,9 @@ async function removeProject(projectId) {
   }
   for (const tid of tabsToKill) {
     const t = tabs.get(tid);
+    void window.api.devinUnbind(t.ptyId);
+    dispatch('agent_session_unbound', { tabId: tid });
+    dispatch('terminal_clear_attention', { tabId: tid });
     window.api.ptyKill(t.ptyId);
     t.terminal.dispose();
     t.termEl.remove();
@@ -907,10 +936,20 @@ async function removeProject(projectId) {
     tabs.delete(tid);
   }
   projectActiveTab.delete(projectId);
+  projectPaneSkeletons.delete(projectId);
   removeProjectEditorState(projectId);
+  dispatch('project_set_badge', { projectId, kind: 'clear' });
 
   if (activeProjectId === projectId) {
-    commitAttention({ activeProjectId: null, activeTerminalTabId: null });
+    commitAttention({
+      activeProjectId: null,
+      activeTerminalTabId: null,
+      activeFilePath: null,
+      isPreview: false,
+      cursorLine: null,
+      selection: null,
+      scratchContent: '',
+    });
     updateTitleBar();
     fileTreeTitle.textContent = 'Files';
     fileTree.innerHTML = '';
@@ -949,14 +988,25 @@ projectConfirmBtn.addEventListener('click', async () => {
   const name = projectNameInput.value.trim();
   const projPath = projectPathInput.value.trim();
   if (!name || !projPath) return;
-  const updated = await window.api.projectAdd(name, projPath);
-  projects.clear();
-  for (const p of updated) {
-    projects.set(p.id, p);
+  try {
+    const updated = await window.api.projectAdd(name, projPath);
+    projects.clear();
+    for (const p of updated) {
+      projects.set(p.id, p);
+    }
+    renderProjectList();
+    hideAddProjectModal();
+    const created = updated[updated.length - 1];
+    if (created) await dispatch('select_project', { projectId: created.id });
+  } catch (error) {
+    showToast({
+      key: 'project-add-error',
+      message: 'Could not add project',
+      detail: error.message,
+      type: 'error',
+      persistent: true,
+    });
   }
-  renderProjectList();
-  hideAddProjectModal();
-  await dispatch('select_project', { projectId: projects.keys().next().value });
 });
 
 projectNameInput.addEventListener('keydown', (e) => {
@@ -986,8 +1036,10 @@ let savedExpansionState = null; // Set of expanded paths before filter
 let filterTimeout = null;
 let filterVisiblePaths = null; // Set of paths visible in current filter
 let treeIndexGeneration = 0; // increments on each build to reject stale results
+let fileTreeLoadGeneration = 0;
 
 async function loadFileTree(dirPath, { preserveState = true } = {}) {
+  const generation = ++fileTreeLoadGeneration;
   const previousScroll = fileTree.scrollTop;
   const previousSelection = preserveState ? focusedTreeEntry?.path || null : null;
   if (!preserveState) expandedTreePaths.clear();
@@ -995,7 +1047,22 @@ async function loadFileTree(dirPath, { preserveState = true } = {}) {
   fileTree.innerHTML = '';
   fileTree.setAttribute('role', 'tree');
   fileTree.setAttribute('aria-label', 'Project files');
-  const entries = await window.api.readDir(dirPath);
+  let entries;
+  try {
+    entries = await window.api.readDir(dirPath);
+  } catch (error) {
+    if (generation === fileTreeLoadGeneration) {
+      showToast({
+        key: 'file-tree-load-error',
+        message: 'Could not read project files',
+        detail: error.message,
+        type: 'error',
+        persistent: true,
+      });
+    }
+    return;
+  }
+  if (generation !== fileTreeLoadGeneration) return;
   for (const entry of entries) {
     fileTree.appendChild(createTreeItem(entry, 0));
   }
@@ -1005,21 +1072,24 @@ async function loadFileTree(dirPath, { preserveState = true } = {}) {
     return;
   }
 
-  await restoreTreeExpansion(fileTree);
+  await restoreTreeExpansion(fileTree, () => generation === fileTreeLoadGeneration);
+  if (generation !== fileTreeLoadGeneration) return;
   restoreTreeSelection(previousSelection);
   fileTree.scrollTop = previousScroll;
 }
 
 // 展開状態は親から順に復元する。子は展開して初めて DOM に現れるため、
 // 再帰的にたどる必要がある。
-async function restoreTreeExpansion(container) {
+async function restoreTreeExpansion(container, isCurrent = () => true) {
   const items = Array.from(container.children).filter((el) => el.classList.contains('tree-item'));
   for (const el of items) {
+    if (!isCurrent()) return;
     if (!el.dataset.isDirectory || !expandedTreePaths.has(el.dataset.path)) continue;
     await el.__pmExpand?.();
+    if (!isCurrent()) return;
     const children = el.nextElementSibling;
     if (children?.classList.contains('tree-children')) {
-      await restoreTreeExpansion(children);
+      await restoreTreeExpansion(children, isCurrent);
     }
   }
 }
@@ -1044,11 +1114,14 @@ function cssEscape(value) {
 // Called on project selection, tree reload, and file/folder create/delete.
 async function buildTreeIndex(dirPath) {
   if (!dirPath) return;
+  const projectId = activeProjectId;
+  const project = projects.get(projectId);
+  if (!project || project.path !== dirPath) return;
   const gen = ++treeIndexGeneration;
   try {
     const result = await window.api.indexTree(dirPath);
     // Reject stale results from a previous project switch.
-    if (gen !== treeIndexGeneration) return;
+    if (gen !== treeIndexGeneration || activeProjectId !== projectId || projects.get(projectId)?.path !== dirPath) return;
     treeIndex = result;
     // If the user typed a filter while the index was building, reapply it.
     if (treeFilterInput && treeFilterInput.value && treeFilterInput.value.trim()) {
@@ -1195,6 +1268,8 @@ function toggleTreeFilter() {
 // loadFileTree() if they need the tree re-rendered. This prevents
 // double-rendering when the caller also calls loadFileTree().
 function closeTreeFilter() {
+  clearTimeout(filterTimeout);
+  filterTimeout = null;
   treeFilterBar.classList.add('hidden');
   treeFilterInput.value = '';
   treeFilterClearBtn.classList.add('hidden');
@@ -1252,7 +1327,9 @@ if (treeSearchBtn) {
 // Close button in the filter bar.
 if (treeFilterCloseBtn) {
   treeFilterCloseBtn.addEventListener('click', () => {
+    const project = projects.get(activeProjectId);
     closeTreeFilter();
+    if (project) void loadFileTree(project.path);
   });
 }
 
@@ -1291,39 +1368,52 @@ treeReloadBtn.addEventListener('click', async () => {
   const project = projects.get(activeProjectId);
   if (!project) return;
   // Close filter bar so reload shows the full tree, not stale filtered view.
+  const projectId = activeProjectId;
+  const selection = projectSelectionGeneration;
   closeTreeFilter();
   await loadFileTree(project.path);
+  if (activeProjectId !== projectId || projectSelectionGeneration !== selection) return;
   buildTreeIndex(project.path);
 });
 
 treeNewFileBtn.addEventListener('click', async () => {
-  const project = projects.get(activeProjectId);
+  const projectId = activeProjectId;
+  const projectSelection = projectSelectionGeneration;
+  const project = projects.get(projectId);
   if (!project) return;
   const parentPath = getTreeCreateParent(project.path);
   const name = await showPrompt('New File', `Create in: ${parentPath}`, '');
-  if (!name) return;
+  if (!name || activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   const filePath = joinPath(parentPath, name);
   const result = await window.api.createFile(filePath);
+  if (activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   if (!result.success) {
     showToast({ key: 'create-file-error', message: 'Create file failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
   // 作成先が畳まれていると結果が見えないので開いておく
+  if (activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
   closeTreeFilter();
   await loadFileTree(project.path);
+  if (activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   buildTreeIndex(project.path);
+
   openFileInEditor(filePath, name.split(/[\\/]/).pop());
+
 });
 
 treeNewFolderBtn.addEventListener('click', async () => {
-  const project = projects.get(activeProjectId);
+  const projectId = activeProjectId;
+  const projectSelection = projectSelectionGeneration;
+  const project = projects.get(projectId);
   if (!project) return;
   const parentPath = getTreeCreateParent(project.path);
   const name = await showPrompt('New Folder', `Create in: ${parentPath}`, '');
-  if (!name) return;
+  if (!name || activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   const dirPath = joinPath(parentPath, name);
   const result = await window.api.createDir(dirPath);
+  if (activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   if (!result.success) {
     showToast({ key: 'create-folder-error', message: 'Create folder failed', detail: result.error, type: 'error', persistent: true });
     return;
@@ -1331,8 +1421,10 @@ treeNewFolderBtn.addEventListener('click', async () => {
   if (parentPath !== project.path) expandedTreePaths.add(parentPath);
   closeTreeFilter();
   await loadFileTree(project.path);
+  if (activeProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
   buildTreeIndex(project.path);
 });
+
 
 function createTreeItem(entry, depth) {
   const el = document.createElement('div');
@@ -1636,8 +1728,7 @@ tabContextMenu.addEventListener('click', (e) => {
 });
 
 function isDevinCommand(command) {
-  const executable = String(command || '').split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
-  return executable === 'devin';
+  return normalizeRendererCommand(command) === 'devin';
 }
 
 async function bindDevinSession(tabId) {
@@ -1723,21 +1814,30 @@ deleteConfirmBtn.addEventListener('click', async () => {
   if (!pendingDeleteEntry) return;
   const entry = pendingDeleteEntry;
   hideDeleteConfirm();
+  const projectId = activeProjectId;
   const result = await window.api.deleteFile(entry.path);
   if (!result.success) {
     showToast({ key: 'delete-error', message: 'Delete failed', detail: result.error, type: 'error', persistent: true });
     return;
   }
-  // Close editor tab if the deleted file was open
-  if (openFiles.has(entry.path)) {
-    closeEditorTab(entry.path);
+  const pathsToClose = new Set();
+  for (const filePath of openFiles.keys()) {
+    if (isPathWithin(filePath, entry.path)) pathsToClose.add(filePath);
   }
-  // Refresh file tree
-  const project = projects.get(activeProjectId);
-  if (project) {
-    closeTreeFilter();
-    await loadFileTree(project.path);
-    buildTreeIndex(project.path);
+  for (const [previewPath, preview] of previewFiles) {
+    if (isPathWithin(preview.path, entry.path)) pathsToClose.add(previewPath);
+  }
+  for (const filePath of pathsToClose) {
+    if (openFiles.has(filePath)) closeEditorTab(filePath);
+    else if (previewFiles.has(filePath)) closePreviewTab(filePath);
+  }
+  if (activeProjectId === projectId) {
+    const project = projects.get(projectId);
+    if (project) {
+      closeTreeFilter();
+      await loadFileTree(project.path);
+      buildTreeIndex(project.path);
+    }
   }
 });
 
@@ -1748,13 +1848,18 @@ deleteConfirmBtn.addEventListener('click', async () => {
 let promptResolve = null;
 
 function showPrompt(title, label, defaultValue) {
+  if (promptResolve) {
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     promptTitle.textContent = title;
     promptLabel.textContent = label;
     promptInput.value = defaultValue || '';
     promptResolve = resolve;
     promptModal.classList.remove('hidden');
-    setTimeout(() => promptInput.focus(), 0);
+    setTimeout(() => {
+      if (promptResolve) promptInput.focus();
+    }, 0);
   });
 }
 
@@ -1783,12 +1888,17 @@ promptInput.addEventListener('keydown', (e) => {
 // ============================================================
 
 function showConfirm(title, message) {
+  if (confirmResolve) {
+    return Promise.resolve(false);
+  }
   return new Promise((resolve) => {
     confirmTitle.textContent = title;
     confirmMessage.textContent = message;
     confirmResolve = resolve;
     confirmModal.classList.remove('hidden');
-    setTimeout(() => confirmOkBtn.focus(), 0);
+    setTimeout(() => {
+      if (confirmResolve) confirmOkBtn.focus();
+    }, 0);
   });
 }
 
@@ -1826,6 +1936,7 @@ let activeFilePath = null;
 let activePreviewPath = null;
 let activeSurface = 'editor'; // 'editor' | 'preview', restored per project
 let activeComposerPath = SCRATCH_PATH;
+const openFileRequests = new Map();
 let activeMainView = 'terminal'; // 'terminal' | 'file' | 'preview'
 let activeMainFilePath = null;
 let previewReturnView = 'terminal';
@@ -1851,6 +1962,7 @@ const paneEls = new Map(); // paneId -> { root, header, tabBar, body }
 const projectPaneSkeletons = new Map(); // projectId -> { panes, activePaneId }
 // Pane skeletons persisted in layout.json from the previous session.
 let savedPaneLayouts = {};
+let savedNonTerminalTabs = [];
 const SCRATCH_COMPACT_HEIGHT = 112;
 const SCRATCH_DEFAULT_EXPANDED_HEIGHT = 220;
 let savedScratchEditorHeight = SCRATCH_DEFAULT_EXPANDED_HEIGHT;
@@ -1973,15 +2085,106 @@ function saveCurrentEditorState() {
     lastSentContent,
     lastSentTabPath,
     // B1: pane structure is per-project state.
-    panes: panes.map((p) => ({ id: p.id, tabIds: [...p.tabIds], activeTabId: p.activeTabId, size: p.size })),
+    panes: panes.map((p) => ({
+      id: p.id,
+      tabIds: [...p.tabIds],
+      activeTabId: p.activeTabId,
+      size: p.size,
+      view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null,
+    })),
     activePaneId,
     paneDirection,
     nextPaneId,
   });
 }
 
-function switchProjectEditor(projectId) {
+async function restoreSkeletonPaneViews(projectId, paneList, isCurrent = () => true) {
+  let searchRestored = false;
+  for (const pane of paneList) {
+    if (!isCurrent()) return;
+    const view = pane.view;
+    if (!view) continue;
+    if (view.type === 'file' && view.path) {
+      await openFileInEditor(view.path, view.path.split(/[\\/]/).pop(), {
+        activate: false,
+        paneId: pane.id,
+      });
+      if (!isCurrent()) return;
+      if (!openFiles.has(view.path)) pane.view = null;
+    } else if (view.type === 'preview' && view.path) {
+      const prefix = `preview:${projectId}:`;
+      let sourcePath = view.sourcePath || null;
+      if (!sourcePath && view.path.startsWith(prefix)) {
+        sourcePath = view.path.slice(prefix.length);
+        const agentMarker = sourcePath.lastIndexOf(':agent:');
+        if (agentMarker >= 0) sourcePath = sourcePath.slice(0, agentMarker);
+      }
+      if (sourcePath) {
+        await openFileInPreview(sourcePath, sourcePath.split(/[\\/]/).pop(), {
+          projectId,
+          previewPath: view.path,
+          activate: false,
+          allowOs: false,
+          paneId: pane.id,
+        });
+        if (!isCurrent()) return;
+      }
+      if (!previewFiles.has(view.path)) pane.view = null;
+    } else if (view.type === 'search') {
+      if (searchRestored) {
+        pane.view = null;
+      } else {
+        if (searchTabEl) {
+          insertTabIntoPane(searchTabEl, pane.id);
+          searchTabEl._paneId = pane.id;
+        } else {
+          createSearchTab(pane.id);
+        }
+        searchRestored = true;
+      }
+    } else {
+      pane.view = null;
+    }
+  }
+}
+
+async function restoreNonTerminalTabs(projectId, paneList, isCurrent = () => true) {
+  const entries = savedNonTerminalTabs.filter((entry) => entry.projectId === projectId);
+  let searchRestored = false;
+  for (const entry of entries) {
+    if (!isCurrent()) return;
+    const pane = paneList[entry.paneIndex];
+    if (!pane) continue;
+    if (entry.type === 'file' && entry.path) {
+      await openFileInEditor(entry.path, entry.name || entry.path.split(/[\\/]/).pop(), {
+        activate: false,
+        paneId: pane.id,
+      });
+    } else if (entry.type === 'preview' && entry.path && entry.previewPath) {
+      await openFileInPreview(entry.path, entry.name || entry.path.split(/[\\/]/).pop(), {
+        projectId,
+        previewPath: entry.previewPath,
+        activate: false,
+        allowOs: false,
+        paneId: pane.id,
+      });
+    } else if (entry.type === 'search') {
+      if (searchRestored) continue;
+      if (searchTabEl) {
+        insertTabIntoPane(searchTabEl, pane.id);
+        searchTabEl._paneId = pane.id;
+      } else {
+        createSearchTab(pane.id);
+      }
+      searchRestored = true;
+    }
+    if (!isCurrent()) return;
+  }
+}
+
+async function switchProjectEditor(projectId) {
   if (editorStateInitialized && activeEditorProjectId === projectId) return;
+  const selectionGeneration = projectSelectionGeneration;
 
   saveCurrentEditorState();
   syncMountedFileScroll();
@@ -1991,6 +2194,7 @@ function switchProjectEditor(projectId) {
 
   activeEditorProjectId = projectId;
   const state = projectEditorStates.get(projectId);
+  let adoptedSkeleton = false;
   if (state) {
     openFiles = state.openFiles;
     activeFilePath = state.activeFilePath;
@@ -2021,9 +2225,9 @@ function switchProjectEditor(projectId) {
           tabIds: (p.tabIds || []).filter((id) => tabs.has(id)),
           activeTabId: p.activeTabId !== null && tabs.has(p.activeTabId) ? p.activeTabId : null,
           size: Number(p.size) || 0,
-          view: null,
+          view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null,
         }))
-        .filter((p) => p.tabIds.length > 0)
+        .filter((p) => p.tabIds.length > 0 || p.view)
       : [];
     if (panes.length === 0) {
       panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0 }];
@@ -2050,8 +2254,9 @@ function switchProjectEditor(projectId) {
     // B1: adopt a pane skeleton if background terminals were already filed
     // into this project before it was ever opened.
     const sk = projectPaneSkeletons.get(projectId);
+    adoptedSkeleton = Boolean(sk && sk.panes.length > 0);
     panes = sk && sk.panes.length > 0
-      ? sk.panes.map((p) => ({ ...p, view: null }))
+      ? sk.panes.map((p) => ({ ...p, view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null }))
       : [];
     // Skeleton pane ids came from the global counter — never let the next
     // allocation collide with them.
@@ -2063,6 +2268,22 @@ function switchProjectEditor(projectId) {
     editorStateInitialized = true;
     initScratchTab();
     saveCurrentEditorState();
+  }
+
+  if (adoptedSkeleton) {
+    renderPanes();
+    await restoreSkeletonPaneViews(
+      projectId,
+      panes,
+      () => activeEditorProjectId === projectId && projectSelectionGeneration === selectionGeneration,
+    );
+    if (activeEditorProjectId !== projectId || projectSelectionGeneration !== selectionGeneration) return;
+    await restoreNonTerminalTabs(
+      projectId,
+      panes,
+      () => activeEditorProjectId === projectId && projectSelectionGeneration === selectionGeneration,
+    );
+    if (activeEditorProjectId !== projectId || projectSelectionGeneration !== selectionGeneration) return;
   }
 
   // Show preview tabs for this project
@@ -2077,8 +2298,23 @@ function switchProjectEditor(projectId) {
   editorStateInitialized = true;
   const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
   if (composer) selectComposerTab(composer, { focus: false });
-  if (activeMainView === 'preview' && activePreviewPath) {
-    switchPreviewTab(activePreviewPath);
+  const focusedView = focusedPane()?.view;
+  if (focusedView?.type === 'file' && openFiles.has(focusedView.path)) {
+    activeMainView = 'file';
+    activeSurface = 'editor';
+    switchEditorTab(focusedView.path, { focus: false });
+  } else if (focusedView?.type === 'preview' && previewFiles.has(focusedView.path)) {
+    activeMainView = 'preview';
+    activeSurface = 'preview';
+    await switchPreviewTab(focusedView.path);
+    if (activeEditorProjectId !== projectId || projectSelectionGeneration !== selectionGeneration) return;
+  } else if (focusedView?.type === 'search' && searchTabEl) {
+    activeMainView = 'search';
+    activeSurface = 'search';
+    activateSearchTab();
+  } else if (activeMainView === 'preview' && activePreviewPath) {
+    await switchPreviewTab(activePreviewPath);
+    if (activeEditorProjectId !== projectId || projectSelectionGeneration !== selectionGeneration) return;
   } else if (activeMainView === 'file' && activeMainFilePath) {
     switchEditorTab(activeMainFilePath, { focus: false });
   } else {
@@ -2205,6 +2441,7 @@ function initScratchTab() {
 // typing never blocks on storage; flushed on unload for crash safety.
 const SCRATCH_DRAFTS_KEY = 'pm-scratch-drafts';
 let scratchDraftTimer = null;
+let pendingScratchDraft = null;
 
 function loadScratchDrafts() {
   try {
@@ -2215,16 +2452,19 @@ function loadScratchDrafts() {
 }
 
 function flushScratchDraft() {
-  scratchDraftTimer = null;
-  if (!activeEditorProjectId) return;
-  const f = openFiles.get(SCRATCH_PATH);
-  if (!f) return;
+  if (scratchDraftTimer) {
+    clearTimeout(scratchDraftTimer);
+    scratchDraftTimer = null;
+  }
+  const pending = pendingScratchDraft;
+  pendingScratchDraft = null;
+  if (!pending) return;
   try {
     const all = loadScratchDrafts();
-    if (f.content) {
-      all[activeEditorProjectId] = f.content;
+    if (pending.content) {
+      all[pending.projectId] = pending.content;
     } else {
-      delete all[activeEditorProjectId];
+      delete all[pending.projectId];
     }
     localStorage.setItem(SCRATCH_DRAFTS_KEY, JSON.stringify(all));
   } catch {
@@ -2233,10 +2473,31 @@ function flushScratchDraft() {
 }
 
 function queueScratchDraftSave() {
+  const f = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+  if (!f || !f.isScratch) return;
+  const next = {
+    projectId: activeEditorProjectId,
+    filePath: f.path,
+    content: f.content,
+  };
+  if (pendingScratchDraft && (
+    pendingScratchDraft.projectId !== next.projectId
+    || pendingScratchDraft.filePath !== next.filePath
+  )) {
+    flushScratchDraft();
+  }
+  pendingScratchDraft = next;
   if (scratchDraftTimer) clearTimeout(scratchDraftTimer);
-  scratchDraftTimer = setTimeout(flushScratchDraft, 1000);
+  scratchDraftTimer = setTimeout(() => {
+    scratchDraftTimer = null;
+    flushScratchDraft();
+  }, 1000);
 }
-window.addEventListener('beforeunload', flushScratchDraft);
+window.addEventListener('beforeunload', () => {
+  flushScratchDraft();
+  saveCurrentEditorState();
+  void saveLayout();
+});
 
 // ============================================================
 // File preview (image / html / markdown)
@@ -2257,29 +2518,60 @@ function isPreviewable(name) {
   return isImage(name) || isHtml(name) || isMarkdown(name);
 }
 
-function toFileUrl(p) {
-  // Windows: D:\path -> file:///D:/path
-  let normalized = p.replace(/\\/g, '/');
-  if (!normalized.startsWith('/')) normalized = '/' + normalized;
-  return 'file://' + normalized;
+function encodeFilePath(pathname) {
+  return String(pathname)
+    .split('/')
+    .map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ':'))
+    .join('/');
 }
 
-function fileUrlToPath(url) {
-  // file:///D:/path -> D:\path (Windows)
-  // file:///path -> /path (Unix)
-  let p = url.replace(/^file:\/\//, '');
-  // 先頭の / を取り除いてからOSのセパレータに戻す
-  // Windows: /D:/path -> D:\path
-  // Unix: /path -> /path
-  if (IS_WIN && /^\/[A-Za-z]:/.test(p)) {
-    p = p.slice(1); // 先頭の / を削除
+function toFileUrl(filePath) {
+  let normalized = String(filePath).replace(/\\/g, '/');
+  if (normalized.startsWith('//')) {
+    const unc = normalized.slice(2);
+    const slash = unc.indexOf('/');
+    const host = slash >= 0 ? unc.slice(0, slash) : unc;
+    const pathname = slash >= 0 ? unc.slice(slash) : '/';
+    return `file://${encodeURIComponent(host)}${encodeFilePath(pathname)}`;
   }
-  return IS_WIN ? p.replace(/\//g, '\\') : p;
+  if (!normalized.startsWith('/')) normalized = `/${normalized}`;
+  return `file://${encodeFilePath(normalized)}`;
+}
+
+function fileUrlToPath(url, platform = IS_WIN) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'file:') throw new Error('Not a file URL');
+  const pathname = decodeURIComponent(parsed.pathname);
+  const host = parsed.hostname && parsed.hostname !== 'localhost'
+    ? decodeURIComponent(parsed.hostname)
+    : '';
+  let result = host ? `//${host}${pathname}` : pathname;
+  if (platform === 'win32') {
+    if (/^\/[A-Za-z]:\//.test(result)) result = result.slice(1);
+    result = result.replace(/\//g, '\\');
+  }
+  return result;
 }
 
 function pathDirname(p) {
   const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-  return i >= 0 ? p.slice(0, i) : '';
+  if (i < 0) return '';
+  if (i === 2 && /^[A-Za-z]:[\\/]/.test(p)) return p.slice(0, 3);
+  return p.slice(0, i) || (p[0] === '/' ? '/' : '');
+}
+
+function normalizeComparablePath(value) {
+  let normalized = String(value).replace(/\\/g, '/');
+  while (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1);
+  return IS_WIN ? normalized.toLowerCase() : normalized;
+}
+
+function isPathWithin(candidate, root) {
+  const normalizedCandidate = normalizeComparablePath(candidate);
+  const normalizedRoot = normalizeComparablePath(root);
+  if (normalizedCandidate === normalizedRoot) return true;
+  const boundary = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
+  return normalizedCandidate.startsWith(boundary);
 }
 
 function joinPath(base, sub) {
@@ -2542,8 +2834,10 @@ previewContextMenu.addEventListener('click', async (e) => {
 
 async function openFileInPreview(filePath, name, options = {}) {
   const projectId = options.projectId ?? activeEditorProjectId;
+  const projectSelection = projectSelectionGeneration;
   let activate = options.activate !== false;
   const allowOs = options.allowOs !== false;
+  const paneId = options.paneId ?? null;
   const previewPath = options.previewPath || makePreviewPath(projectId, filePath);
   if (shouldOpenInOsByName(name)) {
     if (allowOs) {
@@ -2576,6 +2870,8 @@ async function openFileInPreview(filePath, name, options = {}) {
     // park the preview in its own project, never in the new project's panes.
     if (activeEditorProjectId !== projectId) {
       activate = false;
+    } else if (projectSelectionGeneration !== projectSelection) {
+      return { shown: false, previewPath: null, reason: 'project changed while preview was loading' };
     }
     if (result.isBinary) {
       if (allowOs) {
@@ -2587,6 +2883,15 @@ async function openFileInPreview(filePath, name, options = {}) {
     initialContent = result.content;
   }
 
+  if (previewFiles.has(previewPath)) {
+    const loaded = activate ? await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention }) : true;
+    return {
+      shown: loaded && activate && activeEditorProjectId === projectId && activePreviewPath === previewPath,
+      previewPath,
+      reason: loaded ? 'reused concurrently opened preview tab' : 'preview was superseded before it finished rendering',
+    };
+  }
+
   const fileData = {
     path: filePath,
     name,
@@ -2596,7 +2901,7 @@ async function openFileInPreview(filePath, name, options = {}) {
     projectId,
     initialContent,
     scrollPosition: { x: 0, y: 0 },
-    paneId: focusedPane()?.id ?? null,
+    paneId: paneId ?? focusedPane()?.id ?? null,
   };
 
   const tabEl = createMainTab({
@@ -2612,7 +2917,7 @@ async function openFileInPreview(filePath, name, options = {}) {
   // A6: tooltip with full path
   tabEl.title = `Preview — ${filePath}`;
 
-  insertTabIntoPane(tabEl);
+  insertTabIntoPane(tabEl, paneId);
   fileData.tabEl = tabEl;
   fileData.paneId = fileData.paneId ?? focusedPane()?.id ?? null;
   previewFiles.set(previewPath, fileData);
@@ -3034,13 +3339,14 @@ async function switchPreviewTab(previewPath, { preserveAttention = false, reveal
   // timeout inside capturePreviewScroll), but never let a stuck capture
   // block tab switching — a missed scroll position is cosmetic.
   await guestJs(pendingPreviewScrollCapture, 2500, 'pre-switch capture gate');
+  if (serial !== previewSwitchSerial || activeEditorProjectId !== f.projectId || previewFiles.get(previewPath) !== f) return false;
   const previous = previewFiles.get(activePreviewPath);
   // Capture the outgoing preview's scroll wherever it is visible (focused
   // surface or a hosted pane), not just the legacy single surface.
   if (previous && isPreviewVisibleAnywhere(previous)) {
     await capturePreviewScroll(previous);
   }
-  if (serial !== previewSwitchSerial) return false;
+  if (serial !== previewSwitchSerial || activeEditorProjectId !== f.projectId || previewFiles.get(previewPath) !== f) return false;
 
   if (activeMainView !== 'preview') {
     previewReturnView = activeMainView;
@@ -3053,8 +3359,10 @@ async function switchPreviewTab(previewPath, { preserveAttention = false, reveal
   showPreviewPane();
   if (!preserveAttention) {
     activeSurface = 'preview';
-    setState({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
+    commitAttention({ isPreview: true, activeFilePath: previewPath, cursorLine: null, selection: null });
   }
+  saveCurrentEditorState();
+  void saveLayout();
   try {
     // スクロール復元は loadPreviewContent の中（描画前）で行う。
     // ここで当てると先頭で描画されてから動くのが見えてしまう。
@@ -3076,97 +3384,155 @@ function closePreviewTab(previewPath) {
   // B1: the pane that hosted this preview (if any). Closing must only affect
   // that pane — never reset the focused pane's layout as a side effect.
   const hostPane = panes.find((p) => p.view && p.view.type === 'preview' && p.view.path === previewPath) || null;
-  const wasPreviewVisible = activeMainView === 'preview';
+  const wasFocusedPreview = activeMainView === 'preview'
+    && activePreviewPath === previewPath
+    && focusedPane()?.view?.path === previewPath;
   const projectId = f.projectId;
   f.tabEl.remove();
   previewFiles.delete(previewPath);
 
   if (activePreviewPath === previewPath) {
+    previewSwitchSerial++;
     const nextPath = getNextPreviewForProject(previewFiles, projectId, previewPath);
     if (nextPath) {
-      if (wasPreviewVisible) switchPreviewTab(nextPath);
-      else activePreviewPath = nextPath;
+      if (wasFocusedPreview) {
+        void switchPreviewTab(nextPath);
+      } else {
+        activePreviewPath = nextPath;
+        if (hostPane) {
+          hostPane.view = { type: 'preview', path: nextPath };
+          placeSurfaces();
+        }
+      }
     } else {
       activePreviewPath = null;
       activeSurface = 'editor';
       if (hostPane) {
-        // Clear only the hosting pane; other panes (incl. focused) untouched.
         hostPane.view = null;
-        placeSurfaces();
-        mainSurface.dataset.surface = focusedPane()?.view?.type || 'terminal';
-      } else if (!wasPreviewVisible) {
-        // A background preview can close without moving the human's current main tab.
-      } else if (previewReturnView === 'file' && previewReturnFilePath && openFiles.has(previewReturnFilePath)) {
+        if (wasFocusedPreview) {
+          if (previewReturnView === 'file' && previewReturnFilePath && openFiles.has(previewReturnFilePath)) {
+            switchEditorTab(previewReturnFilePath, { focus: false });
+          } else {
+            const terminalId = hostPane.activeTabId !== null && tabs.has(hostPane.activeTabId)
+              ? hostPane.activeTabId
+              : hostPane.tabIds[hostPane.tabIds.length - 1];
+            if (terminalId !== undefined && tabs.has(terminalId)) {
+              switchTab(terminalId, { focus: false });
+            } else {
+              activeMainView = 'terminal';
+              showMainSurface('terminal');
+              const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+              commitAttention({
+                activeFilePath: composer?.path || null,
+                isPreview: false,
+                cursorLine: null,
+                selection: null,
+                scratchContent: composer?.content || '',
+              });
+            }
+          }
+        } else {
+          placeSurfaces();
+          mainSurface.dataset.surface = focusedPane()?.view?.type || 'terminal';
+        }
+      } else if (wasFocusedPreview && previewReturnView === 'file' && previewReturnFilePath && openFiles.has(previewReturnFilePath)) {
         switchEditorTab(previewReturnFilePath, { focus: false });
-      } else if (activeTabId !== null && tabs.has(activeTabId)) {
+      } else if (wasFocusedPreview && activeTabId !== null && tabs.has(activeTabId)) {
         switchTab(activeTabId, { focus: false });
-      } else {
+      } else if (wasFocusedPreview) {
+        activeMainView = 'terminal';
         showMainSurface('terminal');
+        const composer = openFiles.get(activeComposerPath) || openFiles.get(SCRATCH_PATH);
+        commitAttention({
+          activeFilePath: composer?.path || null,
+          isPreview: false,
+          cursorLine: null,
+          selection: null,
+          scratchContent: composer?.content || '',
+        });
       }
       previewReturnView = 'terminal';
       previewReturnFilePath = null;
     }
   }
+  saveCurrentEditorState();
+  void saveLayout();
 }
 
-async function openFileInEditor(filePath, name) {
+async function openFileInEditor(filePath, name, { activate = true, paneId = null } = {}) {
   const projectId = activeEditorProjectId;
-  if (shouldOpenInOsByName(name)) {
-    await window.api.openInOs(filePath);
-    showToast({ key: `open-os:${filePath}`, message: 'Opened with the default app', detail: name });
+  const projectSelection = projectSelectionGeneration;
+  const requestKey = `${projectId}\u0000${filePath}`;
+  const existingRequest = openFileRequests.get(requestKey);
+  if (existingRequest) {
+    await existingRequest;
+    if (activate && openFiles.has(filePath)) switchEditorTab(filePath);
     return;
   }
-  if (openFiles.has(filePath)) {
-    switchEditorTab(filePath);
-    return;
+  const request = (async () => {
+    if (shouldOpenInOsByName(name)) {
+      await window.api.openInOs(filePath);
+      showToast({ key: `open-os:${filePath}`, message: 'Opened with the default app', detail: name });
+      return;
+    }
+    if (openFiles.has(filePath)) {
+      if (activate) switchEditorTab(filePath);
+      return;
+    }
+
+    const result = await window.api.readFile(filePath);
+    if (!result.success) return;
+    if (activeEditorProjectId !== projectId || projectSelectionGeneration !== projectSelection) return;
+    if (result.isBinary) {
+      await window.api.openInOs(filePath);
+      showToast({ key: `open-os:${filePath}`, message: 'Opened binary with the default app', detail: name });
+      return;
+    }
+
+    // EditorState.create normalizes CRLF to LF: keep the doc text and the
+    // dirty-detection baseline in normalized form, and restore the file's
+    // own EOL when saving (applyEol in saveActiveFile).
+    const state = editorKit.createState(result.content);
+    const fileData = {
+      path: filePath,
+      name,
+      content: state.doc.toString(),
+      originalContent: state.doc.toString(),
+      eol: detectEol(result.content),
+      state,
+      scrollTop: 0,
+      tabEl: null,
+      isScratch: false,
+      projectId,
+    };
+
+    const tabEl = createMainTab({
+      kind: 'file',
+      ident: { key: 'path', value: filePath },
+      label: name,
+      actions: {
+        onSwitch: () => dispatch('switch_tab', { filePath }),
+        onClose: () => dispatch('close_tab', { filePath }),
+        onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'editor-file', filePath }),
+      },
+    });
+    // A6: tooltip with full path
+    tabEl.title = `Edit — ${filePath}`;
+
+    makeEditorTabDraggable(tabEl, filePath);
+    insertTabIntoPane(tabEl, paneId);
+    fileData.tabEl = tabEl;
+    fileData.paneId = paneId ?? focusedPane()?.id ?? null;
+    openFiles.set(filePath, fileData);
+
+    if (activate) switchEditorTab(filePath);
+  })();
+  openFileRequests.set(requestKey, request);
+  try {
+    await request;
+  } finally {
+    if (openFileRequests.get(requestKey) === request) openFileRequests.delete(requestKey);
   }
-
-  const result = await window.api.readFile(filePath);
-  if (!result.success) return;
-  if (activeEditorProjectId !== projectId) return;
-  if (result.isBinary) {
-    await window.api.openInOs(filePath);
-    showToast({ key: `open-os:${filePath}`, message: 'Opened binary with the default app', detail: name });
-    return;
-  }
-
-  // EditorState.create normalizes CRLF to LF: keep the doc text and the
-  // dirty-detection baseline in normalized form, and restore the file's
-  // own EOL when saving (applyEol in saveActiveFile).
-  const state = editorKit.createState(result.content);
-  const fileData = {
-    path: filePath,
-    name,
-    content: state.doc.toString(),
-    originalContent: state.doc.toString(),
-    eol: detectEol(result.content),
-    state,
-    scrollTop: 0,
-    tabEl: null,
-    isScratch: false,
-    projectId,
-  };
-
-  const tabEl = createMainTab({
-    kind: 'file',
-    ident: { key: 'path', value: filePath },
-    label: name,
-    actions: {
-      onSwitch: () => dispatch('switch_tab', { filePath }),
-      onClose: () => dispatch('close_tab', { filePath }),
-      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'editor-file', filePath }),
-    },
-  });
-  // A6: tooltip with full path
-  tabEl.title = `Edit — ${filePath}`;
-
-  makeEditorTabDraggable(tabEl, filePath);
-  insertTabIntoPane(tabEl);
-  fileData.tabEl = tabEl;
-  fileData.paneId = focusedPane()?.id ?? null;
-  openFiles.set(filePath, fileData);
-
-  switchEditorTab(filePath);
 }
 
 function switchEditorTab(filePath, { focus = true } = {}) {
@@ -3182,6 +3548,8 @@ function switchEditorTab(filePath, { focus = true } = {}) {
   if (f.isScratch) {
     selectComposerTab(f, { focus });
     setState({ scratchContent: f.content });
+    saveCurrentEditorState();
+    void saveLayout();
     return;
   }
 
@@ -3190,6 +3558,8 @@ function switchEditorTab(filePath, { focus = true } = {}) {
   activeMainView = 'file';
   showMainSurface('file');
   mountFileDoc(f, { focus });
+  saveCurrentEditorState();
+  void saveLayout();
   return true;
 }
 
@@ -3232,6 +3602,10 @@ function closeEditorTab(filePath) {
     placeSurfaces();
     mainSurface.dataset.surface = focusedPane()?.view?.type || 'terminal';
   }
+  if (f.paneId !== undefined && f.paneId !== null) {
+    const pane = getPane(f.paneId);
+    if (pane && pane.view?.type === 'file' && pane.view.path === filePath) pane.view = null;
+  }
 
   if (f.isScratch && activeComposerPath === filePath) {
     activeComposerPath = SCRATCH_PATH;
@@ -3248,6 +3622,8 @@ function closeEditorTab(filePath) {
     switchEditorTab(activeComposerPath, { focus: false });
   }
   if (activeMainFilePath === filePath) activeMainFilePath = null;
+  saveCurrentEditorState();
+  void saveLayout();
 }
 
 function showEditorPane() {
@@ -3392,14 +3768,16 @@ function updateEditorCursorState() {
 
 async function saveActiveFile() {
   if (!activeFilePath) return;
-  const f = openFiles.get(activeFilePath);
+  const filePath = activeFilePath;
+  const f = openFiles.get(filePath);
   if (!f || f.isScratch) return;
 
+  const baseline = f.content;
   const text = applyEol(f.content, f.eol || '\n');
-  const result = await window.api.writeFile(f.path, text);
-  if (result.success) {
-    f.originalContent = f.content;
-    updateEditorDirty(activeFilePath);
+  const result = await window.api.writeFile(filePath, text);
+  if (result.success && openFiles.get(filePath) === f) {
+    f.originalContent = baseline;
+    updateEditorDirty(filePath);
   }
 }
 
@@ -3455,7 +3833,7 @@ function buildPaneContextSummary() {
 // hosts a surface or is empty, fall back to the global activeTabId.
 function sendTargetTabId() {
   const focused = focusedPane();
-  if (focused && focused.activeTabId !== null && tabs.has(focused.activeTabId)) {
+  if (focused && !focused.view && focused.activeTabId !== null && tabs.has(focused.activeTabId)) {
     return focused.activeTabId;
   }
   return activeTabId;
@@ -3714,7 +4092,8 @@ async function openTerminalLinkFile(filePath, lineNum, colNum, projectId) {
   const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')).toLowerCase() : '';
   // Switch to the owning project if different from active.
   if (projectId && projectId !== activeProjectId) {
-    dispatch('select_project', { projectId });
+    await dispatch('select_project', { projectId });
+    if (activeProjectId !== projectId) return;
   }
   const line = lineNum ? parseInt(lineNum, 10) : 0;
   if (PREVIEW_EXTENSIONS.has(ext)) {
@@ -3754,10 +4133,12 @@ async function revealInEditor(filePath, line, endLine) {
   return { revealed: true, inEditor: true, filePath };
 }
 
+let suppressLayoutSave = false;
+
 async function createTerminal(command, cwd, projectId, savedLabel, resumeSessionId) {
   const terminal = new Terminal({
     fontSize: 13,
-    fontFamily: '"Cascadia Mono", Consolas, monospace',
+    fontFamily: PREVIEW_FONT,
     theme: { background: '#1c1f24', foreground: '#c8ccd4', cursor: '#f0f2f5', selectionBackground: '#2e333b' },
     cursorBlink: true,
   });
@@ -3831,15 +4212,22 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   const cols = terminal.cols;
   const rows = terminal.rows;
 
-  const ptyId = await window.api.ptyCreate({
-    command,
-    args: [],
-    cwd: cwd || undefined,
-    projectId: projectId || null,
-    cols,
-    rows,
-    resumeSessionId: resumeSessionId || undefined,
-  });
+  let ptyId;
+  try {
+    ptyId = await window.api.ptyCreate({
+      command,
+      args: [],
+      cwd: cwd || undefined,
+      projectId: projectId || null,
+      cols,
+      rows,
+      resumeSessionId: resumeSessionId || undefined,
+    });
+  } catch (error) {
+    terminal.dispose();
+    termEl.remove();
+    throw error;
+  }
 
   terminal.onData((data) => {
     window.api.ptyWrite(ptyId, data);
@@ -3923,6 +4311,18 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     outputFollowRevision: 0,
     userScrollActive: false,
   });
+  try {
+    await window.api.ptyAttach(ptyId);
+  } catch (error) {
+    dispatch('agent_session_unbound', { tabId });
+    dispatch('terminal_clear_attention', { tabId });
+    tabs.delete(tabId);
+    window.api.ptyKill(ptyId);
+    terminal.dispose();
+    termEl.remove();
+    tabEl.remove();
+    throw error;
+  }
 
   // B1: register the tab in a pane of its OWN project. For the active
   // project that is the currently focused pane; for background projects it
@@ -4029,7 +4429,7 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     // Hide tab element since it's not in the active project
     tabEl.style.display = 'none';
   }
-  saveLayout();
+  if (!suppressLayoutSave) saveLayout();
   return tabId;
 }
 
@@ -4050,14 +4450,31 @@ function showProjectTabs(projectId) {
   });
 
   // Restore last active tab for this project, or pick first visible
-  let restoreId = projectActiveTab.get(projectId);
+  let restoreId = focusedPane()?.activeTabId ?? projectActiveTab.get(projectId);
   if (restoreId === undefined || !tabs.has(restoreId) || tabs.get(restoreId).projectId !== projectId) {
     for (const [tid, t] of tabs) {
       if (t.projectId === projectId) { restoreId = tid; break; }
     }
   }
 
-  if (restoreId !== undefined && tabs.has(restoreId)) {
+  const focusedView = focusedPane()?.view;
+  if (focusedView) {
+    activeMainView = focusedView.type === 'file' ? 'file' : focusedView.type;
+    activeSurface = focusedView.type === 'preview' ? 'preview' : 'editor';
+    commitAttention({
+      activeTerminalTabId: null,
+      activeFilePath: focusedView.path || null,
+      isPreview: focusedView.type === 'preview',
+    });
+    if (focusedView.type === 'file' && openFiles.has(focusedView.path)) {
+      switchEditorTab(focusedView.path, { focus: false });
+    } else if (focusedView.type === 'preview' && previewFiles.has(focusedView.path)) {
+      void switchPreviewTab(focusedView.path);
+    } else if (focusedView.type === 'search') {
+      activateSearchTab();
+    }
+    updateSendTarget();
+  } else if (restoreId !== undefined && tabs.has(restoreId)) {
     if (activeMainView === 'terminal') {
       switchTab(restoreId);
     } else {
@@ -4144,7 +4561,7 @@ function validatePaneViews() {
     const path = p.view.path;
     const alive = (p.view.type === 'file' && openFiles.has(path))
       || (p.view.type === 'preview' && previewFiles.has(path))
-      || p.view.type === 'search';
+      || (p.view.type === 'search' && typeof searchTabEl !== 'undefined' && searchTabEl);
     if (!alive) p.view = null;
   });
 }
@@ -4267,6 +4684,7 @@ function makePaneSplitter(splitterEl, prevRoot, nextRoot, prevState, nextState, 
       prevState.size = v;
       if (nextState) nextState.size = nv;
       saveCurrentEditorState();
+      void saveLayout();
       splitterEl.removeEventListener('pointermove', onMove);
       splitterEl.removeEventListener('pointerup', onUp);
       splitterEl.removeEventListener('pointercancel', onUp);
@@ -4337,6 +4755,7 @@ function renderPanes() {
         paneDirection = paneDirection === 'row' ? 'column' : 'row';
         renderPanes();
         saveCurrentEditorState();
+        void saveLayout();
         requestAnimationFrame(handleResize);
       } else {
         dispatch('pane_split', {});
@@ -4375,13 +4794,12 @@ function renderPanes() {
     });
     root.addEventListener('mousedown', () => {
       setFocusedPane(pane.id);
-      // Clicking a pane moves the keyboard there when it shows a terminal.
-      // Hosted surfaces (editor/preview) manage their own focus — don't steal.
       const p = getPane(pane.id);
       if (p && !p.view && p.activeTabId !== null) {
         const term = tabs.get(p.activeTabId);
         if (term && term.termEl.style.display !== 'none') {
-          try { term.terminal.focus(); } catch { /* terminal mid-dispose */ }
+          switchTab(p.activeTabId, { focus: false });
+          term.terminal.focus();
         }
       }
     });
@@ -4552,7 +4970,7 @@ function setupPaneTabBarDnd(barEl, pane) {
 function showPaneActiveTerminals() {
   tabs.forEach((td) => {
     const p = paneOfTab(td.id);
-    td.termEl.style.display = p && p.activeTabId === td.id ? 'block' : 'none';
+    td.termEl.style.display = p && !p.view && p.activeTabId === td.id ? 'block' : 'none';
   });
   markShownTabs();
   requestAnimationFrame(handleResize);
@@ -4574,6 +4992,7 @@ async function splitFocusedPane(direction) {
   activePaneId = pane.id;
   renderPanes();
   saveCurrentEditorState();
+  void saveLayout();
   // The new pane is empty: spawn a terminal in it.
   const p = projects.get(activeProjectId);
   await dispatch('create_terminal', { command: defaultShell(), cwd: p?.path, projectId: activeProjectId });
@@ -4599,6 +5018,7 @@ function closeFocusedPane() {
     if (t) t.termEl.style.display = 'none';
   });
   activePaneId = target.id;
+  if (gone.view && !target.view) target.view = gone.view;
   // Non-terminal tabs follow the merged terminals explicitly — never via
   // the focus fallback.
   retirePaneMembership(gone.id, target.id);
@@ -4625,6 +5045,7 @@ function closeFocusedPane() {
     updateSendTarget();
   }
   saveCurrentEditorState();
+  void saveLayout();
 }
 
 function focusPaneByIndex(index) {
@@ -4632,6 +5053,7 @@ function focusPaneByIndex(index) {
   const pane = panes[index];
   if (!pane) return;
   setFocusedPane(pane.id);
+  if (pane.view) return;
   const tid = pane.activeTabId !== null && tabs.has(pane.activeTabId)
     ? pane.activeTabId
     : pane.tabIds[pane.tabIds.length - 1];
@@ -4646,6 +5068,7 @@ function setFocusedPane(id) {
   activePaneId = id;
   updatePaneFocusClasses();
   saveCurrentEditorState();
+  void saveLayout();
   const pane = getPane(id);
   mainSurface.dataset.surface = pane && pane.view ? pane.view.type : 'terminal';
   markShownTabs();
@@ -4670,12 +5093,12 @@ async function moveTabToPane(target, paneIndex) {
       if (from.activeTabId === target.tabId) {
         from.activeTabId = from.tabIds.length > 0 ? from.tabIds[from.tabIds.length - 1] : null;
       }
-      from.view = null;
     }
     dest.tabIds.push(target.tabId);
     renderPanes();
     switchTab(target.tabId);
     saveCurrentEditorState();
+    void saveLayout();
     return;
   }
 
@@ -4683,9 +5106,11 @@ async function moveTabToPane(target, paneIndex) {
     // Project guard: only tabs of the active project move between panes.
     const entry0 = openFiles.get(target.filePath) || previewFiles.get(target.filePath);
     if (entry0 && entry0.projectId !== undefined && entry0.projectId !== activeEditorProjectId) return;
+    const projectId = activeEditorProjectId;
     await dispatch('switch_tab', { filePath: target.filePath });
-    // Panes may have changed while the switch was in flight.
+    // Panes/project may have changed while the switch was in flight.
     if (!panes.includes(dest)) return;
+    if (activeEditorProjectId !== projectId) return;
     const kind = mainSurface.dataset.surface;
     if (kind === 'terminal') return;
     const entry = openFiles.get(target.filePath) || previewFiles.get(target.filePath);
@@ -4702,6 +5127,7 @@ async function moveTabToPane(target, paneIndex) {
     updatePaneFocusClasses();
     layoutNonTerminalTabs();
     saveCurrentEditorState();
+    void saveLayout();
   }
 }
 
@@ -4714,8 +5140,11 @@ function detachTabFromPanes(tabId) {
   if (pane.activeTabId === tabId) {
     pane.activeTabId = pane.tabIds.length > 0 ? pane.tabIds[pane.tabIds.length - 1] : null;
   }
-  if (pane.tabIds.length === 0 && panes.length > 1) {
+  if (pane.tabIds.length === 0 && panes.length > 1 && !pane.view) {
     const survivorId = panes.find((p) => p.id !== pane.id)?.id ?? null;
+    if (survivorId !== null && pane.view && !getPane(survivorId)?.view) {
+      getPane(survivorId).view = pane.view;
+    }
     panes = panes.filter((p) => p.id !== pane.id);
     if (activePaneId === pane.id) activePaneId = panes[0].id;
     if (survivorId !== null) retirePaneMembership(pane.id, survivorId);
@@ -4774,6 +5203,8 @@ function switchTab(tabId, { focus = true } = {}) {
     dispatch('agent_notification_seen', { tabId });
   }
   updateSendTarget();
+  saveCurrentEditorState();
+  void saveLayout();
 
   // Wait until display/layout changes have settled before measuring.
   requestAnimationFrame(() => {
@@ -4811,6 +5242,8 @@ function closeTerminal(tabId) {
   if (!t) return;
 
   const projectId = t.projectId;
+  const closedPane = paneOfTab(tabId);
+  const paneHadView = Boolean(closedPane?.view);
   void window.api.devinUnbind(t.ptyId);
   window.api.ptyKill(t.ptyId);
   t.terminal.dispose();
@@ -4819,8 +5252,29 @@ function closeTerminal(tabId) {
   dispatch('agent_session_unbound', { tabId });
   tabs.delete(tabId);
   dispatch('terminal_clear_attention', { tabId });
-  const closedPane = paneOfTab(tabId);
   detachTabFromPanes(tabId);
+
+  if (activeTabId === tabId && paneHadView) {
+    const viewPane = panes.find((pane) => pane.view);
+    if (viewPane) {
+      activePaneId = viewPane.id;
+      activeMainView = viewPane.view.type === 'file' ? 'file' : viewPane.view.type;
+      activeSurface = viewPane.view.type === 'preview' ? 'preview' : 'editor';
+      commitAttention({
+        activeTerminalTabId: null,
+        activeFilePath: viewPane.view.path || null,
+        isPreview: viewPane.view.type === 'preview',
+      });
+      mainSurface.dataset.surface = viewPane.view.type;
+      updatePaneFocusClasses();
+    } else {
+      commitAttention({ activeTerminalTabId: null });
+    }
+    updateSendTarget();
+    saveCurrentEditorState();
+    saveLayout();
+    return;
+  }
 
   if (activeTabId === tabId) {
     // Prefer the next tab in the SAME pane so focus doesn't jump across
@@ -4829,24 +5283,39 @@ function closeTerminal(tabId) {
     if (closedPane) {
       for (const tid of closedPane.tabIds) {
         const td = tabs.get(tid);
-        if (td && td.projectId === projectId) { nextId = tid; break; }
+        if (td && td.projectId === projectId && !paneOfTab(tid)?.view) { nextId = tid; break; }
       }
     }
     if (nextId === null) {
       for (const [tid, td] of tabs) {
-        if (td.projectId === projectId) { nextId = tid; break; }
+        if (td.projectId === projectId && !paneOfTab(tid)?.view) { nextId = tid; break; }
       }
     }
     if (nextId !== null) {
       switchTab(nextId);
     } else {
-      projectActiveTab.delete(projectId);
-      commitAttention({ activeTerminalTabId: null });
-      activateMainTab(null);
-      showMainSurface('terminal');
+      const viewPane = panes.find((pane) => pane.view);
+      if (viewPane) {
+        activePaneId = viewPane.id;
+        activeMainView = viewPane.view.type === 'file' ? 'file' : viewPane.view.type;
+        activeSurface = viewPane.view.type === 'preview' ? 'preview' : 'editor';
+        commitAttention({
+          activeTerminalTabId: null,
+          activeFilePath: viewPane.view.path || null,
+          isPreview: viewPane.view.type === 'preview',
+        });
+        mainSurface.dataset.surface = viewPane.view.type;
+        updatePaneFocusClasses();
+      } else {
+        projectActiveTab.delete(projectId);
+        commitAttention({ activeTerminalTabId: null });
+        activateMainTab(null);
+        showMainSurface('terminal');
+      }
       updateSendTarget();
     }
   }
+  saveCurrentEditorState();
   saveLayout();
 }
 
@@ -5339,25 +5808,23 @@ scratchEditorMount.addEventListener('drop', (e) => {
 
 // Terminal container: insert path (no Enter)
 terminalContainer.addEventListener('dragover', (e) => {
-  if (hasFileDrop(e.dataTransfer)) {
+  if (hasFileDrop(e.dataTransfer) && e.target?.closest?.('.terminal-instance')) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   }
 });
 terminalContainer.addEventListener('drop', (e) => {
+  const target = resolveTerminalDropTarget(e.target, panes, tabs);
+  if (!target) return;
   e.preventDefault();
+  e.stopPropagation();
   const paths = getDroppedFilePaths(e);
-  if (paths.length > 0 && activeTabId !== null) {
-    const t = tabs.get(activeTabId);
-    if (t) {
-      const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, t.command));
-      t.terminal.paste(quotedPaths.join(' '));
-  clearTerminalWaitingForUserInput(targetId);
-      // Focus the terminal only when it is already the visible surface,
-      // so dropping on a hidden terminal does not yank the user's view.
-      if (mainSurface.dataset.surface === 'terminal') t.terminal.focus();
-    }
-  }
+  if (paths.length === 0) return;
+  switchTab(target.tabId, { focus: false });
+  const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, target.terminal.command));
+  target.terminal.terminal.paste(quotedPaths.join(' '));
+  clearTerminalWaitingForUserInput(target.tabId);
+  target.terminal.terminal.focus();
 });
 
 // File tree is explicitly a no-op drop target. Prevent Chromium's default file
@@ -5390,6 +5857,7 @@ document.addEventListener('drop', (e) => {
 // ============================================================
 
 async function saveLayout() {
+  if (suppressLayoutSave) return;
   // B1: persist pane structure per project INCLUDING tab membership.
   // Members are stored as indices into the saved `tabs` array (stable
   // across restarts — tabIds are regenerated on startup).
@@ -5409,30 +5877,61 @@ async function saveLayout() {
   const tabIndex = new Map();
   Array.from(tabs.values()).forEach((t, i) => tabIndex.set(t.id, i));
 
-  const serializePanes = (dir, arr, act) => ({
+  const nonTerminalTabs = [];
+  const serializePanes = (dir, arr, act, projectId, fileMap = new Map()) => ({
     direction: dir === 'column' ? 'column' : 'row',
     activeIndex: Math.max(0, arr.findIndex((p) => p.id === act)),
-    panes: arr.map((p) => ({
-      size: p.size || 0,
-      members: p.tabIds.map((id) => tabIndex.get(id)).filter((i) => i !== undefined),
-      active: p.activeTabId !== null && tabIndex.has(p.activeTabId) ? tabIndex.get(p.activeTabId) : null,
-      view: p.view && p.view.type !== 'terminal' ? { type: p.view.type, path: p.view.path || null } : null,
-    })),
+    panes: arr.map((p, paneIndex) => {
+      const nonTerminalMembers = [];
+      fileMap.forEach((file) => {
+        if (file.isScratch || file.paneId !== p.id) return;
+        nonTerminalMembers.push(nonTerminalTabs.length);
+        nonTerminalTabs.push({
+          type: 'file',
+          projectId,
+          paneIndex,
+          path: file.path,
+          name: file.name,
+        });
+      });
+      previewFiles.forEach((file) => {
+        if (file.projectId !== projectId || file.paneId !== p.id) return;
+        nonTerminalMembers.push(nonTerminalTabs.length);
+        nonTerminalTabs.push({
+          type: 'preview',
+          projectId,
+          paneIndex,
+          path: file.path,
+          previewPath: file.previewPath,
+          name: file.name,
+        });
+      });
+      if (searchTabEl && projectId === activeEditorProjectId && searchTabEl._paneId === p.id) {
+        nonTerminalMembers.push(nonTerminalTabs.length);
+        nonTerminalTabs.push({ type: 'search', projectId, paneIndex });
+      }
+      return {
+        size: p.size || 0,
+        members: p.tabIds.map((id) => tabIndex.get(id)).filter((i) => i !== undefined),
+        nonTerminalMembers,
+        active: p.activeTabId !== null && tabIndex.has(p.activeTabId) ? tabIndex.get(p.activeTabId) : null,
+        view: p.view && p.view.type !== 'terminal' ? { type: p.view.type, path: p.view.path || null, ...(p.view.type === 'preview' && p.view.path ? { sourcePath: previewFiles.get(p.view.path)?.path || p.view.sourcePath || null } : {}) } : null,
+      };
+    }),
   });
 
   const paneLayouts = {};
-  if (activeEditorProjectId && (panes.length > 1 || paneDirection === 'column')) {
-    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId);
+  if (activeEditorProjectId && panes.length > 0) {
+    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId, activeEditorProjectId, openFiles);
   }
   projectEditorStates.forEach((st, pid) => {
-    if (Array.isArray(st.panes) && st.panes.length > 0
-      && (st.panes.length > 1 || st.paneDirection === 'column')) {
-      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId);
+    if (pid !== activeEditorProjectId && Array.isArray(st.panes) && st.panes.length > 0) {
+      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId, pid, st.openFiles);
     }
   });
   projectPaneSkeletons.forEach((sk, pid) => {
-    if (sk.panes.length > 1) {
-      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId);
+    if (sk.panes.length > 0) {
+      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId, pid);
     }
   });
 
@@ -5442,100 +5941,103 @@ async function saveLayout() {
     terminalSendModes,
     pushFocusEnabled: pushFocusCheckbox.checked,
     paneLayouts,
+    nonTerminalTabs,
   };
-  await window.api.layoutSave(layout);
+  try {
+    await window.api.layoutSave(layout);
+  } catch (error) {
+    console.error('[layout] Failed to save layout:', error);
+  }
 }
 
 async function loadLayout() {
   const layout = await window.api.layoutLoad();
   if (!layout) return;
-  // ユーザー設定で既知のツールの送信方式を上書き（未指定はデフォルトを使う）
-  if (layout.terminalSendModes && typeof layout.terminalSendModes === 'object') {
-    terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES, ...layout.terminalSendModes };
-  }
-  if (typeof layout.pushFocusEnabled === 'boolean') {
-    pushFocusCheckbox.checked = layout.pushFocusEnabled;
-  }
-  // B1: pane skeletons from the previous session.
-  savedPaneLayouts = (layout.paneLayouts && typeof layout.paneLayouts === 'object')
-    ? layout.paneLayouts
-    : {};
-  if (layout.activeProjectId && projects.has(layout.activeProjectId)) {
-    await dispatch('select_project', { projectId: layout.activeProjectId });
-  }
-  if (layout.tabs && layout.tabs.length > 0) {
-    // B1: creation order matches the saved tabs array, giving us a stable
-    // oldIndex -> newTabId map for pane membership restore. One failed
-    // create must not abort the whole restore or shift the idMap — push a
-    // null sentinel so indices stay aligned (mapMember drops nulls).
+  suppressLayoutSave = true;
+  try {
+    // ユーザー設定で既知のツールの送信方式を上書き（未指定はデフォルトを使う）
+    if (layout.terminalSendModes && typeof layout.terminalSendModes === 'object') {
+      terminalSendModes = { ...DEFAULT_TERMINAL_SEND_MODES, ...layout.terminalSendModes };
+    }
+    if (typeof layout.pushFocusEnabled === 'boolean') {
+      pushFocusCheckbox.checked = layout.pushFocusEnabled;
+    }
+    // B1: pane skeletons from the previous session.
+    savedPaneLayouts = (layout.paneLayouts && typeof layout.paneLayouts === 'object')
+      ? layout.paneLayouts
+      : {};
+    savedNonTerminalTabs = Array.isArray(layout.nonTerminalTabs) ? layout.nonTerminalTabs : [];
+    const layoutProjectId = projects.has(layout.activeProjectId)
+      ? layout.activeProjectId
+      : layout.tabs?.find((tab) => projects.has(tab.projectId))?.projectId
+        || projects.keys().next().value
+        || null;
+    if (layoutProjectId) {
+      await dispatch('select_project', { projectId: layoutProjectId });
+    }
     const idMap = [];
-    // Agent CLIs (claude/codex/opencode) resume their last tracked session
-    // silently — same as devin below. Startup must never block on the
-    // resume prompt, so the stored id is passed straight through.
-    const lastSessions = loadLastSessions();
-    for (const tab of layout.tabs) {
-      try {
-        // Devin tabs restore with their cloud session id so the PTY
-        // reattaches via `devin -r` instead of starting a fresh session.
-        const tracked = !tab.devinSessionId && tab.projectId && tab.command
-          ? lastSessions[`${tab.projectId}:${tab.command}`]?.sessionId
-          : null;
-        const resumeId = tab.devinSessionId || tracked || null;
-        const args = resumeId ? { ...tab, resumeSessionId: resumeId } : tab;
-        const newId = await dispatch('create_terminal', args);
-        idMap.push(newId);
-        // Re-bind Devin notifications silently (best-effort: the cloud
-        // session may have ended while the app was closed).
-        if (tab.devinSessionId && newId !== null && tabs.has(newId)) {
-          try {
-            const result = await window.api.devinBind(tabs.get(newId).ptyId, tab.devinSessionId);
-            if (result?.ok) {
-              dispatch('agent_session_bound', {
-                tabId: newId,
-                provider: 'devin',
-                sessionId: tab.devinSessionId,
-              });
-            }
-          } catch {
-            // Unbound tab still works as a plain devin shell.
+    if (layout.tabs && layout.tabs.length > 0) {
+      const lastSessions = loadLastSessions();
+      for (const tab of layout.tabs) {
+        try {
+          const tracked = !tab.devinSessionId && tab.projectId && tab.command
+            ? lastSessions[`${tab.projectId}:${normalizeRendererCommand(tab.command)}`]?.sessionId
+            : null;
+          const resumeId = tab.devinSessionId || tracked || null;
+          const args = resumeId ? { ...tab, resumeSessionId: resumeId } : tab;
+          const newId = await dispatch('create_terminal', args);
+          idMap.push(newId);
+          if (tab.devinSessionId && newId !== null && tabs.has(newId)) {
+            try {
+              const result = await window.api.devinBind(tabs.get(newId).ptyId, tab.devinSessionId);
+              if (result?.ok) {
+                dispatch('agent_session_bound', {
+                  tabId: newId,
+                  provider: 'devin',
+                  sessionId: tab.devinSessionId,
+                });
+              }
+            } catch {}
           }
+        } catch (error) {
+          console.error('[layout] Failed to restore terminal tab:', error);
+          idMap.push(null);
         }
-      } catch (error) {
-        console.error('[layout] Failed to restore terminal tab:', error);
-        idMap.push(null);
       }
     }
-    applySavedPaneLayouts(layout.activeProjectId, idMap);
-    // After restoring all tabs, show the active project's tabs
+    await applySavedPaneLayouts(layoutProjectId, idMap);
     if (activeProjectId) {
       showProjectTabs(activeProjectId);
     }
+  } finally {
+    suppressLayoutSave = false;
+    await saveLayout();
   }
 }
 
 // B1: rebuild pane structures from the previous session using the saved
 // membership (old tab indices mapped to the freshly created tabIds). Panes
 // are rebuilt from scratch — never appended to startup defaults.
-function applySavedPaneLayouts(activePid, idMap) {
-  Object.entries(savedPaneLayouts).forEach(([pid, saved]) => {
-    if (!saved || !Array.isArray(saved.panes) || saved.panes.length < 2) return;
+async function applySavedPaneLayouts(activePid, idMap) {
+  for (const [pid, saved] of Object.entries(savedPaneLayouts)) {
+    if (!saved || !Array.isArray(saved.panes) || saved.panes.length < 1) continue;
     const mapMember = (oldIdx) => {
       const id = idMap[oldIdx];
       return id !== undefined && tabs.has(id) ? id : null;
     };
-    const build = () => saved.panes.map((sp, i) => {
+    const build = () => saved.panes.map((sp) => {
       const members = (sp.members || []).map(mapMember).filter((id) => id !== null);
       let act = sp.active !== null && sp.active !== undefined ? mapMember(sp.active) : null;
       if (act === null) act = members.length > 0 ? members[members.length - 1] : null;
-      // Views reference files/previews that are not restored at startup —
-      // keep the metadata, validatePaneViews() clears what has no tab.
       const sv = sp.view && typeof sp.view === 'object' ? sp.view : null;
       return {
         id: nextPaneId++,
         tabIds: members,
         activeTabId: act,
         size: Number(sp.size) || 0,
-        view: sv && sv.type !== 'terminal' ? { type: sv.type, path: sv.path || null } : null,
+        view: sv && sv.type !== 'terminal'
+          ? { type: sv.type, path: sv.path || null, ...(sv.sourcePath ? { sourcePath: sv.sourcePath } : {}) }
+          : null,
       };
     });
     if (pid === activePid) {
@@ -5545,6 +6047,53 @@ function applySavedPaneLayouts(activePid, idMap) {
         panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
       }
       activePaneId = panes[Math.min(Number(saved.activeIndex) || 0, panes.length - 1)].id;
+      renderPanes();
+
+      let searchRestored = false;
+      for (const pane of panes) {
+        const view = pane.view;
+        if (!view) continue;
+        if (view.type === 'file' && view.path) {
+          await openFileInEditor(view.path, view.path.split(/[\\/]/).pop(), {
+            activate: false,
+            paneId: pane.id,
+          });
+          if (!openFiles.has(view.path)) pane.view = null;
+        } else if (view.type === 'preview' && view.path) {
+          const prefix = `preview:${pid}:`;
+          let sourcePath = view.sourcePath || null;
+          if (!sourcePath && view.path.startsWith(prefix)) {
+            sourcePath = view.path.slice(prefix.length);
+            const agentMarker = sourcePath.lastIndexOf(':agent:');
+            if (agentMarker >= 0) sourcePath = sourcePath.slice(0, agentMarker);
+          }
+          if (sourcePath) {
+            await openFileInPreview(sourcePath, sourcePath.split(/[\\/]/).pop(), {
+              projectId: pid,
+              previewPath: view.path,
+              activate: false,
+              allowOs: false,
+              paneId: pane.id,
+            });
+          }
+          if (!previewFiles.has(view.path)) pane.view = null;
+        } else if (view.type === 'search') {
+          if (searchRestored) {
+            pane.view = null;
+          } else {
+            if (searchTabEl) {
+              insertTabIntoPane(searchTabEl, pane.id);
+              searchTabEl._paneId = pane.id;
+            } else {
+              createSearchTab(pane.id);
+            }
+            searchRestored = true;
+          }
+        } else {
+          pane.view = null;
+        }
+      }
+      await restoreNonTerminalTabs(pid, panes);
       validatePaneViews();
       renderPanes();
     } else {
@@ -5554,7 +6103,7 @@ function applySavedPaneLayouts(activePid, idMap) {
         activePaneId: built[Math.min(Number(saved.activeIndex) || 0, built.length - 1)]?.id ?? built[0]?.id,
       });
     }
-  });
+  }
 }
 
 // ============================================================
@@ -5809,9 +6358,11 @@ register('terminal_select_all', () => {
 
 register('terminal_paste_image', async () => {
   if (activeTabId === null) return;
-  const p = projects.get(activeProjectId);
+  const projectId = activeProjectId;
+  const p = projects.get(projectId);
   if (!p) return;
   const filepath = await window.api.clipboardSaveImage(p.path);
+  if (activeProjectId !== projectId) return;
   if (filepath) {
     dispatch('append_to_scratch', { text: filepath });
     showToast({ key: 'screenshot-saved', message: 'Screenshot saved', detail: filepath });
@@ -5844,11 +6395,7 @@ register('search_text_open', () => {
 });
 
 register('search_close', () => {
-  searchGeneration++;
-  if (currentSearchId) {
-    window.api.cancelSearch(currentSearchId);
-    currentSearchId = null;
-  }
+  invalidateSearch();
   searchInput.value = '';
   searchResults.innerHTML = '';
   searchStatus.textContent = '';
@@ -5880,7 +6427,7 @@ function rememberAgentSession(projectId, command, sessionId) {
   if (!projectId || !command || !sessionId) return;
   try {
     const all = loadLastSessions();
-    all[`${projectId}:${command}`] = { sessionId, endedAt: Date.now() };
+    all[`${projectId}:${normalizeRendererCommand(command)}`] = { sessionId, endedAt: Date.now() };
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify(all));
   } catch {
     // Storage full / unavailable: resume tracking is best-effort.
@@ -5892,14 +6439,15 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
   // 新規タブのドロップダウンはインストール済みのツールだけを出すため、
   // ここで特定の AI CLI を決め打ちすると未インストール環境で必ず失敗する。
   const cmd = command || defaultShell();
+  const commandKey = normalizeRendererCommand(cmd);
   const cwd_ = cwd || (projects.get(activeProjectId)?.path);
   const pid = projectId || activeProjectId;
   let effectiveResumeId = resumeSessionId || null;
   // The prompt fires only for explicit menu-created terminals — layout
   // restore must reopen tabs silently. The File menu checkbox
   // (Auto-Resume Previous Sessions) switches between ask and auto modes.
-  if (resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED.has(cmd)) {
-    const last = loadLastSessions()[`${pid}:${cmd}`];
+  if (resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED.has(commandKey)) {
+    const last = loadLastSessions()[`${pid}:${commandKey}`];
     if (last && last.sessionId) {
       let mode = 'ask';
       try {
@@ -5911,7 +6459,7 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
         effectiveResumeId = last.sessionId;
       } else {
         const ok = await showConfirm(
-          `Resume ${TERMINAL_LABELS[cmd] || cmd}?`,
+           `Resume ${TERMINAL_LABELS[commandKey] || commandKey}?`,
           'A previous session was found for this project. Resume it instead of starting fresh?',
         );
         if (ok) effectiveResumeId = last.sessionId;
@@ -6360,11 +6908,25 @@ register('get_focus', ({ $session: session = null } = {}) => {
 
 let searchTabEl = null;
 let currentSearchId = null;
-let searchGeneration = 0; // increments on each search start/clear to reject stale results
+let searchGeneration = 0;
+let searchDebounceTimer = null;
+const cancelledSearchIds = new Set();
 let searchResultCount = 0;
 let searchTruncated = false;
 let searchFocusedResult = null; // { file, line } for keyboard navigation
 let searchLastFile = null; // path of the last file header rendered
+
+function invalidateSearch() {
+  searchGeneration++;
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = null;
+  if (currentSearchId !== null) {
+    cancelledSearchIds.add(currentSearchId);
+    window.api.cancelSearch(currentSearchId);
+  }
+  currentSearchId = null;
+  if (searchFocusedResult) searchFocusedResult = null;
+}
 
 function openSearchTab() {
   if (!searchTabEl) createSearchTab();
@@ -6373,7 +6935,7 @@ function openSearchTab() {
   searchInput.select();
 }
 
-function createSearchTab() {
+function createSearchTab(paneId = null) {
   searchTabEl = createMainTab({
     kind: 'search',
     ident: { key: 'searchTab', value: 'search' },
@@ -6385,24 +6947,29 @@ function createSearchTab() {
       onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'search' }),
     },
   });
-  insertTabIntoPane(searchTabEl);
-  searchTabEl._paneId = focusedPane()?.id ?? null;
+  insertTabIntoPane(searchTabEl, paneId);
+  searchTabEl._paneId = paneId ?? focusedPane()?.id ?? null;
 }
 
 function activateSearchTab() {
-  // Hide other main tabs' selection.
   document.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === searchTabEl));
+  if (searchTabEl) searchTabEl._paneId = focusedPane()?.id ?? null;
   showMainSurface('search');
   activeMainView = 'search';
-  // Hide editor/preview tabs when search is active.
-  openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = 'none'; });
-  previewFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = 'none'; });
+  activeSurface = 'search';
+  saveCurrentEditorState();
+  void saveLayout();
 }
 
-function closeSearchTab() {
+function closeSearchTab({ restoreSurface = true, persist = true } = {}) {
   if (!searchTabEl) return;
+  invalidateSearch();
+  const wasActive = activeMainView === 'search';
   searchTabEl.remove();
   searchTabEl = null;
+  panes.forEach((pane) => {
+    if (pane.view?.type === 'search') pane.view = null;
+  });
   // Restore visibility of editor/preview tabs for the active project only.
   // previewFiles is cross-project; other projects' tabs must stay hidden.
   openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
@@ -6412,7 +6979,7 @@ function closeSearchTab() {
     }
   });
   // Switch back to terminal or editor.
-  if (activeTabId !== null) {
+  if (restoreSurface && wasActive && activeTabId !== null) {
     const t = tabs.get(activeTabId);
     if (t) {
       switchTab(activeTabId);
@@ -6420,23 +6987,32 @@ function closeSearchTab() {
     }
   }
   // Fallback: show terminal surface.
-  showMainSurface('terminal');
-  activeMainView = 'terminal';
+  if (restoreSurface && wasActive) {
+    showMainSurface('terminal');
+    activeMainView = 'terminal';
+    activeSurface = 'editor';
+  } else if (!restoreSurface && wasActive) {
+    activeMainView = 'terminal';
+    activeSurface = 'editor';
+  }
+  if (persist) {
+    saveCurrentEditorState();
+    void saveLayout();
+  }
 }
 
 // Register the search_text command.
 register('search_text', async ({ query, cwd, caseSensitive }) => {
-  const project = projects.get(activeProjectId);
+  const projectId = activeProjectId;
+  const project = projects.get(projectId);
   const searchCwd = cwd || project?.path;
   if (!searchCwd || !query) return { searchId: null, error: 'missing query or cwd' };
 
   // Cancel any in-flight search before starting a new one.
-  if (currentSearchId) {
-    window.api.cancelSearch(currentSearchId);
-  }
+  invalidateSearch();
 
   // Increment generation so stale results from previous searches are rejected.
-  const gen = ++searchGeneration;
+  const gen = searchGeneration;
 
   // Reset results.
   searchResults.innerHTML = '';
@@ -6447,9 +7023,12 @@ register('search_text', async ({ query, cwd, caseSensitive }) => {
 
   const result = await window.api.searchText(searchCwd, query, { caseSensitive: !!caseSensitive });
   // Check if a newer search was started or the query was cleared while awaiting.
-  if (gen !== searchGeneration) {
+  if (gen !== searchGeneration || activeProjectId !== projectId) {
     // Stale: cancel the search we just started and discard its result.
-    if (result.searchId) window.api.cancelSearch(result.searchId);
+    if (result.searchId) {
+      cancelledSearchIds.add(result.searchId);
+      window.api.cancelSearch(result.searchId);
+    }
     return result;
   }
   if (result.error) {
@@ -6462,13 +7041,25 @@ register('search_text', async ({ query, cwd, caseSensitive }) => {
 
 // Receive search results from main process.
 window.api.onSearchResult(({ searchId, result }) => {
+  if (cancelledSearchIds.has(searchId)) {
+    cancelledSearchIds.delete(searchId);
+    return;
+  }
   if (searchId !== currentSearchId) return; // stale result
   appendSearchResult(result);
 });
 
 window.api.onSearchDone(({ searchId, truncated, totalCount, error, cancelled }) => {
+  if (cancelledSearchIds.has(searchId)) {
+    cancelledSearchIds.delete(searchId);
+    return;
+  }
   if (searchId !== currentSearchId) return;
-  if (cancelled) return;
+  if (cancelled) {
+    currentSearchId = null;
+    return;
+  }
+  currentSearchId = null;
   if (error) {
     searchResults.innerHTML = '';
     searchStatus.textContent = `Search error: ${error}`;
@@ -6534,22 +7125,20 @@ async function openSearchResult(result) {
 
 // Search input handler.
 if (searchInput) {
-  let searchTimeout;
   searchInput.addEventListener('input', () => {
-    clearTimeout(searchTimeout);
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+    const projectId = activeProjectId;
     const query = searchInput.value.trim();
     if (!query) {
-      // Invalidate current search: bump generation, cancel process, clear DOM.
-      searchGeneration++;
-      if (currentSearchId) {
-        window.api.cancelSearch(currentSearchId);
-        currentSearchId = null;
-      }
+      invalidateSearch();
       searchResults.innerHTML = '';
       searchStatus.textContent = '';
       return;
     }
-    searchTimeout = setTimeout(() => {
+    searchDebounceTimer = setTimeout(() => {
+      searchDebounceTimer = null;
+      if (activeProjectId !== projectId || searchInput.value.trim() !== query) return;
       dispatch('search_text', {
         query,
         caseSensitive: searchCaseCheckbox?.checked || false,
@@ -6560,6 +7149,8 @@ if (searchInput) {
     // Escape is handled by the keybinding registry (search_close, when: searchFocus).
     if (e.key === 'Enter') {
       e.preventDefault();
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = null;
       const query = searchInput.value.trim();
       if (query) {
         dispatch('search_text', {
@@ -6624,11 +7215,10 @@ function stopPreviewFind() {
 }
 
 function openFindBar() {
-  if (activeMainView === 'file' || activeMainView === 'preview') {
-    findMode = activeMainView === 'preview' ? 'preview' : 'editor';
-  } else if (scratchEditorMount.contains(document.activeElement)) {
-    // Ctrl+F from the scratch composer.
+  if (scratchEditorMount.contains(document.activeElement)) {
     findMode = 'scratch';
+  } else if (activeMainView === 'file' || activeMainView === 'preview') {
+    findMode = activeMainView === 'preview' ? 'preview' : 'editor';
   } else {
     return;
   }
@@ -6652,9 +7242,7 @@ function closeFindBar({ restoreFocus = true } = {}) {
   if (restoreFocus) {
     if (wasMode === 'scratch') scratchView.focus();
     else if (activeMainView === 'file' && currentlyMountedPath) fileEditorView.focus();
-    else if (activeMainView === 'preview' && activeTabId !== null && tabs.has(activeTabId)) {
-      tabs.get(activeTabId).termEl.focus();
-    }
+    else if (activeMainView === 'preview') previewWebview.focus();
   }
 }
 
@@ -6806,5 +7394,5 @@ function escapeHtml(text) {
     await dispatch('select_project', { projectId: p.id });
     await dispatch('create_terminal', { command: defaultShell(), cwd: p.path, projectId: p.id });
   }
-  if (!editorStateInitialized) switchProjectEditor(activeProjectId);
+  if (!editorStateInitialized) await switchProjectEditor(activeProjectId);
 })();

@@ -82,10 +82,15 @@ class DevinSessionMonitor {
       lastStatusKey: null,
       inFlight: false,
       reportedError: null,
+      controller: null,
     };
     const previous = this.bindings.get(ptyId);
+    previous?.controller?.abort();
     this.bindings.set(ptyId, binding);
     const result = await this.pollBinding(binding);
+    if (this.bindings.get(ptyId) !== binding) {
+      return { ok: false, error: 'Devin binding changed while the session was loading.' };
+    }
     if (!result.ok) {
       if (previous) this.bindings.set(ptyId, previous);
       else this.bindings.delete(ptyId);
@@ -99,6 +104,8 @@ class DevinSessionMonitor {
   }
 
   unbind(ptyId) {
+    const binding = this.bindings.get(ptyId);
+    binding?.controller?.abort();
     const removed = this.bindings.delete(ptyId);
     if (this.bindings.size === 0) this.stopTimer();
     return removed;
@@ -118,6 +125,7 @@ class DevinSessionMonitor {
 
   dispose() {
     this.stopTimer();
+    for (const binding of this.bindings.values()) binding.controller?.abort();
     this.bindings.clear();
   }
 
@@ -129,6 +137,7 @@ class DevinSessionMonitor {
     if (binding.inFlight) return { ok: true, skipped: true };
     binding.inFlight = true;
     const controller = new AbortController();
+    binding.controller = controller;
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const url = `${this.baseUrl}/v3/organizations/${encodeURIComponent(this.orgId)}/sessions/${encodeURIComponent(binding.sessionId)}`;
@@ -136,12 +145,18 @@ class DevinSessionMonitor {
         headers: { Authorization: `Bearer ${this.token}` },
         signal: controller.signal,
       });
+      if (this.bindings.get(binding.ptyId) !== binding) {
+        return { ok: false, error: 'Devin binding is no longer active.' };
+      }
       if (!response.ok) {
         const error = `Devin API returned ${response.status}.`;
         this.reportErrorOnce(binding, error);
         return { ok: false, error };
       }
       const session = await response.json();
+      if (this.bindings.get(binding.ptyId) !== binding) {
+        return { ok: false, error: 'Devin binding is no longer active.' };
+      }
       const lifecycle = mapDevinSessionStatus(session);
       const status = session.status_detail || session.status || 'unknown';
       binding.reportedError = null;
@@ -166,12 +181,13 @@ class DevinSessionMonitor {
       return { ok: false, error: message };
     } finally {
       clearTimeout(timeout);
+      if (binding.controller === controller) binding.controller = null;
       binding.inFlight = false;
     }
   }
 
   reportErrorOnce(binding, message) {
-    if (binding.reportedError === message) return;
+    if (this.bindings.get(binding.ptyId) !== binding || binding.reportedError === message) return;
     binding.reportedError = message;
     this.onError({
       source: 'devin',

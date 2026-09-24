@@ -42,7 +42,7 @@ export function shouldFollowTerminalOutput(state, followToken) {
 }
 
 export function quotePathForCommand(filePath, command = '') {
-  const normalizedCommand = command.toLowerCase().replace(/\.exe$/, '');
+  const normalizedCommand = String(command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
 
   if (normalizedCommand === 'pwsh' || normalizedCommand === 'powershell') {
     return `'${filePath.replace(/'/g, "''")}'`;
@@ -57,6 +57,19 @@ export function quotePathForCommand(filePath, command = '') {
   }
 
   return /\s/.test(filePath) ? `"${filePath}"` : filePath;
+}
+
+export function resolveTerminalDropTarget(eventTarget, panes, tabs) {
+  const paneElement = eventTarget?.closest?.('.terminal-pane-item');
+  const terminalElement = eventTarget?.closest?.('.terminal-instance');
+  if (!paneElement || !terminalElement) return null;
+
+  const paneId = Number(paneElement.dataset.paneId);
+  const pane = panes.find((candidate) => candidate.id === paneId);
+  const tabId = pane?.activeTabId;
+  const terminal = tabs.get(tabId);
+  if (!terminal || !terminal.termEl.contains(eventTarget)) return null;
+  return { paneId, tabId, terminal };
 }
 
 export function captureExpandedPaneWidth({ isCollapsed, measuredWidth, savedWidth }) {

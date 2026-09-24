@@ -65,6 +65,52 @@ test('polls the organization session endpoint and emits only status changes', as
   monitor.dispose();
 });
 
+test('ignores a response that arrives after unbind', async () => {
+  let resolveFetch;
+  const events = [];
+  const errors = [];
+  const monitor = new DevinSessionMonitor({
+    token: 'secret-token',
+    orgId: 'org-example',
+    fetchImpl: () => new Promise((resolve) => { resolveFetch = resolve; }),
+    onLifecycleEvent: (event) => events.push(event),
+    onError: (error) => errors.push(error),
+  });
+  const binding = monitor.bind({ ptyId: 9, sessionId: 'devin-stale' });
+  await Promise.resolve();
+  monitor.unbind(9);
+  resolveFetch({
+    ok: true,
+    status: 200,
+    json: async () => ({ status: 'finished', status_detail: 'finished' }),
+  });
+  const result = await binding;
+  assert.equal(result.ok, false);
+  assert.deepEqual(events, []);
+  assert.deepEqual(errors, []);
+});
+
+test('ignores session JSON that finishes after unbind', async () => {
+  let resolveJson;
+  const events = [];
+  const monitor = new DevinSessionMonitor({
+    token: 'secret-token',
+    orgId: 'org-example',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: () => new Promise((resolve) => { resolveJson = resolve; }),
+    }),
+    onLifecycleEvent: (event) => events.push(event),
+  });
+  const binding = monitor.bind({ ptyId: 10, sessionId: 'devin-stale-json' });
+  await new Promise((resolve) => setImmediate(resolve));
+  monitor.unbind(10);
+  resolveJson({ status: 'finished', status_detail: 'finished' });
+  assert.equal((await binding).ok, false);
+  assert.deepEqual(events, []);
+});
+
 test('fails closed without configuration and never includes the token in errors', async () => {
   const missing = new DevinSessionMonitor();
   assert.equal((await missing.bind({ ptyId: 1, sessionId: 'devin-a' })).ok, false);

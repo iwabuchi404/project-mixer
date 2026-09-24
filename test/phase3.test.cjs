@@ -157,6 +157,17 @@ test('MCP server requires a unique live token per PTY session', async (t) => {
   assert.equal(revoked.status, 401);
 });
 
+test('PTY output is buffered until the renderer registers the tab', () => {
+  const main = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
+  const preload = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+  const renderer = fs.readFileSync(path.join(root, 'renderer.js'), 'utf8');
+  assert.match(main, /pendingData/);
+  assert.match(main, /ipcMain\.handle\('pty:attach'/);
+  assert.match(preload, /ptyAttach/);
+  assert.match(renderer, /await window\.api\.ptyAttach\(ptyId\)/);
+  assert.ok(renderer.indexOf('tabs.set(tabId') < renderer.indexOf('await window.api.ptyAttach(ptyId)'));
+});
+
 test('renderer has exact line rendering and does not use a missing webview IPC receiver', () => {
   const renderer = fs.readFileSync(path.join(root, 'renderer.js'), 'utf8');
   assert.match(renderer, /data-pm-line/);
@@ -198,6 +209,8 @@ test('agent launch flags use the per-PTY URL without project file changes', () =
     '-c',
     `mcp_servers.project_mixer.url="${url}"`,
   ]);
+  assert.deepEqual(buildAgentMcpArgs('C:\\tools\\claude.cmd', url), claudeArgs);
+  assert.deepEqual(buildAgentMcpArgs('C:\\tools\\codex.bat', url), buildAgentMcpArgs('codex', url));
   const invocation = buildPowerShellInvocation('claude', claudeArgs);
   assert.match(invocation, /^& 'claude' '--mcp-config'/);
   assert.match(invocation, /private-token/);

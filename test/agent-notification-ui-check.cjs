@@ -1,9 +1,14 @@
 // Attach to a running Electron dev instance and verify real hook delivery.
 // Usage: node test/agent-notification-ui-check.cjs <debug-port> <hook-port>
 const assert = require('node:assert/strict');
+const path = require('node:path');
 
-const debugPort = Number(process.argv[2] || 9238);
-const hookPort = Number(process.argv[3] || 47842);
+const root = path.join(__dirname, '..');
+const projectRoot = JSON.stringify(root);
+const rendererPath = JSON.stringify(path.join(root, 'renderer.js'));
+const shell = JSON.stringify(process.platform === 'win32' ? 'pwsh.exe' : process.platform === 'darwin' ? 'zsh' : 'bash');
+const debugPort = Number(process.argv[2] || process.env.PM_REMOTE_DEBUGGING_PORT || 9238);
+const hookPort = Number(process.argv[3] || process.env.PM_HOOK_PORT || 47842);
 
 async function connect() {
   const targets = await fetch(`http://127.0.0.1:${debugPort}/json/list`).then((response) => response.json());
@@ -43,13 +48,16 @@ async function connect() {
 
 async function main() {
   const { socket, evaluate } = await connect();
+  let target = null;
   try {
-    const target = await evaluate(`(async () => {
+    target = await evaluate(`(async () => {
       let project = document.querySelector('.project-item.active') || document.querySelector('.project-item');
+      let createdProject = false;
       if (!project) {
+        createdProject = true;
         document.getElementById('add-project-btn').click();
         document.getElementById('project-name-input').value = 'Agent notification check';
-        document.getElementById('project-path-input').value = 'D:\\\\work\\\\project-mixer';
+        document.getElementById('project-path-input').value = ${projectRoot};
         document.getElementById('project-confirm-btn').click();
         await new Promise((resolve) => setTimeout(resolve, 250));
         project = document.querySelector('.project-item.active') || document.querySelector('.project-item');
@@ -63,13 +71,15 @@ async function main() {
       project.click();
       await new Promise((resolve) => setTimeout(resolve, 250));
       let terminalTab = document.querySelector('.tab.main-tab');
+      let createdTerminal = false;
       let createError = null;
       if (!terminalTab) {
+        createdTerminal = true;
         try {
           await Promise.race([
             window.__pmDispatch('create_terminal', {
-              command: 'pwsh.exe',
-              cwd: 'D:\\\\work\\\\project-mixer',
+              command: ${shell},
+              cwd: ${projectRoot},
               projectId: project.dataset.projectId,
               label: 'Notification check',
             }),
@@ -82,20 +92,32 @@ async function main() {
       }
       if (!terminalTab) return { error: createError || 'terminal unavailable' };
       window.__pmDispatch('open_file', {
-        path: 'D:\\\\work\\\\project-mixer\\\\renderer.js',
+        path: ${rendererPath},
         name: 'renderer.js',
       });
       await new Promise((resolve) => setTimeout(resolve, 250));
-      return { ptyId: Number(terminalTab.dataset.ptyId), tabId: terminalTab.dataset.id };
+      return {
+        ptyId: Number(terminalTab.dataset.ptyId),
+        tabId: terminalTab.dataset.id,
+        projectId: project.dataset.projectId,
+        createdProject,
+        createdTerminal,
+        filePath: ${rendererPath},
+      };
     })()`);
     assert.ok(target?.ptyId, `An active project and terminal are required: ${JSON.stringify(target)}`);
 
+    const token = await evaluate(`window.api.hookTestToken(${target.ptyId})`);
+    assert.ok(token, 'The test hook token was not available');
     const response = await fetch(`http://127.0.0.1:${hookPort}/hook`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Project-Mixer-Hook': token,
+      },
       body: JSON.stringify({ hook_event_type: 'Stop', pty_id: target.ptyId }),
     });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 200, `hook token was not accepted for PTY ${target.ptyId}`);
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const beforeSeen = await evaluate(`(() => {
@@ -120,6 +142,15 @@ async function main() {
     assert.match(afterSeen.projectStatus, /idle/);
     console.log('[agent-notification-ui-check] hook delivery, unread badge, and seen transition passed');
   } finally {
+    if (target?.createdTerminal && target.tabId) {
+      await evaluate(`window.__pmDispatch('close_terminal', { tabId: ${JSON.stringify(target.tabId)} })`).catch(() => {});
+    }
+    if (target?.filePath) {
+      await evaluate(`window.__pmDispatch('close_tab', { filePath: ${JSON.stringify(target.filePath)} })`).catch(() => {});
+    }
+    if (target?.createdProject && target.projectId) {
+      await evaluate(`window.__pmDispatch('remove_project', { projectId: ${JSON.stringify(target.projectId)} })`).catch(() => {});
+    }
     socket.close();
   }
 }

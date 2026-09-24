@@ -4,18 +4,33 @@ const os = require('os');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const http = require('http');
+const crypto = require('crypto');
+const { execFileSync, spawn } = require('child_process');
+const { fileURLToPath, pathToFileURL } = require('url');
 const pty = require('node-pty');
-const { execSync, spawn } = require('child_process');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
 const { PLUGIN_SOURCE: OPENCODE_PLUGIN_SOURCE } = require('./src/main/opencode-plugin-source.cjs');
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
 const { buildResumeArgs } = require('./src/main/resume-args.cjs');
-const { buildPortRecord, writeJsonAtomic } = require('./src/ports/state.cjs');
+const { buildPortRecord, writeJsonAtomic, writeTextAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
-const { readConfig, writeConfig, validateProjects, validateLayout, ConfigParseError } = require('./src/main/config-service.cjs');
+const { readConfig, writeConfig, validateProjects, validateLayout, validateSettings, ConfigParseError } = require('./src/main/config-service.cjs');
 const { normalizeAgentNotification, resolveNotificationTarget } = require('./src/main/agent-notification-service.cjs');
 const { DevinSessionMonitor } = require('./src/main/devin-session-monitor.cjs');
+const { assertPathString, resolveProjectPath, resolveProjectRoot } = require('./src/main/path-safety.cjs');
+
+function normalizeCommandName(command) {
+  return String(command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+}
+
+function canonicalProjectPath(value) {
+  try {
+    return fs.realpathSync.native(path.resolve(value));
+  } catch {
+    return path.resolve(value);
+  }
+}
 
 // --- Profile separation (Phase 0.1) ---
 // --dev flag or PM_PROFILE env var selects a separate userData directory
@@ -27,6 +42,17 @@ if (IS_DEV) {
   app.setPath('userData', path.join(path.dirname(defaultUserData), 'Project Mixer Dev'));
 }
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock({ profile: PROFILE });
+if (!hasSingleInstanceLock) app.quit();
+
+app.on('second-instance', (_event, additionalData) => {
+  if (additionalData?.profile && additionalData.profile !== PROFILE) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 let mainWindow;
 let applicationMenu;
 const ptys = new Map(); // id -> { process, cwd, command }
@@ -36,32 +62,82 @@ let ptyCounter = 0;
 // Base port differs by profile; actual port is auto-selected and written to a file
 const BASE_PORT = IS_DEV ? 47842 : 47832;
 const MCP_BASE_PORT = IS_DEV ? 47852 : 47822;
-let HOOK_PORT = null; // set only after the hook server is listening
-let MCP_PORT = null; // set only after the MCP server is listening
+let HOOK_PORT = null;
+let MCP_PORT = null;
+let hookServer = null;
 let mcpControl = null;
 let devinMonitor = null;
+let runtimeStarted = false;
+let shutdownPromise = null;
 let resolveMcpReady;
-const mcpReady = new Promise((resolve) => { resolveMcpReady = resolve; });
+let resolveHookReady;
+let rejectHookReady;
+let mcpReady = Promise.resolve(null);
+let hookReady = Promise.resolve(null);
+let mcpReadyResult = mcpReady;
+let hookReadyResult = hookReady;
+const pendingPtyCreates = new Set();
+const hookTokens = new Map();
+
+function resetServiceReadiness() {
+  mcpReady = new Promise((resolve) => { resolveMcpReady = resolve; });
+  mcpReadyResult = mcpReady;
+  hookReady = new Promise((resolve, reject) => {
+    resolveHookReady = resolve;
+    rejectHookReady = reject;
+  });
+  hookReadyResult = hookReady.catch((error) => {
+    console.error('[Project Mixer] Hook server unavailable:', error.message);
+    return null;
+  });
+}
+
+resetServiceReadiness();
 
 const configDir = path.join(app.getPath('userData'), 'project-mixer');
 const projectsFile = path.join(configDir, 'projects.json');
 const layoutFile = path.join(configDir, 'layout.json');
 const portFile = path.join(configDir, 'port.json');
 const settingsFile = path.join(configDir, 'settings.json');
-// Session-resume mode: 'ask' shows the confirm modal per new agent tab;
-// 'auto' resumes silently when a previous session is known.
 let appSettings = { resumeMode: 'ask' };
+let settingsCorrupt = false;
+let layoutCorrupt = false;
+
+function validateAppSettings(value) {
+  if (value === null) value = { resumeMode: 'ask' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, message: 'settings.json must contain an object' };
+  }
+  const validation = validateSettings(value);
+  if (!validation.ok) return validation;
+  return { ok: true, value: { ...validation.value, resumeMode: validation.value.resumeMode || 'ask' } };
+}
+
 function loadAppSettings() {
   try {
     const data = readConfig(settingsFile, { resumeMode: 'ask' });
-    if (data && typeof data === 'object' && (data.resumeMode === 'ask' || data.resumeMode === 'auto')) {
-      appSettings = data;
-    }
+    const validation = validateAppSettings(data);
+    if (!validation.ok) throw new ConfigParseError(settingsFile, new Error(validation.message));
+    appSettings = validation.value;
   } catch (e) {
-    console.warn(`[Project Mixer] ${e.message}; using default settings`);
+    settingsCorrupt = true;
+    console.error(`[Project Mixer] ${e.message}; settings were not modified`);
+    dialog.showErrorBox(
+      'Project Mixer — corrupt settings',
+      `${e.message}\n\nThe original file was preserved. Repair or remove it, then relaunch.`,
+    );
+    app.quit();
   }
 }
+
 function saveAppSettings() {
+  if (settingsCorrupt) throw new Error('settings.json is corrupt; repair it before changing settings');
+  const current = validateAppSettings(readConfig(settingsFile, { resumeMode: 'ask' }));
+  if (!current.ok) {
+    settingsCorrupt = true;
+    throw new Error(`settings.json is invalid: ${current.message}`);
+  }
+  appSettings = { ...current.value, resumeMode: appSettings.resumeMode };
   ensureConfigDir();
   writeConfig(settingsFile, appSettings);
 }
@@ -97,6 +173,7 @@ function loadLayoutConfig() {
     const data = readConfig(layoutFile, null);
     const validation = validateLayout(data);
     if (!validation.ok) {
+      layoutCorrupt = true;
       console.error(`[config] layout.json invalid: ${validation.message}`);
       return null;
     }
@@ -105,7 +182,8 @@ function loadLayoutConfig() {
     // A corrupt layout is non-fatal — log and use null rather than blocking
     // startup. The user can still work; layout resets to defaults.
     if (e instanceof ConfigParseError) {
-      console.error(`[config] ${e.message} — continuing with default layout`);
+      layoutCorrupt = true;
+      console.error(`[config] ${e.message} — continuing without overwriting it`);
       return null;
     }
     throw e;
@@ -113,19 +191,32 @@ function loadLayoutConfig() {
 }
 
 function saveProjectsConfig(projects) {
+  const validation = validateProjects(projects);
+  if (!validation.ok) throw new Error(`Refusing to persist invalid projects.json: ${validation.message}`);
+  if (fs.existsSync(projectsFile)) loadProjectsConfig();
   ensureConfigDir();
-  writeConfig(projectsFile, projects);
+  writeConfig(projectsFile, validation.value);
 }
 
 function saveLayoutConfig(layout) {
+  if (layoutCorrupt) throw new Error('layout.json is corrupt; repair or remove it before saving layout');
+  const validation = validateLayout(layout);
+  if (!validation.ok) throw new Error(`Refusing to persist invalid layout.json: ${validation.message}`);
+  if (fs.existsSync(layoutFile)) {
+    const current = validateLayout(readConfig(layoutFile, null));
+    if (!current.ok) {
+      layoutCorrupt = true;
+      throw new Error(`Refusing to overwrite invalid layout.json: ${current.message}`);
+    }
+  }
   ensureConfigDir();
-  writeConfig(layoutFile, layout);
+  writeConfig(layoutFile, validation.value);
 }
 
 // --- Port discovery (Phase 0.2) ---
 // The actual hook server retries binding; port.json is written only after
 // successful listen, eliminating the race between test-bind and real-bind.
-function startHookServerWithRetry(server, port, maxRetries, onReady) {
+function startHookServerWithRetry(server, port, maxRetries, onReady, onFailed) {
   server.listen(port, '127.0.0.1');
   server.on('error', function onError(e) {
     if (e.code === 'EADDRINUSE' && port - BASE_PORT < maxRetries) {
@@ -133,16 +224,44 @@ function startHookServerWithRetry(server, port, maxRetries, onReady) {
       server.listen(port, '127.0.0.1');
     } else if (e.code === 'EADDRINUSE') {
       console.error(`[Project Mixer] Hook server: no available port after ${maxRetries} retries from ${BASE_PORT}.`);
+      if (onFailed) onFailed(e);
     } else {
       console.error('Hook server error:', e);
+      if (onFailed) onFailed(e);
     }
   });
   server.on('listening', () => {
     HOOK_PORT = server.address().port;
     console.log(`[Project Mixer] Profile: ${PROFILE}, Hook port: ${HOOK_PORT}`);
     savePortJson();
-    if (onReady) onReady();
+    if (onReady) onReady(HOOK_PORT);
   });
+}
+
+const mainIndexPath = path.join(__dirname, 'index.html');
+
+function isMainDocumentUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'file:') return false;
+    const actualPath = path.resolve(fileURLToPath(parsed));
+    const expectedPath = path.resolve(mainIndexPath);
+    return process.platform === 'win32'
+      ? actualPath.toLowerCase() === expectedPath.toLowerCase()
+      : actualPath === expectedPath;
+  } catch {
+    return false;
+  }
+}
+
+function assertTrustedMainIpcEvent(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main window is unavailable');
+  if (event?.sender !== mainWindow.webContents) throw new Error('Untrusted IPC sender');
+  if (!event.senderFrame || event.senderFrame !== mainWindow.webContents.mainFrame) {
+    throw new Error('Untrusted IPC sender frame');
+  }
+  const frameUrl = event.senderFrame.url || mainWindow.webContents.getURL();
+  if (!isMainDocumentUrl(frameUrl)) throw new Error('Untrusted IPC origin');
 }
 
 function createWindow() {
@@ -164,11 +283,18 @@ function createWindow() {
     },
   });
 
-  mainWindow.loadFile('index.html');
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const blockUnexpectedNavigation = (event, url) => {
+    if (!isMainDocumentUrl(url)) event.preventDefault();
+  };
+  mainWindow.webContents.on('will-navigate', blockUnexpectedNavigation);
+  mainWindow.webContents.on('will-redirect', blockUnexpectedNavigation);
+  mainWindow.loadFile(mainIndexPath);
   setupApplicationMenu();
 
-  // Kill all active search processes when the window is closed.
   mainWindow.on('closed', () => {
+    mainWindow = null;
+    for (const pending of pendingPtyCreates) pending.cancelled = true;
     for (const [, proc] of activeSearches.entries()) {
       try { proc.process.kill(); } catch {}
     }
@@ -326,34 +452,61 @@ function setupApplicationMenu() {
   Menu.setApplicationMenu(applicationMenu);
 }
 
-ipcMain.handle('menu:popup', (event, { x, y } = {}) => {
-  const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+ipcMain.handle('menu:popup', (event, payload = {}) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload !== 'object' || (payload.x !== undefined && !Number.isFinite(payload.x))
+    || (payload.y !== undefined && !Number.isFinite(payload.y))) {
+    throw new TypeError('menu:popup payload is invalid');
+  }
+  const ownerWindow = mainWindow;
   if (!applicationMenu || !ownerWindow || ownerWindow.isDestroyed()) return false;
   return new Promise((resolve) => {
     const options = {
       window: ownerWindow,
       callback: () => resolve(true),
     };
-    if (Number.isFinite(x)) options.x = Math.round(x);
-    if (Number.isFinite(y)) options.y = Math.round(y);
+    if (Number.isFinite(payload.x)) options.x = Math.round(payload.x);
+    if (Number.isFinite(payload.y)) options.y = Math.round(payload.y);
     applicationMenu.popup(options);
   });
 });
 
+function createDevinMonitor() {
+  return new DevinSessionMonitor({
+    token: process.env.DEVIN_API_TOKEN,
+    orgId: process.env.DEVIN_ORG_ID,
+    baseUrl: process.env.DEVIN_API_BASE_URL,
+    onLifecycleEvent: forwardAgentLifecycleEvent,
+    onError: forwardDevinMonitorError,
+  });
+}
+
+function startRuntimeServices() {
+  if (runtimeStarted) return;
+  runtimeStarted = true;
+  resetServiceReadiness();
+  startHookServer();
+  mcpControl = startMcpServer(MCP_BASE_PORT, async (commandName, args = {}, sessionContext = null) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return { error: 'no window' };
+    const commandArgs = sessionContext ? { ...args, $session: sessionContext } : args;
+    return await mainWindow.webContents.executeJavaScript(
+      `window.__pmDispatch && window.__pmDispatch(${JSON.stringify(commandName)}, ${JSON.stringify(commandArgs)})`
+    );
+  }, (port) => {
+    MCP_PORT = port;
+    resolveMcpReady(port);
+    console.log(`[Project Mixer] MCP port: ${MCP_PORT}`);
+    savePortJson();
+  }, () => {
+    resolveMcpReady(null);
+  });
+}
+
 app.whenReady().then(() => {
-  // Windows toast notifications require an AppUserModelID so the notification
-  // shows the correct app name and icon. Without this, Windows falls back to
-  // a generic "Electron" label. Must be set before any Notification is shown.
-    if (process.platform === 'win32') {
-      app.setAppUserModelId('com.projectmixer.app');
-    }
-
-    loadAppSettings();
-
-
-  // R4: startup guard — if projects.json is corrupt, stop startup and show
-  // an error dialog instead of overwriting the corrupt file with defaults.
-  // Per R1 decision #2, the app does not start in a read-only mode.
+  if (!hasSingleInstanceLock) return;
+  if (process.platform === 'win32') app.setAppUserModelId('com.projectmixer.app');
+  loadAppSettings();
+  if (settingsCorrupt) return;
   try {
     loadProjectsConfig();
   } catch (e) {
@@ -368,35 +521,58 @@ app.whenReady().then(() => {
     throw e;
   }
   createWindow();
-  devinMonitor = new DevinSessionMonitor({
-    token: process.env.DEVIN_API_TOKEN,
-    orgId: process.env.DEVIN_ORG_ID,
-    baseUrl: process.env.DEVIN_API_BASE_URL,
-    onLifecycleEvent: forwardAgentLifecycleEvent,
-    onError: forwardDevinMonitorError,
-  });
-  startHookServer();
-  // Start MCP server (Phase 1.3) — port written to port.json for discovery
-  mcpControl = startMcpServer(MCP_BASE_PORT, async (commandName, args = {}, sessionContext = null) => {
-    // Dispatch commands to the renderer via executeJavaScript
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      return { error: 'no window' };
-    }
-    const commandArgs = sessionContext ? { ...args, $session: sessionContext } : args;
-    return await mainWindow.webContents.executeJavaScript(
-      `window.__pmDispatch && window.__pmDispatch(${JSON.stringify(commandName)}, ${JSON.stringify(commandArgs)})`
-    );
-  }, (port) => {
-    MCP_PORT = port;
-    resolveMcpReady(port);
-    console.log(`[Project Mixer] MCP port: ${MCP_PORT}`);
-    savePortJson();
-  }, () => {
-    // MCP is optional for local editing. A bind failure must not prevent the
-    // terminal itself from opening.
-    resolveMcpReady(null);
-  });
+  devinMonitor = createDevinMonitor();
+  startRuntimeServices();
 });
+
+app.on('activate', async () => {
+  if (!hasSingleInstanceLock || !app.isReady() || (mainWindow && !mainWindow.isDestroyed())) return;
+  if (shutdownPromise) await shutdownPromise;
+  if (mainWindow && !mainWindow.isDestroyed()) return;
+  createWindow();
+  devinMonitor = createDevinMonitor();
+  startRuntimeServices();
+});
+
+async function shutdownRuntimeServices() {
+  if (shutdownPromise) return shutdownPromise;
+  const promise = (async () => {
+    for (const pending of pendingPtyCreates) pending.cancelled = true;
+    for (const [, record] of ptys) {
+      try { record.process.kill(); } catch {}
+      if (record.hookToken) hookTokens.delete(record.hookToken);
+      if (record.mcpToken) await mcpControl?.revokeSession(record.mcpToken);
+    }
+    ptys.clear();
+    for (const [, record] of activeSearches) {
+      try { record.process.kill(); } catch {}
+    }
+    activeSearches.clear();
+    devinMonitor?.dispose();
+    devinMonitor = null;
+    resolveMcpReady?.(null);
+    resolveHookReady?.(null);
+    if (mcpControl) await mcpControl.close();
+    mcpControl = null;
+    if (hookServer) {
+      await new Promise((resolve) => {
+        try {
+          hookServer.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      });
+    }
+    hookServer = null;
+    HOOK_PORT = null;
+    MCP_PORT = null;
+    runtimeStarted = false;
+  })();
+  shutdownPromise = promise;
+  return promise.finally(() => {
+    if (shutdownPromise === promise) shutdownPromise = null;
+  });
+}
 
 // --- Atomic port.json writer ---
 // Both hook server and MCP server call this when they become ready.
@@ -412,158 +588,277 @@ function savePortJson() {
   }));
 }
 
-app.on('window-all-closed', () => {
-  ptys.forEach((p) => {
-    p.process.kill();
-    if (p.mcpToken) void mcpControl?.revokeSession(p.mcpToken);
-  });
-  ptys.clear();
-  devinMonitor?.dispose();
+app.on('window-all-closed', async () => {
+  await shutdownRuntimeServices();
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('pty:create', async (event, { command, args, cwd, projectId, cols, rows, resumeSessionId }) => {
+function validatePtyPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new TypeError('PTY payload must be an object');
+  }
+  const command = payload.command ?? null;
+  if (command !== null && (typeof command !== 'string' || !command.trim() || command.length > 512 || command.includes('\0'))) {
+    throw new TypeError('PTY command is invalid');
+  }
+  const args = payload.args ?? [];
+  if (!Array.isArray(args) || args.length > 256 || args.some((arg) => typeof arg !== 'string' || arg.length > 1024 || arg.includes('\0'))) {
+    throw new TypeError('PTY args are invalid');
+  }
+  const cwd = payload.cwd ?? os.homedir();
+  assertPathString(cwd, 'PTY cwd');
+  if (!fs.statSync(cwd).isDirectory()) throw new TypeError('PTY cwd must be a directory');
+  const projectId = payload.projectId ?? null;
+  if (projectId !== null && (typeof projectId !== 'string' || !projectId.trim() || projectId.length > 200)) {
+    throw new TypeError('PTY projectId is invalid');
+  }
+  const cols = payload.cols ?? 80;
+  const rows = payload.rows ?? 30;
+  if (!Number.isInteger(cols) || cols < 1 || cols > 1000 || !Number.isInteger(rows) || rows < 1 || rows > 1000) {
+    throw new TypeError('PTY dimensions are invalid');
+  }
+  const resumeSessionId = payload.resumeSessionId ?? null;
+  if (resumeSessionId !== null && (typeof resumeSessionId !== 'string' || resumeSessionId.length > 512 || resumeSessionId.includes('\0'))) {
+    throw new TypeError('PTY resumeSessionId is invalid');
+  }
+  const projects = loadProjectsConfig();
+  if (projectId !== null) {
+    const project = projects.find((candidate) => candidate.id === projectId);
+    if (!project) throw new Error('PTY project is not configured');
+    const owned = resolveProjectPath(projects, cwd, { allowRoot: true, requireExisting: true, type: 'directory' });
+    if (owned.project.id !== projectId) throw new Error('PTY cwd is outside its project');
+  } else if (cwd !== os.homedir()) {
+    resolveProjectPath(projects, cwd, { allowRoot: true, requireExisting: true, type: 'directory' });
+  }
+  return { command, args, cwd: path.resolve(cwd), projectId, cols, rows, resumeSessionId };
+}
+
+ipcMain.handle('pty:create', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  const options = validatePtyPayload(payload);
   const id = ++ptyCounter;
-  const shellCwd = cwd || os.homedir();
-  const mcpPort = MCP_PORT || await mcpReady;
-  const mcpToken = mcpPort ? mcpControl.registerSession({
-      ptyId: id,
-      projectId: projectId || null,
-      cwd: shellCwd,
-    }) : null;
-  const mcpUrl = mcpToken ? `http://127.0.0.1:${mcpPort}/s/${mcpToken}` : null;
-  const requestedArgs = args || [];
-  // Resume-previous-session: prepend the agent's resume flags before
-  // user-supplied args (they compose with the MCP injection args).
-  const resumeArgs = buildResumeArgs(command, resumeSessionId);
-  const effectiveArgs = resumeArgs ? [...resumeArgs, ...requestedArgs] : requestedArgs;
-  const agentMcpArgs = buildAgentMcpArgs(command, mcpUrl);
+  const pending = { cancelled: false };
+  pendingPtyCreates.add(pending);
+  let mcpToken = null;
+  let hookToken = null;
+  try {
+    const [mcpPort, hookPort] = await Promise.all([
+      MCP_PORT || mcpReadyResult,
+      HOOK_PORT ? Promise.resolve(HOOK_PORT) : hookReadyResult,
+    ]);
+    if (pending.cancelled || !mainWindow || mainWindow.isDestroyed()) throw new Error('PTY creation cancelled');
+    if (mcpPort && !mcpControl) throw new Error('MCP server is unavailable');
+    if (mcpPort) {
+      mcpToken = mcpControl.registerSession({
+        ptyId: id,
+        projectId: options.projectId,
+        cwd: options.cwd,
+      });
+    }
+    const mcpUrl = mcpToken ? `http://127.0.0.1:${mcpPort}/s/${mcpToken}` : null;
+    const resumeArgs = buildResumeArgs(options.command, options.resumeSessionId);
+    const effectiveArgs = resumeArgs ? [...resumeArgs, ...options.args] : options.args;
+    const agentMcpArgs = buildAgentMcpArgs(options.command, mcpUrl);
 
-  const isWin = os.platform() === 'win32';
-  const winShells = ['pwsh.exe', 'powershell.exe', 'cmd.exe', 'wsl.exe'];
-  const unixShells = ['bash', 'zsh', 'sh'];
+    const isWin = os.platform() === 'win32';
+    const winShells = ['pwsh', 'powershell', 'cmd', 'wsl'];
+    const unixShells = ['bash', 'zsh', 'sh'];
+    const commandName = options.command ? normalizeCommandName(options.command) : '';
 
-  let shell, shellArgs;
-  if (!command) {
-    shell = isWin ? 'pwsh.exe' : 'bash';
-    shellArgs = effectiveArgs;
-  } else if (isWin && winShells.includes(command)) {
-    shell = command;
-    shellArgs = effectiveArgs;
-  } else if (!isWin && unixShells.includes(command)) {
-    shell = command;
-    shellArgs = effectiveArgs;
-  } else {
-    // claude, codex, etc. — wrap in pwsh -NoExit -Command on Windows
-    if (isWin) {
+    let shell;
+    let shellArgs;
+    if (!options.command) {
+      shell = isWin ? 'pwsh.exe' : 'bash';
+      shellArgs = effectiveArgs;
+    } else if ((isWin && winShells.includes(commandName)) || (!isWin && unixShells.includes(commandName))) {
+      shell = options.command;
+      shellArgs = effectiveArgs;
+    } else if (isWin) {
       shell = 'pwsh.exe';
       shellArgs = [
         '-NoExit',
         '-Command',
-        buildPowerShellInvocation(command, [...effectiveArgs, ...agentMcpArgs]),
+        buildPowerShellInvocation(options.command, [...effectiveArgs, ...agentMcpArgs]),
       ];
     } else {
-      shell = command;
+      shell = options.command;
       shellArgs = [...effectiveArgs, ...agentMcpArgs];
     }
-  }
 
-  let ptyProcess;
-  try {
-    // OpenCode uses OPENCODE_CONFIG_CONTENT env var for runtime config overrides
-    // (not CLI args). Inject MCP server config so OpenCode discovers the session.
-    const opencodeEnv = (mcpUrl && command === 'opencode')
+    hookToken = hookPort ? crypto.randomBytes(32).toString('base64url') : null;
+    const opencodeEnv = mcpUrl && commandName === 'opencode'
       ? { OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp: { 'project-mixer': { type: 'remote', url: mcpUrl, enabled: true } } }) }
       : {};
-    ptyProcess = pty.spawn(shell, shellArgs, {
+    const ptyProcess = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
-      cols: cols || 80,
-      rows: rows || 30,
-      cwd: shellCwd,
+      cols: options.cols,
+      rows: options.rows,
+      cwd: options.cwd,
       env: {
         ...process.env,
         TERM: 'xterm-256color',
         PROJECT_MIXER_PORT_FILE: portFile,
         PROJECT_MIXER_PTY_ID: String(id),
-        // 3.5: inject a per-PTY MCP URL so agents discover only their session.
         ...(mcpUrl ? { PM_MCP_URL: mcpUrl } : {}),
-        // OpenCode plugin bridge: POST /hook target for lifecycle events
-        // (session.status idle -> stop, permission.asked, question.asked).
-        ...(HOOK_PORT ? { PM_HOOK_URL: `http://127.0.0.1:${HOOK_PORT}/hook` } : {}),
+        ...(hookPort ? {
+          PM_HOOK_URL: `http://127.0.0.1:${hookPort}/hook`,
+          PM_HOOK_TOKEN: hookToken,
+        } : {}),
         ...opencodeEnv,
       },
     });
+
+    if (pending.cancelled || !mainWindow || mainWindow.isDestroyed()) {
+      ptyProcess.kill();
+      throw new Error('PTY creation cancelled');
+    }
+    const ptyRecord = {
+      process: ptyProcess,
+      cwd: options.cwd,
+      command: options.command || shell,
+      mcpToken,
+      hookToken,
+      ready: false,
+      pendingData: [],
+      pendingExit: null,
+    };
+    ptys.set(id, ptyRecord);
+    if (hookToken) hookTokens.set(hookToken, id);
+
+    ptyProcess.onData((data) => {
+      const record = ptys.get(id);
+      if (!record) return;
+      if (!record.ready) {
+        record.pendingData.push(data);
+        return;
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pty:data', { id, data });
+    });
+
+    ptyProcess.onExit(({ exitCode, signal }) => {
+      const record = ptys.get(id);
+      if (!record) return;
+      devinMonitor?.unbind(id);
+      if (record.hookToken) hookTokens.delete(record.hookToken);
+      void mcpControl?.revokeSession(record.mcpToken);
+      if (!record.ready) {
+        record.pendingExit = { exitCode, signal };
+        return;
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('pty:exit', { id, exitCode, signal });
+      }
+      ptys.delete(id);
+    });
+
+    return id;
   } catch (error) {
-    if (mcpToken) await mcpControl.revokeSession(mcpToken);
+    if (hookToken) hookTokens.delete(hookToken);
+    if (mcpToken) await mcpControl?.revokeSession(mcpToken);
     throw error;
+  } finally {
+    pendingPtyCreates.delete(pending);
   }
+});
 
-  ptyProcess.onData((data) => {
+ipcMain.handle('hook:test-token', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!IS_DEV || process.env.PM_TEST_MODE !== '1') throw new Error('Hook test token access is disabled');
+  if (!payload || !Number.isInteger(payload.ptyId) || payload.ptyId <= 0) throw new TypeError('PTY id is invalid');
+  return ptys.get(payload.ptyId)?.hookToken || null;
+});
+
+ipcMain.handle('pty:attach', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.id) || payload.id <= 0) throw new TypeError('PTY id is invalid');
+  const record = ptys.get(payload.id);
+  if (!record) return false;
+  if (record.ready) return true;
+  record.ready = true;
+  for (const data of record.pendingData) {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pty:data', { id: payload.id, data });
+  }
+  record.pendingData.length = 0;
+  if (record.pendingExit) {
+    const { exitCode, signal } = record.pendingExit;
+    record.pendingExit = null;
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('pty:data', { id, data });
+      mainWindow.webContents.send('pty:exit', { id: payload.id, exitCode, signal });
     }
-  });
-
-  ptyProcess.onExit(({ exitCode, signal }) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('pty:exit', { id, exitCode, signal });
-    }
-    ptys.delete(id);
-    devinMonitor?.unbind(id);
-    void mcpControl?.revokeSession(mcpToken);
-  });
-
-  ptys.set(id, { process: ptyProcess, cwd: shellCwd, command: command || shell, mcpToken });
-  return id;
+    ptys.delete(payload.id);
+    if (record.hookToken) hookTokens.delete(record.hookToken);
+  }
+  return true;
 });
 
-ipcMain.handle('pty:write', (event, { id, data }) => {
-  const p = ptys.get(id);
-  if (p) p.process.write(data);
+ipcMain.handle('pty:write', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.id) || payload.id <= 0 || typeof payload.data !== 'string') {
+    throw new TypeError('PTY write payload is invalid');
+  }
+  if (payload.data.length > 1024 * 1024) throw new TypeError('PTY write payload is too large');
+  const p = ptys.get(payload.id);
+  if (p) p.process.write(payload.data);
 });
 
-ipcMain.handle('pty:resize', (event, { id, cols, rows }) => {
-  const p = ptys.get(id);
-  if (p) p.process.resize(cols, rows);
+ipcMain.handle('pty:resize', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.id) || payload.id <= 0
+    || !Number.isInteger(payload.cols) || payload.cols < 1 || payload.cols > 1000
+    || !Number.isInteger(payload.rows) || payload.rows < 1 || payload.rows > 1000) {
+    throw new TypeError('PTY resize payload is invalid');
+  }
+  const p = ptys.get(payload.id);
+  if (p) p.process.resize(payload.cols, payload.rows);
 });
 
-ipcMain.handle('pty:kill', (event, { id }) => {
-  const p = ptys.get(id);
+ipcMain.handle('pty:kill', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.id) || payload.id <= 0) throw new TypeError('PTY id is invalid');
+  const p = ptys.get(payload.id);
   if (p) {
-    p.process.kill();
-    ptys.delete(id);
-    devinMonitor?.unbind(id);
+    try { p.process.kill(); } catch {}
+    ptys.delete(payload.id);
+    devinMonitor?.unbind(payload.id);
+    if (p.hookToken) hookTokens.delete(p.hookToken);
     if (p.mcpToken) void mcpControl?.revokeSession(p.mcpToken);
   }
 });
 
-ipcMain.handle('devin:bind', async (event, { ptyId, sessionId }) => {
-  const terminal = ptys.get(ptyId);
+ipcMain.handle('devin:bind', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.ptyId) || payload.ptyId <= 0
+    || typeof payload.sessionId !== 'string' || !payload.sessionId.trim() || payload.sessionId.length > 512) {
+    throw new TypeError('Devin bind payload is invalid');
+  }
+  const terminal = ptys.get(payload.ptyId);
   if (!terminal) return { ok: false, error: 'The terminal is no longer running.' };
-  const executable = path.basename(String(terminal.command || '')).replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
+  const executable = normalizeCommandName(terminal.command);
   if (executable !== 'devin') {
     return { ok: false, error: 'A Devin Cloud session can only be bound to a Devin terminal.' };
   }
   if (!devinMonitor) return { ok: false, error: 'The Devin monitor is unavailable.' };
-  return devinMonitor.bind({ ptyId, sessionId });
+  return devinMonitor.bind({ ptyId: payload.ptyId, sessionId: payload.sessionId });
 });
 
-ipcMain.handle('devin:unbind', (event, { ptyId }) => ({
-  ok: Boolean(devinMonitor?.unbind(ptyId)),
-}));
+ipcMain.handle('devin:unbind', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.ptyId) || payload.ptyId <= 0) throw new TypeError('PTY id is invalid');
+  return { ok: Boolean(devinMonitor?.unbind(payload.ptyId)) };
+});
 
-ipcMain.handle('window:focus', async () => {
+ipcMain.handle('window:focus', async (event) => {
+  assertTrustedMainIpcEvent(event);
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
 });
 
-ipcMain.handle('mem:get', async () => {
+ipcMain.handle('mem:get', async (event) => {
+  assertTrustedMainIpcEvent(event);
   const metrics = app.getAppMetrics();
   let totalKB = 0;
-  for (const m of metrics) {
-    totalKB += m.memory.workingSetSize;
-  }
+  for (const m of metrics) totalKB += m.memory.workingSetSize;
   return {
     workingSetMB: Math.round(totalKB / 1024),
     ptyCount: ptys.size,
@@ -572,35 +867,38 @@ ipcMain.handle('mem:get', async () => {
 
 // --- Command availability check ---
 
-ipcMain.handle('settings:get', () => ({ ...appSettings }));
+ipcMain.handle('settings:get', (event) => {
+  assertTrustedMainIpcEvent(event);
+  return { ...appSettings };
+});
 
-ipcMain.handle('command:check', async (event, { commands }) => {  const result = {};
-  // The --version fallback is restricted to known agent commands that may
-  // be installed as shell functions or aliases not discoverable by where/which.
-  // Allowing arbitrary commands here would let hook data execute any binary.
+ipcMain.handle('command:check', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Array.isArray(payload.commands) || payload.commands.length > 100
+    || payload.commands.some((cmd) => typeof cmd !== 'string' || !cmd.trim() || cmd.length > 256 || cmd.includes('\0'))) {
+    throw new TypeError('command:check payload is invalid');
+  }
+  const result = {};
   const VERSION_FALLBACK_ALLOWED = new Set(['claude', 'codex', 'opencode']);
-  for (const cmd of commands) {
+  for (const cmd of payload.commands) {
     try {
-      if (os.platform() === 'win32') {
-        execSync(`where ${cmd}`, { stdio: 'ignore', timeout: 5000 });
-      } else {
-        execSync(`which ${cmd}`, { stdio: 'ignore', timeout: 5000 });
-      }
+      const locator = os.platform() === 'win32' ? 'where.exe' : 'which';
+      execFileSync(locator, [cmd], { stdio: 'ignore', timeout: 5000 });
       result[cmd] = true;
     } catch (e) {
-      // Fallback: try running the command with --version, but only for
-      // known agent commands (claude, codex) that may be shell functions.
-      if (VERSION_FALLBACK_ALLOWED.has(cmd)) {
+      if (VERSION_FALLBACK_ALLOWED.has(path.basename(cmd).toLowerCase().replace(/\.(exe|cmd|bat)$/i, ''))) {
         try {
+          const executable = path.basename(cmd).toLowerCase().replace(/\.(exe|cmd|bat)$/i, '');
           if (os.platform() === 'win32') {
-            execSync(`pwsh.exe -NoProfile -Command "${cmd} --version"`, { stdio: 'ignore', timeout: 10000 });
+            execFileSync('pwsh.exe', ['-NoProfile', '-Command', `& '${executable}' --version`], { stdio: 'ignore', timeout: 10000 });
           } else {
-            execSync(`${cmd} --version`, { stdio: 'ignore', timeout: 10000 });
+            execFileSync(executable, ['--version'], { stdio: 'ignore', timeout: 10000 });
           }
           result[cmd] = true;
           continue;
-        } catch (e2) {
-          // fall through to false
+        } catch {
+          result[cmd] = false;
+          continue;
         }
       }
       result[cmd] = false;
@@ -612,27 +910,88 @@ ipcMain.handle('command:check', async (event, { commands }) => {  const result =
 // --- Local HTTP server for hook notifications ---
 
 function startHookServer() {
+  const maxBodyBytes = 16 * 1024;
   const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/hook') {
+    const boundPort = server.address()?.port;
+    const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${boundPort || BASE_PORT}`);
+    const allowedHosts = new Set([
+      `127.0.0.1:${boundPort || BASE_PORT}`,
+      `localhost:${boundPort || BASE_PORT}`,
+    ]);
+    if (!allowedHosts.has(req.headers.host) || req.headers.origin) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST' || requestUrl.pathname !== '/hook') {
       res.writeHead(404);
       res.end();
       return;
     }
+    const token = req.headers['x-project-mixer-hook'];
+    const ptyId = typeof token === 'string' ? hookTokens.get(token) : null;
+    if (!ptyId || !ptys.has(ptyId)) {
+      res.writeHead(401);
+      res.end();
+      return;
+    }
+    const declaredLength = Number(req.headers['content-length'] || 0);
+    if (declaredLength > maxBodyBytes) {
+      res.writeHead(413);
+      res.end();
+      return;
+    }
     let body = '';
-    req.on('data', (chunk) => { body += chunk; });
+    let bodyBytes = 0;
+    let rejected = false;
+    req.setTimeout(5000, () => req.destroy());
+    req.on('data', (chunk) => {
+      if (rejected) return;
+      bodyBytes += chunk.length;
+      if (bodyBytes > maxBodyBytes) {
+        rejected = true;
+        res.writeHead(413);
+        res.end();
+        req.destroy();
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
+      if (rejected) return;
+      let data;
       try {
-        const data = JSON.parse(body);
-        handleHookNotification(data);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
+        data = JSON.parse(body);
+      } catch {
         res.writeHead(400);
         res.end('Invalid JSON');
+        return;
       }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        res.writeHead(400);
+        res.end('Invalid hook payload');
+        return;
+      }
+      const payloadPtyId = Number(data.pty_id ?? data.ptyId);
+      if (payloadPtyId !== ptyId) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
+      data.pty_id = ptyId;
+      handleHookNotification(data);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
     });
   });
-  startHookServerWithRetry(server, BASE_PORT, 20);
+  hookServer = server;
+  startHookServerWithRetry(
+    server,
+    BASE_PORT,
+    20,
+    (port) => resolveHookReady(port),
+    (error) => rejectHookReady(error),
+  );
 }
 
 function handleHookNotification(data) {
@@ -681,41 +1040,58 @@ function forwardDevinMonitorError(error) {
 
 // --- Project management ---
 
-ipcMain.handle('project:list', async () => {
+ipcMain.handle('project:list', async (event) => {
+  assertTrustedMainIpcEvent(event);
   try {
     return loadProjectsConfig();
   } catch (e) {
-    // R4: corrupt projects.json — return empty rather than crashing the
-    // renderer. The startup guard below prevents reaching here on launch.
-    return [];
+    if (e instanceof ConfigParseError) return [];
+    throw e;
   }
 });
 
-ipcMain.handle('project:add', async (event, { name, path: projPath }) => {
+ipcMain.handle('project:add', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload !== 'object' || typeof payload.name !== 'string'
+    || !payload.name.trim() || payload.name.length > 200 || typeof payload.path !== 'string'
+    || !payload.path.trim() || payload.path.length > 4096 || !path.isAbsolute(payload.path)) {
+    throw new TypeError('project:add payload is invalid');
+  }
   const projects = loadProjectsConfig();
-  const id = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  projects.push({ id, name, path: projPath });
-  saveProjectsConfig(projects);
-  return projects;
-});
-
-ipcMain.handle('project:remove', async (event, { id }) => {
-  let projects = loadProjectsConfig();
-  projects = projects.filter(p => p.id !== id);
-  saveProjectsConfig(projects);
-  return projects;
-});
-
-ipcMain.handle('project:reorder', async (event, { orderedIds }) => {
-  let projects = loadProjectsConfig();
-  const map = new Map(projects.map(p => [p.id, p]));
-  const reordered = orderedIds
-    .map(id => map.get(id))
-    .filter(Boolean);
-  // Append any projects not in orderedIds (defensive)
-  for (const p of projects) {
-    if (!orderedIds.includes(p.id)) reordered.push(p);
+  const root = resolveProjectRoot([{ id: 'candidate', path: payload.path }], payload.path).target;
+  if (projects.some((project) => path.relative(canonicalProjectPath(project.path), root) === '')) {
+    throw new Error('Project is already configured');
   }
+  const id = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const next = [...projects, { id, name: payload.name.trim(), path: root }];
+  saveProjectsConfig(next);
+  return next;
+});
+
+ipcMain.handle('project:remove', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.id !== 'string' || !payload.id.trim() || payload.id.length > 200) {
+    throw new TypeError('project:remove payload is invalid');
+  }
+  const projects = loadProjectsConfig();
+  saveProjectsConfig(projects.filter((project) => project.id !== payload.id));
+  return projects.filter((project) => project.id !== payload.id);
+});
+
+ipcMain.handle('project:reorder', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Array.isArray(payload.orderedIds) || payload.orderedIds.length > 10000
+    || payload.orderedIds.some((id) => typeof id !== 'string' || !id || id.length > 200)) {
+    throw new TypeError('project:reorder payload is invalid');
+  }
+  const projects = loadProjectsConfig();
+  const ids = new Set(payload.orderedIds);
+  if (ids.size !== payload.orderedIds.length || ids.size !== projects.length
+    || projects.some((project) => !ids.has(project.id))) {
+    throw new Error('project:reorder must contain every project exactly once');
+  }
+  const map = new Map(projects.map((project) => [project.id, project]));
+  const reordered = payload.orderedIds.map((id) => map.get(id));
   saveProjectsConfig(reordered);
   return reordered;
 });
@@ -725,24 +1101,34 @@ ipcMain.handle('project:reorder', async (event, { orderedIds }) => {
 const { isTreeIgnored } = require('./src/files/ignore-patterns.cjs');
 const { buildSearchCommand, parseSearchLine, resolveSearchPath } = require('./src/files/search-command.cjs');
 
-ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
+ipcMain.handle('fs:readDir', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.dirPath !== 'string') throw new TypeError('fs:readDir payload is invalid');
+  const projects = loadProjectsConfig();
+  const start = resolveProjectPath(projects, payload.dirPath, { allowRoot: true, requireExisting: true, type: 'directory' });
   try {
-    const entries = await fsp.readdir(dirPath, { withFileTypes: true });
+    const entries = await fsp.readdir(start.target, { withFileTypes: true });
     const result = [];
     for (const entry of entries) {
       if (isTreeIgnored(entry.name)) continue;
-      result.push({
-        name: entry.name,
-        path: path.join(dirPath, entry.name),
-        isDirectory: entry.isDirectory(),
-      });
+      try {
+        const entryPath = path.join(start.requested, entry.name);
+        resolveProjectPath(projects, entryPath, { allowRoot: false, requireExisting: true });
+        result.push({
+          name: entry.name,
+          path: entryPath,
+          isDirectory: entry.isDirectory(),
+        });
+      } catch {
+        continue;
+      }
     }
     result.sort((a, b) => {
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
     return result;
-  } catch (e) {
+  } catch {
     return [];
   }
 });
@@ -751,20 +1137,25 @@ ipcMain.handle('fs:readDir', async (event, { dirPath }) => {
 // Walks the directory tree recursively (skipping TREE_IGNORE entries)
 // and returns a flat list of all files and directories with depth/parent
 // information. Used by the tree filter to match files in unexpanded folders.
-ipcMain.handle('fs:indexTree', async (event, { dirPath }) => {
+ipcMain.handle('fs:indexTree', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.dirPath !== 'string') throw new TypeError('fs:indexTree payload is invalid');
   const start = Date.now();
+  const projects = loadProjectsConfig();
+  const startPath = resolveProjectPath(projects, payload.dirPath, { allowRoot: true, requireExisting: true, type: 'directory' });
   const files = [];
   const MAX_FILES = 50000;
+  const visitedDirectories = new Set();
 
   async function walk(currentPath, depth, parentPath) {
-    if (files.length >= MAX_FILES) return;
+    if (files.length >= MAX_FILES || visitedDirectories.has(currentPath)) return;
+    visitedDirectories.add(currentPath);
     let entries;
     try {
       entries = await fsp.readdir(currentPath, { withFileTypes: true });
     } catch {
       return;
     }
-    // Sort: directories first, then alphabetical.
     const sorted = entries.slice().sort((a, b) => {
       const aDir = a.isDirectory();
       const bDir = b.isDirectory();
@@ -774,25 +1165,31 @@ ipcMain.handle('fs:indexTree', async (event, { dirPath }) => {
     for (const entry of sorted) {
       if (isTreeIgnored(entry.name)) continue;
       if (files.length >= MAX_FILES) break;
-      const entryPath = path.join(currentPath, entry.name);
-      const isDir = entry.isDirectory();
+      let resolved;
+      try {
+        resolved = resolveProjectPath(projects, path.join(currentPath, entry.name), {
+          allowRoot: false,
+          requireExisting: true,
+        });
+      } catch {
+        continue;
+      }
+      const isDir = fs.statSync(resolved.target).isDirectory();
       files.push({
-        path: entryPath,
+        path: resolved.target,
         name: entry.name,
         isDirectory: isDir,
         depth,
         parentPath,
       });
-      if (isDir) {
-        await walk(entryPath, depth + 1, entryPath);
-      }
+      if (isDir) await walk(resolved.target, depth + 1, resolved.target);
     }
   }
 
   try {
-    await walk(dirPath, 0, null);
+    await walk(startPath.target, 0, null);
     const durationMs = Date.now() - start;
-    console.log(`[fs:indexTree] ${files.length} entries indexed in ${durationMs}ms for ${dirPath}`);
+    console.log(`[fs:indexTree] ${files.length} entries indexed in ${durationMs}ms for ${startPath.target}`);
     return { files, count: files.length, durationMs, truncated: files.length >= MAX_FILES };
   } catch (e) {
     return { files: [], count: 0, durationMs: Date.now() - start, truncated: false, error: e.message };
@@ -806,135 +1203,143 @@ ipcMain.handle('fs:indexTree', async (event, { dirPath }) => {
 // Check if a command is available on the system.
 function checkCommandAvailable(cmd) {
   try {
-    if (process.platform === 'win32') {
-      execSync(`where ${cmd}`, { stdio: 'ignore', timeout: 5000 });
-    } else {
-      execSync(`which ${cmd}`, { stdio: 'ignore', timeout: 5000 });
-    }
+    const locator = process.platform === 'win32' ? 'where.exe' : 'which';
+    execFileSync(locator, [cmd], { stdio: 'ignore', timeout: 5000 });
     return true;
   } catch {
     return false;
   }
 }
 
-// Active search processes, keyed by searchId. Used to cancel stale searches.
 const activeSearches = new Map();
 let searchIdCounter = 0;
 
-// Cancel an in-flight search by searchId. Kills the process and sends
-// search:done with cancelled: true.
-ipcMain.handle('search:cancel', async (event, { searchId }) => {
-  const proc = activeSearches.get(searchId);
-  if (!proc) return { cancelled: false };
-  try { proc.process.kill(); } catch {}
-  activeSearches.delete(searchId);
-  if (!proc.sender.isDestroyed()) {
-    proc.sender.send('search:done', { searchId, cancelled: true });
+function finishSearch(record, payload) {
+  if (!record || record.doneSent) return false;
+  record.doneSent = true;
+  if (activeSearches.get(record.searchId) === record) activeSearches.delete(record.searchId);
+  if (!record.sender.isDestroyed()) record.sender.send('search:done', payload);
+  return true;
+}
+
+function cancelSearchRecord(record) {
+  if (!record || record.doneSent) return false;
+  record.cancelled = true;
+  try { record.process.kill(); } catch {}
+  return finishSearch(record, { searchId: record.searchId, cancelled: true });
+}
+
+ipcMain.handle('search:cancel', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.searchId) || payload.searchId <= 0) {
+    throw new TypeError('search:cancel payload is invalid');
   }
-  return { cancelled: true };
+  const record = activeSearches.get(payload.searchId);
+  if (!record || record.sender !== event.sender) return { cancelled: false };
+  return { cancelled: cancelSearchRecord(record) };
 });
 
-ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false }) => {
-  if (!query || !cwd) {
-    return { searchId: null, error: 'missing query or cwd' };
+ipcMain.handle('search:text', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.cwd !== 'string' || typeof payload.query !== 'string'
+    || !payload.query.trim() || payload.query.length > 1000
+    || (payload.caseSensitive !== undefined && typeof payload.caseSensitive !== 'boolean')) {
+    return { searchId: null, error: 'missing or invalid search query or cwd' };
+  }
+  const projects = loadProjectsConfig();
+  let searchCwd;
+  try {
+    searchCwd = resolveProjectPath(projects, payload.cwd, { allowRoot: true, requireExisting: true, type: 'directory' }).target;
+  } catch (error) {
+    return { searchId: null, error: error.message };
   }
 
-  // Determine which search tool to use.
   const hasRg = checkCommandAvailable('rg');
   const hasGit = checkCommandAvailable('git');
-  if (!hasRg && !hasGit) {
-    return { searchId: null, error: 'neither rg nor git is available' };
-  }
+  if (!hasRg && !hasGit) return { searchId: null, error: 'neither rg nor git is available' };
 
   const cmd = hasRg ? 'rg' : 'git';
-  const built = buildSearchCommand(cmd, query, caseSensitive);
-  if (!built) {
-    return { searchId: null, error: 'failed to build search command' };
-  }
+  const built = buildSearchCommand(cmd, payload.query, payload.caseSensitive === true);
+  if (!built) return { searchId: null, error: 'failed to build search command' };
 
   const searchId = ++searchIdCounter;
   const sender = event.sender;
-
-  // Cancel any previous active search from this sender.
-  for (const [id, proc] of activeSearches.entries()) {
-    if (proc.sender === sender) {
-      try { proc.process.kill(); } catch {}
-      activeSearches.delete(id);
-      if (!proc.sender.isDestroyed()) {
-        proc.sender.send('search:done', { searchId: id, cancelled: true });
-      }
-    }
+  for (const record of activeSearches.values()) {
+    if (record.sender === sender) cancelSearchRecord(record);
   }
 
-  const proc = spawn(built.cmd, built.args, {
-    cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  activeSearches.set(searchId, { process: proc, sender });
+  let proc;
+  try {
+    proc = spawn(built.cmd, built.args, {
+      cwd: searchCwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  } catch (error) {
+    return { searchId: null, error: error.message };
+  }
+  const record = {
+    searchId,
+    process: proc,
+    sender,
+    cwd: searchCwd,
+    cancelled: false,
+    doneSent: false,
+  };
+  activeSearches.set(searchId, record);
 
   let resultCount = 0;
   let truncated = false;
   const MAX_RESULTS = 500;
   let buffer = '';
   let killed = false;
+  let stderrBuffer = '';
 
   proc.stdout.on('data', (chunk) => {
-    if (sender.isDestroyed()) return;
-    if (killed) return; // discard output after kill
+    if (record.cancelled || record.doneSent || sender.isDestroyed()) return;
     buffer += chunk.toString();
     const lines = buffer.split('\n');
-    buffer = lines.pop(); // keep incomplete last line
-
+    buffer = lines.pop();
     for (const line of lines) {
       if (!line) continue;
       if (resultCount >= MAX_RESULTS) {
         truncated = true;
-        // Kill the process to stop CPU/I/O on large repos.
         killed = true;
         try { proc.kill(); } catch {}
         return;
       }
-      const result = parseSearchLine(line, cwd);
+      const result = parseSearchLine(line, searchCwd);
       if (result) {
         resultCount++;
-        sender.send('search:result', { searchId, result });
+        if (!sender.isDestroyed()) sender.send('search:result', { searchId, result });
       }
     }
   });
-
-  let stderrBuffer = '';
   proc.stderr.on('data', (chunk) => {
-    stderrBuffer += chunk.toString();
+    if (!record.cancelled && !record.doneSent) stderrBuffer += chunk.toString();
   });
-
   proc.on('close', (code) => {
-    activeSearches.delete(searchId);
-    if (sender.isDestroyed()) return;
-    // Process any remaining buffer.
+    if (record.cancelled || record.doneSent) return;
     if (buffer && resultCount < MAX_RESULTS && !killed) {
-      const result = parseSearchLine(buffer, cwd);
+      const result = parseSearchLine(buffer, searchCwd);
       if (result) {
         resultCount++;
-        sender.send('search:result', { searchId, result });
+        if (!sender.isDestroyed()) sender.send('search:result', { searchId, result });
       }
     }
-    // Non-zero exit code with no results indicates an error (e.g. git grep
-    // in a non-Git directory returns 128, rg not found returns 127).
-    // Exit code 1 for rg/git grep means "no matches" which is not an error.
-    // Exit code 2 for rg means "invalid arguments" (shouldn't happen with -F).
     if (code && code !== 1 && resultCount === 0 && !killed) {
-      const errMsg = stderrBuffer.trim() || `Search process exited with code ${code}`;
-      sender.send('search:done', { searchId, error: errMsg, totalCount: 0, exitCode: code });
+      finishSearch(record, {
+        searchId,
+        error: stderrBuffer.trim() || `Search process exited with code ${code}`,
+        totalCount: 0,
+        exitCode: code,
+      });
       return;
     }
-    sender.send('search:done', { searchId, truncated, totalCount: resultCount, exitCode: code });
+    finishSearch(record, { searchId, truncated, totalCount: resultCount, exitCode: code });
   });
-
-  proc.on('error', (err) => {
-    activeSearches.delete(searchId);
-    if (sender.isDestroyed()) return;
-    sender.send('search:done', { searchId, error: err.message, totalCount: resultCount });
+  proc.on('error', (error) => {
+    finishSearch(record, { searchId, error: error.message, totalCount: resultCount });
   });
 
   return { searchId, command: built.cmd };
@@ -942,21 +1347,49 @@ ipcMain.handle('search:text', async (event, { cwd, query, caseSensitive = false 
 
 // --- File read/write ---
 
-ipcMain.handle('fs:readFile', async (event, { filePath }) => {
+const MAX_READ_FILE_BYTES = 8 * 1024 * 1024;
+
+ipcMain.handle('fs:readFile', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.filePath !== 'string') return { success: false, error: 'invalid file path' };
   try {
-    const buffer = await fsp.readFile(filePath);
-    if (isProbablyBinary(buffer)) {
-      return { success: true, isBinary: true, content: null };
+    const projects = loadProjectsConfig();
+    const resolved = resolveProjectPath(projects, payload.filePath, { allowRoot: false, requireExisting: true, type: 'file' });
+    const handle = await fsp.open(resolved.target, 'r');
+    try {
+      const stat = await handle.stat();
+      if (stat.size > MAX_READ_FILE_BYTES) {
+        return { success: false, code: 'FILE_TOO_LARGE', error: `File is too large to read (maximum ${MAX_READ_FILE_BYTES} bytes).` };
+      }
+      const sample = Buffer.alloc(Math.min(stat.size, 8192));
+      if (sample.length > 0) await handle.read(sample, 0, sample.length, 0);
+      if (isProbablyBinary(sample)) return { success: true, isBinary: true, content: null };
+      const buffer = Buffer.alloc(stat.size);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const result = await handle.read(buffer, offset, buffer.length - offset, offset);
+        if (!result.bytesRead) break;
+        offset += result.bytesRead;
+      }
+      return { success: true, isBinary: false, content: buffer.toString('utf-8') };
+    } finally {
+      await handle.close();
     }
-    return { success: true, isBinary: false, content: buffer.toString('utf-8') };
   } catch (e) {
     return { success: false, error: e.message };
   }
 });
 
-ipcMain.handle('fs:writeFile', async (event, { filePath, content }) => {
+ipcMain.handle('fs:writeFile', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.filePath !== 'string' || typeof payload.content !== 'string'
+    || Buffer.byteLength(payload.content, 'utf8') > MAX_READ_FILE_BYTES) {
+    return { success: false, error: 'invalid or oversized file write payload' };
+  }
   try {
-    await fsp.writeFile(filePath, content, 'utf-8');
+    const projects = loadProjectsConfig();
+    const resolved = resolveProjectPath(projects, payload.filePath, { allowRoot: false, requireExisting: false });
+    writeTextAtomic(resolved.target, payload.content, 'utf-8');
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -965,56 +1398,75 @@ ipcMain.handle('fs:writeFile', async (event, { filePath, content }) => {
 
 // --- Clipboard image ---
 
-ipcMain.handle('clipboard:saveImage', async (event, { projectPath }) => {
+ipcMain.handle('clipboard:saveImage', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.projectPath !== 'string') throw new TypeError('clipboard:saveImage payload is invalid');
+  const projects = loadProjectsConfig();
+  const projectRoot = resolveProjectRoot(projects, payload.projectPath);
   const image = clipboard.readImage();
   if (image.isEmpty()) return null;
 
-  const screenshotsDir = path.join(projectPath, '.project-mixer', 'screenshots');
-  if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
-
+  const screenshotsPath = resolveProjectPath(projects, path.join(projectRoot.target, '.project-mixer', 'screenshots'), {
+    allowRoot: false,
+    requireExisting: false,
+  });
+  fs.mkdirSync(screenshotsPath.target, { recursive: true });
+  const safeScreenshotsPath = resolveProjectPath(projects, screenshotsPath.target, {
+    allowRoot: false,
+    requireExisting: true,
+    type: 'directory',
+  });
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = `screenshot_${timestamp}.png`;
-  const filepath = path.join(screenshotsDir, filename);
-
-  const pngBuffer = image.toPNG();
-  fs.writeFileSync(filepath, pngBuffer);
-
-  return filepath;
+  const filepath = path.join(safeScreenshotsPath.target, `screenshot_${timestamp}.png`);
+  const finalPath = resolveProjectPath(projects, filepath, { allowRoot: false, requireExisting: false });
+  fs.writeFileSync(finalPath.target, image.toPNG());
+  return finalPath.target;
 });
 
 // --- Clipboard text (terminal copy) ---
 
-ipcMain.handle('clipboard:writeText', async (event, { text }) => {
-  clipboard.writeText(text);
+ipcMain.handle('clipboard:writeText', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.text !== 'string' || payload.text.length > 1024 * 1024) {
+    throw new TypeError('clipboard:writeText payload is invalid');
+  }
+  clipboard.writeText(payload.text);
   return true;
 });
 
 // --- Layout persistence ---
 
-ipcMain.handle('layout:save', async (event, { layout }) => {
-  saveLayoutConfig(layout);
+ipcMain.handle('layout:save', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'layout')) throw new TypeError('layout:save payload is invalid');
+  saveLayoutConfig(payload.layout);
   return true;
 });
 
-ipcMain.handle('layout:load', async () => {
+ipcMain.handle('layout:load', async (event) => {
+  assertTrustedMainIpcEvent(event);
   return loadLayoutConfig();
 });
 
 // --- Folder dialog ---
 
-ipcMain.handle('dialog:openFolder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory'],
-  });
+ipcMain.handle('dialog:openFolder', async (event) => {
+  assertTrustedMainIpcEvent(event);
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
 });
 
 // --- Save dialog (for temp tab save) ---
 
-ipcMain.handle('dialog:saveFile', async (event, { defaultPath, defaultName }) => {
+ipcMain.handle('dialog:saveFile', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || (payload.defaultPath !== undefined && (typeof payload.defaultPath !== 'string' || payload.defaultPath.length > 4096))
+    || (payload.defaultName !== undefined && (typeof payload.defaultName !== 'string' || !payload.defaultName.trim() || payload.defaultName.length > 255 || /[\\/]/.test(payload.defaultName)))) {
+    throw new TypeError('dialog:saveFile payload is invalid');
+  }
   const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: defaultPath ? path.join(defaultPath, defaultName || 'untitled.txt') : defaultName,
+    defaultPath: payload.defaultPath ? path.join(payload.defaultPath, payload.defaultName || 'untitled.txt') : payload.defaultName,
     filters: [{ name: 'All Files', extensions: ['*'] }],
   });
   if (result.canceled || !result.filePath) return null;
@@ -1023,26 +1475,33 @@ ipcMain.handle('dialog:saveFile', async (event, { defaultPath, defaultName }) =>
 
 // --- Open file in OS default app ---
 
-ipcMain.handle('shell:openPath', async (event, { filePath }) => {
-  // URLの場合は openExternal、ファイルパスの場合は openPath
-  if (/^https?:\/\//i.test(filePath)) {
-    await shell.openExternal(filePath);
+ipcMain.handle('shell:openPath', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.filePath !== 'string' || !payload.filePath.trim()) throw new TypeError('shell:openPath payload is invalid');
+  if (/^https?:\/\//i.test(payload.filePath)) {
+    let url;
+    try { url = new URL(payload.filePath); } catch { throw new TypeError('Invalid URL'); }
+    if (!['http:', 'https:'].includes(url.protocol)) throw new TypeError('Unsupported URL protocol');
+    await shell.openExternal(url.href);
     return { success: true, error: null };
   }
-  const errorMsg = await shell.openPath(filePath);
+  const projects = loadProjectsConfig();
+  const resolved = resolveProjectPath(projects, payload.filePath, { allowRoot: false, requireExisting: true });
+  const errorMsg = await shell.openPath(resolved.target);
   return { success: !errorMsg, error: errorMsg || null };
 });
 
 // --- Delete file ---
 
-ipcMain.handle('fs:deleteFile', async (event, { filePath }) => {
+ipcMain.handle('fs:deleteFile', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.filePath !== 'string') return { success: false, error: 'invalid file path' };
   try {
-    const stat = await fsp.stat(filePath);
-    if (stat.isDirectory()) {
-      await fsp.rm(filePath, { recursive: true });
-    } else {
-      await fsp.unlink(filePath);
-    }
+    const projects = loadProjectsConfig();
+    const resolved = resolveProjectPath(projects, payload.filePath, { allowRoot: false, requireExisting: true });
+    const stat = await fsp.lstat(resolved.requested);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) await fsp.rm(resolved.requested, { recursive: true });
+    else await fsp.unlink(resolved.requested);
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1051,10 +1510,19 @@ ipcMain.handle('fs:deleteFile', async (event, { filePath }) => {
 
 // --- Create file ---
 
-ipcMain.handle('fs:createFile', async (event, { filePath }) => {
+ipcMain.handle('fs:createFile', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.filePath !== 'string') return { success: false, error: 'invalid file path' };
   try {
-    if (fs.existsSync(filePath)) return { success: false, error: 'File already exists' };
-    await fsp.writeFile(filePath, '', 'utf-8');
+    const projects = loadProjectsConfig();
+    const resolved = resolveProjectPath(projects, payload.filePath, { allowRoot: false, requireExisting: false });
+    try {
+      fs.lstatSync(resolved.requested);
+      return { success: false, error: 'File already exists' };
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+    }
+    writeTextAtomic(resolved.target, '', 'utf-8');
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1063,10 +1531,19 @@ ipcMain.handle('fs:createFile', async (event, { filePath }) => {
 
 // --- Create directory ---
 
-ipcMain.handle('fs:createDir', async (event, { dirPath }) => {
+ipcMain.handle('fs:createDir', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.dirPath !== 'string') return { success: false, error: 'invalid directory path' };
   try {
-    if (fs.existsSync(dirPath)) return { success: false, error: 'Directory already exists' };
-    await fsp.mkdir(dirPath);
+    const projects = loadProjectsConfig();
+    const resolved = resolveProjectPath(projects, payload.dirPath, { allowRoot: false, requireExisting: false });
+    try {
+      fs.lstatSync(resolved.requested);
+      return { success: false, error: 'Directory already exists' };
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+    }
+    await fsp.mkdir(resolved.target);
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1075,27 +1552,22 @@ ipcMain.handle('fs:createDir', async (event, { dirPath }) => {
 
 // --- Hook config auto-generation ---
 
-// Hook script reads the port from PROJECT_MIXER_PORT_FILE env var (inherited
-// from the PTY that Claude Code runs in). The old fallback that scanned
-// userData directories for port.json was removed in R1 — it could deliver
-// notifications to the wrong PM instance when dev and installed profiles
-// share a project. Each PTY must use the env var set by its spawning PM.
+// Hook script uses the PM_HOOK_URL inherited from the PTY that Claude Code
+// runs in. A shared port.json cannot identify the owning PM instance.
 const HOOK_SCRIPT = `#!/usr/bin/env node
 // Project Mixer hook - sends notification to local HTTP server
-// Port is discovered via PROJECT_MIXER_PORT_FILE env var (set by PM's PTY).
 const http = require('http');
-const fs = require('fs');
 
-const portFile = process.env.PROJECT_MIXER_PORT_FILE;
-if (!portFile) { process.exit(0); }
-
-let port = null;
+const hookUrl = process.env.PM_HOOK_URL;
+const hookToken = process.env.PM_HOOK_TOKEN;
+if (!hookUrl) { process.exit(0); }
+if (!hookToken) { process.exit(0); }
+let target;
 try {
-  const data = JSON.parse(fs.readFileSync(portFile, 'utf-8'));
-  port = data.port;
-} catch (e) {}
-
-if (!port) { process.exit(0); }
+  target = new URL(hookUrl);
+} catch (e) {
+  process.exit(0);
+}
 
 const arg = process.argv[2] || '';
 const namedEvent = arg && !arg.startsWith('{');
@@ -1116,11 +1588,15 @@ function send(input = {}) {
   }
   const payload = JSON.stringify(notification);
   const req = http.request({
-    hostname: '127.0.0.1',
-    port: port,
-    path: '/hook',
+    hostname: target.hostname,
+    port: target.port,
+    path: target.pathname,
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+      'X-Project-Mixer-Hook': hookToken,
+    },
   }, () => { process.stdout.write('{}\\n'); process.exit(0); });
   req.on('error', () => { process.exit(0); });
   req.write(payload);
@@ -1144,23 +1620,38 @@ if (argPayload) {
 }
 `;
 
-ipcMain.handle('hook:setup', async (event, { projectPath }) => {
+ipcMain.handle('hook:setup', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.projectPath !== 'string' || !payload.projectPath.trim()) {
+    throw new TypeError('hook:setup payload is invalid');
+  }
+  const projects = loadProjectsConfig();
+  const projectRoot = resolveProjectRoot(projects, payload.projectPath).target;
   const results = [];
+  const ensureProjectDirectory = (relativePath) => {
+    const candidate = resolveProjectPath(projects, path.join(projectRoot, relativePath), {
+      allowRoot: false,
+      requireExisting: false,
+    });
+    fs.mkdirSync(candidate.target, { recursive: true });
+    return resolveProjectPath(projects, candidate.target, {
+      allowRoot: false,
+      requireExisting: true,
+      type: 'directory',
+    }).target;
+  };
+  const resolveProjectChild = (relativePath, requireExisting) => resolveProjectPath(
+    projects,
+    path.join(projectRoot, relativePath),
+    { allowRoot: false, requireExisting },
+  ).target;
 
-  // Claude Code: .claude/settings.local.json (gitignore target, won't conflict with shared settings.json)
-  const claudeDir = path.join(projectPath, '.claude');
-  const claudeSettings = path.join(claudeDir, 'settings.local.json');
-  const hookScriptPath = path.join(claudeDir, 'project-mixer-hook.cjs');
+  const claudeDir = ensureProjectDirectory('.claude');
+  const claudeSettings = resolveProjectChild(path.join('.claude', 'settings.local.json'), false);
+  const hookScriptPath = resolveProjectChild(path.join('.claude', 'project-mixer-hook.cjs'), false);
 
   try {
-    if (!fs.existsSync(claudeDir)) fs.mkdirSync(claudeDir, { recursive: true });
-
-    // Write hook script (content is the same regardless of profile — port is
-    // resolved at runtime via env var, so both profiles can share this file)
-    fs.writeFileSync(hookScriptPath, HOOK_SCRIPT, 'utf-8');
-
-    // Read existing settings.local.json or create new. Never replace a file
-    // that cannot be parsed, because it may contain user-managed hooks.
+    writeTextAtomic(hookScriptPath, HOOK_SCRIPT, 'utf-8');
     let settings = {};
     if (fs.existsSync(claudeSettings)) {
       try {
@@ -1176,39 +1667,27 @@ ipcMain.handle('hook:setup', async (event, { projectPath }) => {
     if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
       throw new Error(`${claudeSettings}: hooks must be a JSON object`);
     }
-
-    // Escape backslashes for Windows paths; Unix paths need no escaping
     const escapedScriptPath = os.platform() === 'win32'
       ? hookScriptPath.replace(/\\/g, '\\\\')
       : hookScriptPath;
     const hookCmd = `node "${escapedScriptPath}"`;
-
-    // Add one independent PM entry for each event. Remove only previous PM
-    // hook commands; preserve any user hooks that share the same matcher.
+    const hookMatchPath = os.platform() === 'win32' ? escapedScriptPath : hookScriptPath;
     for (const key of ['Notification', 'Stop']) {
       const pmHookEntry = { type: 'command', command: `${hookCmd} ${key}` };
-      settings.hooks[key] = upsertProjectMixerHook(settings.hooks[key], pmHookEntry);
+      settings.hooks[key] = upsertProjectMixerHook(settings.hooks[key], pmHookEntry, hookMatchPath);
     }
-
-    fs.writeFileSync(claudeSettings, JSON.stringify(settings, null, 2), 'utf-8');
+    writeTextAtomic(claudeSettings, JSON.stringify(settings, null, 2), 'utf-8');
     results.push({ tool: 'claude', success: true, path: claudeSettings });
   } catch (e) {
     results.push({ tool: 'claude', success: false, error: e.message });
   }
 
-  // Codex supports user-level notify commands and trusted project hooks.
-  // Do not rewrite either automatically: changing notify would replace the
-  // user's command, while project hooks require an explicit trust review.
   results.push({ tool: 'codex', success: true, note: 'Ready for Codex notify or trusted project hooks' });
 
-  // OpenCode: install the notification bridge plugin into the project.
-  // The plugin is inert unless the PTY env provides PM_HOOK_URL (injected at
-  // terminal creation), so writing it is side-effect free for other setups.
-  const opencodePluginDir = path.join(projectPath, '.opencode', 'plugins');
-  const opencodePluginPath = path.join(opencodePluginDir, 'project-mixer.js');
   try {
-    if (!fs.existsSync(opencodePluginDir)) fs.mkdirSync(opencodePluginDir, { recursive: true });
-    fs.writeFileSync(opencodePluginPath, OPENCODE_PLUGIN_SOURCE, 'utf-8');
+    const opencodePluginDir = ensureProjectDirectory(path.join('.opencode', 'plugins'));
+    const opencodePluginPath = resolveProjectChild(path.join('.opencode', 'plugins', 'project-mixer.js'), false);
+    writeTextAtomic(opencodePluginPath, OPENCODE_PLUGIN_SOURCE, 'utf-8');
     results.push({ tool: 'opencode', success: true, path: opencodePluginPath });
   } catch (e) {
     results.push({ tool: 'opencode', success: false, error: e.message });

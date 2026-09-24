@@ -88,28 +88,34 @@ export function getHighlightedLines(state) {
 // --- Find match highlight (Phase 5 S3 follow-up) ---
 // The stock search extension paints match decorations only while its panel
 // is open. The shared find bar never opens the panel (D21), so this field
-// paints fixed-string matches itself. The match containing the selection
-// head is tagged -selected (findNext places the cursor inside it).
+// paints fixed-string matches itself. The selected match is tagged -selected.
 
 export const setFindHighlight = StateEffect.define(); // { query, caseSensitive } | null (clears)
 
-function buildFindDecos(state, spec, head = null) {
+function collectLiteralMatches(state, queryString, caseSensitive) {
+  const query = new SearchQuery({ search: queryString, caseSensitive, literal: true });
+  const cursor = query.getCursor(state);
+  const matches = [];
+  cursor.next();
+  while (!cursor.done) {
+    matches.push({ from: cursor.value.from, to: cursor.value.to });
+    cursor.next();
+  }
+  return matches;
+}
+
+function buildFindDecos(state, spec, selection = null) {
   if (!spec || !spec.query) return Decoration.none;
-  const docText = state.doc.sliceString(0);
-  const hay = spec.caseSensitive ? docText : docText.toLowerCase();
-  const needle = spec.caseSensitive ? spec.query : spec.query.toLowerCase();
-  if (!needle) return Decoration.none;
   const decos = [];
-  let pos = 0;
-  for (;;) {
-    const idx = hay.indexOf(needle, pos);
-    if (idx === -1) break;
-    // head (when provided) marks the match containing it as -selected.
-    const cls = head !== null && idx <= head && head <= idx + needle.length
+  const head = selection?.head ?? null;
+  for (const match of collectLiteralMatches(state, spec.query, spec.caseSensitive)) {
+    const selected = selection && selection.from !== selection.to
+      ? selection.from === match.from && selection.to === match.to
+      : head !== null && match.from <= head && head < match.to;
+    const cls = selected
       ? 'cm-searchMatch cm-searchMatch-selected'
       : 'cm-searchMatch';
-    decos.push(Decoration.mark({ class: cls }).range(idx, idx + needle.length));
-    pos = idx + needle.length;
+    decos.push(Decoration.mark({ class: cls }).range(match.from, match.to));
   }
   return Decoration.set(decos, true);
 }
@@ -132,7 +138,7 @@ const findHighlightField = StateField.define({
     // The current match is indicated by the native selection instead.
     if (!forced && !tr.docChanged) return value;
     if (!spec.query) return { ...spec, decos: Decoration.none };
-    return { ...spec, decos: buildFindDecos(tr.state, spec, tr.state.selection.main.head) };
+    return { ...spec, decos: buildFindDecos(tr.state, spec, tr.state.selection.main) };
   },
   provide: (field) => EditorView.decorations.from(field, (v) => v.decos),
 });
@@ -177,8 +183,8 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
     // registry (D21). The panel is never opened, so no panel DOM exists.
     search(),
     // S3 follow-up: our own match decorations (the stock highlighter only
-    // paints while the stock panel is open). The current match — the one
-    // containing the selection head — gets the -selected class.
+    // paints while the stock panel is open). The selected match gets the
+    // -selected class.
     findHighlightField,
     lineHighlightField,
     keymap.of([{ key: 'Tab', run: insertTwoSpaces }]),
@@ -198,7 +204,7 @@ export function buildExtensions({ onDocChanged, onSelectionChanged } = {}) {
 // Set the current search query from the find bar. caseSensitive maps to
 // SearchQuery's caseSensitive flag; no regex (fixed-string only).
 export function setEditorSearchQuery(view, queryString, { caseSensitive = false } = {}) {
-  const query = new SearchQuery({ search: queryString, caseSensitive });
+  const query = new SearchQuery({ search: queryString, caseSensitive, literal: true });
   view.dispatch({
     effects: [
       setSearchQuery.of(query),
@@ -229,25 +235,22 @@ export function scrollToEndEffect(view) {
   return EditorView.scrollIntoView(view.state.doc.length, { y: 'end' });
 }
 
-// Count matches of the query in the document and locate the one starting at
-// or after the selection head (1-based). Pure over (state, query) —
-// headless testable. Fixed-string matching only; no regex.
+// Count matches of the query in the document and locate the selected match
+// or the first match at/after the selection head (1-based). Pure over
+// (state, query) — headless testable. Fixed-string matching only; no regex.
 export function countEditorMatches(state, queryString, { caseSensitive = false } = {}) {
   if (!queryString) return { total: 0, index: 0 };
-  const docText = state.doc.toString();
-  const hay = caseSensitive ? docText : docText.toLowerCase();
-  const needle = caseSensitive ? queryString : queryString.toLowerCase();
-  const head = state.selection.main.head;
-  let total = 0;
+  const selection = state.selection.main;
+  const matches = collectLiteralMatches(state, queryString, caseSensitive);
   let wrappedIndex = null;
-  let pos = 0;
-  while ((pos = hay.indexOf(needle, pos)) !== -1) {
-    total++;
-    if (wrappedIndex === null && pos >= head) wrappedIndex = total;
-    pos += needle.length;
-  }
-  if (total === 0) return { total: 0, index: 0 };
-  return { total, index: wrappedIndex !== null ? wrappedIndex : 1 };
+  matches.forEach((match, index) => {
+    const selected = selection.from !== selection.to
+      ? selection.from === match.from && selection.to === match.to
+      : match.from <= selection.head && selection.head < match.to;
+    if (wrappedIndex === null && selected) wrappedIndex = index + 1;
+  });
+  if (matches.length === 0) return { total: 0, index: 0 };
+  return { total: matches.length, index: wrappedIndex !== null ? wrappedIndex : 1 };
 }
 
 // Creates the single EditorView plus a state factory for additional files.

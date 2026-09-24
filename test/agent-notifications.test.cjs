@@ -271,6 +271,8 @@ test('buildResumeArgs picks per-agent flags and prefers a tracked session id', (
   assert.equal(buildResumeArgs('pwsh.exe', null), null);
   // .exe suffix normalized.
   assert.deepEqual(buildResumeArgs('Claude.exe', 'abc'), ['--resume', 'abc']);
+  assert.deepEqual(buildResumeArgs('C:\\tools\\Claude.cmd', 'abc'), ['--resume', 'abc']);
+  assert.deepEqual(buildResumeArgs('C:\\tools\\codex.bat', 's_1'), ['resume', 's_1']);
 });
 
 test('hook payloads expose session_id for resume tracking and routing', () => {
@@ -291,14 +293,14 @@ test('renderer tracks last sessions and prompts only for supported agents', () =
   assert.match(renderer, /rememberAgentSession\(t\.projectId, t\.command, sessionId\)/);
   // The prompt only fires for explicit menu-created terminals.
   assert.match(renderer, /resumePrompt: true/);
-  const detect = renderer.match(/if \(resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED\.has\(cmd\)\)/);
+  const detect = renderer.match(/if \(resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED\.has\(commandKey\)\)/);
   assert.ok(detect);
 });
 
 test('main process prepends resume args and passes them through pty:create', () => {
   const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
-  assert.match(main, /buildResumeArgs\(command, resumeSessionId\)/);
-  assert.match(main, /\[\.\.\.resumeArgs, \.\.\.requestedArgs\]/);
+  assert.match(main, /buildResumeArgs\(options\.command, options\.resumeSessionId\)/);
+  assert.match(main, /\[\.\.\.resumeArgs, \.\.\.options\.args\]/);
 });
 
 // ============================================================
@@ -349,10 +351,20 @@ test('opencode plugin source is self-contained ESM with no local imports', () =>
   assert.match(PLUGIN_SOURCE, /PROJECT_MIXER_PTY_ID/);
 });
 
+test('hook delivery is authenticated per PTY and browser-originated requests are rejected', () => {
+  const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
+  assert.match(main, /PM_HOOK_TOKEN: hookToken/);
+  assert.match(main, /X-Project-Mixer-Hook/);
+  assert.match(main, /hookTokens\.get\(token\)/);
+  assert.match(main, /req\.headers\.origin/);
+  const { PLUGIN_SOURCE } = require('../src/main/opencode-plugin-source.cjs');
+  assert.match(PLUGIN_SOURCE, /process\.env\.PM_HOOK_TOKEN/);
+  assert.match(PLUGIN_SOURCE, /X-Project-Mixer-Hook/);
+});
 test('main process injects PM_HOOK_URL into the PTY env and installs the plugin in hook:setup', () => {
   const main = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf-8');
   // PTY env carries the /hook endpoint so the plugin can post lifecycle events.
-  assert.match(main, /PM_HOOK_URL: `http:\/\/127\.0\.0\.1:\$\{HOOK_PORT\}\/hook`/);
+  assert.match(main, /PM_HOOK_URL: `http:\/\/127\.0\.0\.1:\$\{hookPort\}\/hook`/);
   // hook:setup writes the bridge into the project's OpenCode plugin dir.
   assert.match(main, /OPENCODE_PLUGIN_SOURCE/);
   assert.match(main, /\.opencode', 'plugins'\)/);
@@ -362,6 +374,6 @@ test('main process injects PM_HOOK_URL into the PTY env and installs the plugin 
   // drive waiting/completion, and scraping caused false amber dots.
   const renderer = require('fs').readFileSync(require('path').join(__dirname, '..', 'renderer.js'), 'utf-8');
   const detect = renderer.match(/function detectWaiting\(command, data\) \{[\s\S]*?\n\}/)[0];
-  assert.match(detect, /command === 'claude' \|\| command === 'codex'/);
+  assert.match(detect, /normalizedCommand === 'claude' \|\| normalizedCommand === 'codex'/);
   assert.doesNotMatch(detect, /=== 'opencode'/);
 });

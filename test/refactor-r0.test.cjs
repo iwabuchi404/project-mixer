@@ -133,15 +133,23 @@ test('R1/FIXED: renderer does not fan out unmatched notifications to activeProje
   assert.match(renderer, /persistent: true/);
 });
 
-test('R1/FIXED: HOOK_SCRIPT uses only PROJECT_MIXER_PORT_FILE, no userData scanning', () => {
+test('R1/FIXED: HOOK_SCRIPT uses only the hook URL owned by its PTY', () => {
   const main = read('main.js');
-  assert.match(main, /PROJECT_MIXER_PORT_FILE/);
-  // The old fallback that scanned Project Mixer / Project Mixer Dev dirs
-  // must be removed.
+  assert.match(main, /process\.env\.PM_HOOK_URL/);
+  assert.doesNotMatch(main, /JSON\.parse\(fs\.readFileSync\(portFile/);
   assert.doesNotMatch(main, /Project Mixer'?,\s*'project-mixer'/);
   assert.doesNotMatch(main, /Project Mixer Dev'?,\s*'project-mixer'/);
-  // The script exits early if the env var is not set.
-  assert.match(main, /if \(!portFile\) \{ process\.exit\(0\); \}/);
+  assert.match(main, /if \(!hookUrl\) \{ process\.exit\(0\); \}/);
+});
+
+test('R1/FIXED: main window and IPC are locked to the local document', () => {
+  const main = read('main.js');
+  assert.match(main, /setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/);
+  assert.match(main, /on\('will-navigate', blockUnexpectedNavigation\)/);
+  assert.match(main, /on\('will-redirect', blockUnexpectedNavigation\)/);
+  assert.match(main, /event\?\.sender !== mainWindow\.webContents/);
+  assert.match(main, /event\.senderFrame !== mainWindow\.webContents\.mainFrame/);
+  assert.match(main, /isMainDocumentUrl\(frameUrl\)/);
 });
 
 test('R1/FIXED: command:check --version fallback is restricted to known agent commands', () => {
@@ -150,7 +158,9 @@ test('R1/FIXED: command:check --version fallback is restricted to known agent co
   assert.match(main, /'claude'/);
   assert.match(main, /'codex'/);
   // The fallback must check the allowlist, not run arbitrary commands.
-  assert.match(main, /VERSION_FALLBACK_ALLOWED\.has\(cmd\)/);
+  assert.match(main, /VERSION_FALLBACK_ALLOWED\.has\(path\.basename\(cmd\)/);
+  assert.doesNotMatch(main, /execSync\(`where \$\{cmd\}`/);
+  assert.match(main, /execFileSync\(locator, \[cmd\]/);
 });
 
 // ---------------------------------------------------------------------------
@@ -204,6 +214,20 @@ test('R0/KEEP: writeJsonAtomic replaces an existing file atomically', () => {
     writeJsonAtomic(target, { v: 1 });
     writeJsonAtomic(target, { v: 2 });
     assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf-8')), { v: 2 });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('R0/KEEP: writeTextAtomic replaces text without leaving temp files', () => {
+  const { writeTextAtomic } = require('../src/ports/state.cjs');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-r0-'));
+  try {
+    const target = path.join(tmp, 'data.txt');
+    writeTextAtomic(target, 'first');
+    writeTextAtomic(target, 'second');
+    assert.equal(fs.readFileSync(target, 'utf-8'), 'second');
+    assert.deepEqual(fs.readdirSync(tmp).filter((name) => name.endsWith('.tmp')), []);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -349,17 +373,13 @@ test('R0/KEEP: terminal zero-size guard and bottom-follow remain in renderer', (
   assert.match(renderer, /const shouldFollow = t\.pinnedToBottom/);
 });
 
-test('R0/KEEP: preview activation preserves editor attention', () => {
-  // decidePreviewActivation is the pure function that governs show_file
-  // focus stealing. R3 must keep this contract.
-  assert.doesNotThrow(async () => {
-    const { decidePreviewActivation } = await importEsm('src/phase3/state.mjs');
-    const r = decidePreviewActivation({
-      sameProject: true,
-      activeSurface: 'editor',
-      activePreviewPath: null,
-      requestedPreviewPath: 'preview:p:a',
-    });
-    assert.equal(r.preserveAttention, true);
+test('R0/KEEP: preview activation preserves editor attention', async () => {
+  const { decidePreviewActivation } = await importEsm('src/phase3/state.mjs');
+  const r = decidePreviewActivation({
+    sameProject: true,
+    activeSurface: 'editor',
+    activePreviewPath: null,
+    requestedPreviewPath: 'preview:p:a',
   });
+  assert.equal(r.preserveAttention, true);
 });

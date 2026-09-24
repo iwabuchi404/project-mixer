@@ -38,6 +38,25 @@ test('replaces a Project Mixer-only entry without accumulating duplicates', () =
   ]);
 });
 
+test('preserves hooks with a different path that contains the PM filename', () => {
+  const foreignHook = { type: 'command', command: 'node other-project-mixer-hook.cjs Stop' };
+  const result = upsertProjectMixerHook([
+    { matcher: '', hooks: [foreignHook] },
+  ], pmHook('Stop'));
+  assert.deepEqual(result, [
+    { matcher: '', hooks: [foreignHook] },
+    { matcher: '', hooks: [pmHook('Stop')] },
+  ]);
+});
+
+test('matches only the configured absolute PM hook path', () => {
+  const hookPath = '/work/project/.claude/project-mixer-hook.cjs';
+  const foreignHook = { type: 'command', command: `node "/work/other/.claude/project-mixer-hook.cjs" Stop` };
+  const result = upsertProjectMixerHook([
+    { matcher: '', hooks: [foreignHook] },
+  ], { type: 'command', command: `node "${hookPath}" Stop` }, hookPath);
+  assert.deepEqual(result[0].hooks, [foreignHook]);
+});
 test('rejects an invalid hook collection instead of overwriting it', () => {
   assert.throws(
     () => upsertProjectMixerHook({ matcher: '' }, pmHook('Stop')),

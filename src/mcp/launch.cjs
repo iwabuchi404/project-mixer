@@ -1,6 +1,10 @@
+function normalizeCommandName(command) {
+  return String(command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+}
+
 function buildAgentMcpArgs(command, mcpUrl) {
   if (!mcpUrl) return [];
-  const name = String(command || '').toLowerCase().replace(/\.exe$/, '');
+  const name = normalizeCommandName(command);
   if (name === 'claude') {
     return [
       '--mcp-config',
@@ -26,4 +30,4 @@ function buildPowerShellInvocation(command, args) {
   return `& ${[command, ...args].map(quotePowerShellArgument).join(' ')}`;
 }
 
-module.exports = { buildAgentMcpArgs, buildPowerShellInvocation };
+module.exports = { buildAgentMcpArgs, buildPowerShellInvocation, normalizeCommandName };

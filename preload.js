@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   // PTY
   ptyCreate: (opts) => ipcRenderer.invoke('pty:create', opts),
+  ptyAttach: (id) => ipcRenderer.invoke('pty:attach', { id }),
   ptyWrite: (id, data) => ipcRenderer.invoke('pty:write', { id, data }),
   ptyResize: (id, cols, rows) => ipcRenderer.invoke('pty:resize', { id, cols, rows }),
   ptyKill: (id) => ipcRenderer.invoke('pty:kill', { id }),
@@ -60,6 +61,7 @@ contextBridge.exposeInMainWorld('api', {
   // Hook-based waiting indicator
   onHookNotify: (callback) => ipcRenderer.on('hook:notify', (event, data) => callback(data)),
   hookSetup: (projectPath) => ipcRenderer.invoke('hook:setup', { projectPath }),
+  hookTestToken: (ptyId) => ipcRenderer.invoke('hook:test-token', { ptyId }),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   devinBind: (ptyId, sessionId) => ipcRenderer.invoke('devin:bind', { ptyId, sessionId }),
   devinUnbind: (ptyId) => ipcRenderer.invoke('devin:unbind', { ptyId }),

@@ -5,7 +5,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const port = Number(process.argv[2] || 9235);
+const port = Number(process.argv[2] || process.env.PM_REMOTE_DEBUGGING_PORT || 9235);
+const root = path.join(__dirname, '..');
+const projectRoot = JSON.stringify(root);
+const rendererPath = JSON.stringify(path.join(root, 'renderer.js'));
+const planPath = JSON.stringify(path.join(root, 'docs', 'PHASE_4_PLAN.md'));
+const shell = JSON.stringify(process.platform === 'win32' ? 'pwsh.exe' : process.platform === 'darwin' ? 'zsh' : 'bash');
 
 async function connect() {
   const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
@@ -41,7 +46,10 @@ async function connect() {
 
 async function main() {
   const { socket, call } = await connect();
-  const evaluate = async (expression) => {
+  let tree = null;
+  let workbench = null;
+  try {
+    const evaluate = async (expression) => {
     const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
     return result.result.value;
@@ -228,12 +236,12 @@ async function main() {
   assert.equal(scratchToggle.expanded, 'true');
   console.log('[ui-check] scratch toggle');
 
-  const tree = await evaluate(`(async () => {
+  tree = await evaluate(`(async () => {
     let createdProject = false;
     if (!document.querySelector('.project-item')) {
       document.getElementById('add-project-btn').click();
       document.getElementById('project-name-input').value = 'Phase 4 UI check';
-      document.getElementById('project-path-input').value = 'D:\\\\work\\\\project-mixer';
+      document.getElementById('project-path-input').value = ${projectRoot};
       document.getElementById('project-confirm-btn').click();
       await new Promise((resolve) => setTimeout(resolve, 250));
       createdProject = true;
@@ -289,7 +297,7 @@ async function main() {
   console.log('[ui-check] sidebar collapse');
 
   console.log('[ui-check] workbench start');
-  const workbench = await evaluate(`(async () => {
+  workbench = await evaluate(`(async () => {
     for (const tab of [...document.querySelectorAll('#main-tab-bar .tab')]) {
       if (tab.querySelector('.tab-label')?.textContent === 'Phase 4 check') {
         await window.__pmDispatch('close_terminal', { tabId: Number(tab.dataset.id) });
@@ -302,8 +310,8 @@ async function main() {
     await window.__pmDispatch('close_tab', { filePath: browserTab.dataset.path });
 
     const terminalId = await window.__pmDispatch('create_terminal', {
-      command: 'pwsh.exe',
-      cwd: 'D:\\\\work\\\\project-mixer',
+      command: ${shell},
+      cwd: ${projectRoot},
       projectId: null,
       label: 'Phase 4 check',
     });
@@ -311,20 +319,20 @@ async function main() {
     const terminalSurface = document.getElementById('main-surface').dataset.surface;
 
     await window.__pmDispatch('open_file', {
-      path: 'D:\\\\work\\\\project-mixer\\\\renderer.js',
+      path: ${rendererPath},
       name: 'renderer.js',
     });
     const fileSurface = document.getElementById('main-surface').dataset.surface;
     document.getElementById('editor-textarea').focus();
-    await window.__pmDispatch('close_tab', { filePath: 'D:\\\\work\\\\project-mixer\\\\renderer.js' });
+    await window.__pmDispatch('close_tab', { filePath: ${rendererPath} });
     const surfaceAfterFocusedFileClose = document.getElementById('main-surface').dataset.surface;
     await window.__pmDispatch('open_file', {
-      path: 'D:\\\\work\\\\project-mixer\\\\renderer.js',
+      path: ${rendererPath},
       name: 'renderer.js',
     });
 
     await window.__pmDispatch('open_preview', {
-      path: 'D:\\\\work\\\\project-mixer\\\\docs\\\\PHASE_4_PLAN.md',
+      path: ${planPath},
       name: 'PHASE_4_PLAN.md',
     });
     await new Promise((resolve) => setTimeout(resolve, 400));
@@ -335,7 +343,7 @@ async function main() {
     const planPreviewPath = document.querySelector('.preview-tab.active').dataset.path;
     const planScroll = await preview.executeJavaScript("(() => { const root = document.scrollingElement || document.documentElement; root.scrollTop = Math.min(360, root.scrollHeight - root.clientHeight); return { y: root.scrollTop, max: root.scrollHeight - root.clientHeight, scrollbarSize: getComputedStyle(root, '::-webkit-scrollbar').width, scrollbarThumb: getComputedStyle(root, '::-webkit-scrollbar-thumb').backgroundColor, fontFamily: getComputedStyle(document.body).fontFamily }; })()");
     await window.__pmDispatch('open_preview', {
-      path: 'D:\\\\work\\\\project-mixer\\\\renderer.js',
+      path: ${rendererPath},
       name: 'renderer.js',
     });
     const codePreviewPath = document.querySelector('.preview-tab.active').dataset.path;
@@ -412,18 +420,24 @@ async function main() {
   const output = path.join(os.tmpdir(), 'project-mixer-phase4.png');
   fs.writeFileSync(output, Buffer.from(shot.data, 'base64'));
 
-  await evaluate(`(async () => {
-    await window.__pmDispatch('close_tab', { filePath: 'D:\\\\work\\\\project-mixer\\\\renderer.js' });
-    const preview = [...document.querySelectorAll('.preview-tab')].find((tab) => tab.title.endsWith('D:\\\\work\\\\project-mixer\\\\docs\\\\PHASE_4_PLAN.md'));
-    if (preview) await window.__pmDispatch('close_tab', { filePath: preview.dataset.path });
-    await window.__pmDispatch('close_terminal', { tabId: ${workbench.terminalId} });
-    if (${tree.createdProject ? 'true' : 'false'}) {
-      await window.__pmDispatch('remove_project', { projectId: ${JSON.stringify(tree.projectId)} });
-    }
-  })()`);
-
-  socket.close();
   console.log(JSON.stringify({ baseline, composerFocused, collapse, workbench, screenshot: output }, null, 2));
+  } finally {
+    try {
+      if (workbench) {
+        await evaluate(`(async () => {
+          await window.__pmDispatch('close_tab', { filePath: ${rendererPath} });
+          const preview = [...document.querySelectorAll('.preview-tab')].find((tab) => tab.title.endsWith(${planPath}));
+          if (preview) await window.__pmDispatch('close_tab', { filePath: preview.dataset.path });
+          await window.__pmDispatch('close_terminal', { tabId: ${workbench.terminalId} });
+        })()`).catch(() => {});
+      }
+      if (tree?.createdProject) {
+        await evaluate(`window.__pmDispatch('remove_project', { projectId: ${JSON.stringify(tree.projectId)} })`).catch(() => {});
+      }
+    } finally {
+      socket.close();
+    }
+  }
 }
 
 main().catch((error) => {

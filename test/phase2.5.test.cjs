@@ -77,6 +77,38 @@ test('terminal drop paths are quoted for the active shell', () => {
   assert.equal(phase25.quotePathForCommand('README.md', 'claude'), 'README.md');
 });
 
+test('terminal drop resolves the active terminal in the pane under the pointer', () => {
+  let eventTarget;
+  const terminalElement = { contains: (target) => target === eventTarget };
+  eventTarget = {
+    closest: (selector) => selector === '.terminal-pane-item' ? { dataset: { paneId: '2' } }
+      : selector === '.terminal-instance' ? terminalElement : null,
+  };
+  const target = phase25.resolveTerminalDropTarget(
+    eventTarget,
+    [{ id: 1, activeTabId: 10 }, { id: 2, activeTabId: 20 }],
+    new Map([
+      [10, { command: 'pwsh', termEl: { contains: () => false } }],
+      [20, { command: 'codex', termEl: terminalElement }],
+    ]),
+  );
+  assert.equal(target.paneId, 2);
+  assert.equal(target.tabId, 20);
+  assert.equal(target.terminal.command, 'codex');
+});
+
+test('terminal drop rejects a terminal from another pane', () => {
+  const eventTarget = {
+    closest: (selector) => selector === '.terminal-pane-item' ? { dataset: { paneId: '2' } }
+      : selector === '.terminal-instance' ? { contains: () => true } : null,
+  };
+  assert.equal(phase25.resolveTerminalDropTarget(
+    eventTarget,
+    [{ id: 2, activeTabId: null }],
+    new Map(),
+  ), null);
+});
+
 test('pane width capture ignores hidden zero-width measurements', () => {
   assert.equal(phase25.captureExpandedPaneWidth({
     isCollapsed: false,

@@ -15,6 +15,24 @@ function run(cmd, args, opts) {
   return spawn(cmd, args, { stdio: 'inherit', shell: false, ...opts });
 }
 
+function parsePort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid remote debugging port: ${value}`);
+  }
+  return port;
+}
+
+function remoteDebuggingPort() {
+  const envPort = process.env.PM_REMOTE_DEBUGGING_PORT;
+  if (envPort) return parsePort(envPort);
+  const inline = process.argv.find((arg) => arg.startsWith('--remote-debugging-port='));
+  if (inline) return parsePort(inline.slice('--remote-debugging-port='.length));
+  const index = process.argv.indexOf('--remote-debugging-port');
+  if (index !== -1) return parsePort(process.argv[index + 1]);
+  return null;
+}
+
 async function main() {
   // 1. Initial build (must complete before Electron starts)
   console.log('[dev] Building renderer bundle...');
@@ -34,7 +52,11 @@ async function main() {
 
   // 3. Start Electron
   console.log('[dev] Starting Electron (--dev)...');
-  const electron = run(electronBin, ['.', '--dev'], { cwd: root });
+  const debugPort = remoteDebuggingPort();
+  const electronArgs = debugPort === null
+    ? ['.', '--dev']
+    : [`--remote-debugging-port=${debugPort}`, '.', '--dev'];
+  const electron = run(electronBin, electronArgs, { cwd: root });
 
   // 4. Cleanup on exit
   let shuttingDown = false;

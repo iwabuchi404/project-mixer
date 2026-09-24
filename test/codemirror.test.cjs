@@ -274,9 +274,33 @@ test('S3: countEditorMatches counts matches and locates the one at/after the hea
   const mixed = EditorState.create({ doc: 'Foo foo FOO' });
   assert.deepEqual(cm6.countEditorMatches(mixed, 'foo', { caseSensitive: true }), { total: 1, index: 1 });
   assert.deepEqual(cm6.countEditorMatches(mixed, 'foo'), { total: 3, index: 1 });
+  assert.deepEqual(cm6.countEditorMatches(mk(9), 'foo'), { total: 3, index: 2 });
+  const selected = EditorState.create({ doc, selection: { anchor: 8, head: 11 } });
+  assert.deepEqual(cm6.countEditorMatches(selected, 'foo'), { total: 3, index: 2 });
   // Empty query and no matches.
   assert.deepEqual(cm6.countEditorMatches(mk(0), ''), { total: 0, index: 0 });
   assert.deepEqual(cm6.countEditorMatches(mk(0), 'zzz'), { total: 0, index: 0 });
+});
+
+test('S3: CodeMirror search uses literal matching for fixed-string queries', async () => {
+  const { EditorState } = await import('@codemirror/state');
+  const { SearchQuery } = await import('@codemirror/search');
+  const cm6 = await importEsm('src/editor/cm6.mjs');
+  const state = EditorState.create({ doc: 'a.b a\\nb' });
+  const query = new SearchQuery({ search: 'a.b', literal: true });
+  const cursor = query.getCursor(state);
+  const matches = [];
+  cursor.next();
+  while (!cursor.done) {
+    matches.push([cursor.value.from, cursor.value.to]);
+    cursor.next();
+  }
+  assert.equal(query.literal, true);
+  assert.deepEqual(matches, [[0, 3]]);
+  assert.deepEqual(cm6.countEditorMatches(state, 'a.b'), { total: 1, index: 1 });
+  assert.deepEqual(cm6.countEditorMatches(state, '\\n'), { total: 1, index: 1 });
+  const source = read(path.join('src', 'editor', 'cm6.mjs'));
+  assert.match(source, /new SearchQuery\(\{ search: queryString, caseSensitive, literal: true \}\)/);
 });
 
 test('S3: buildExtensions registers the search extension but not the panel/keymap', () => {

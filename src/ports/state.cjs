@@ -13,12 +13,14 @@ function buildPortRecord({ hookPort, mcpPort, profile, pid }) {
   return record;
 }
 
-function writeJsonAtomic(file, data) {
+function writeTextAtomic(file, contents, encoding = 'utf-8') {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
+  const existingMode = fs.existsSync(file) ? fs.statSync(file).mode : null;
   const tempFile = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`);
   try {
-    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(tempFile, contents, { encoding, mode: existingMode ?? 0o666 });
+    if (existingMode !== null) fs.chmodSync(tempFile, existingMode);
     fs.renameSync(tempFile, file);
   } finally {
     if (fs.existsSync(tempFile)) {
@@ -27,4 +29,8 @@ function writeJsonAtomic(file, data) {
   }
 }
 
-module.exports = { buildPortRecord, writeJsonAtomic };
+function writeJsonAtomic(file, data) {
+  writeTextAtomic(file, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+module.exports = { buildPortRecord, writeJsonAtomic, writeTextAtomic };

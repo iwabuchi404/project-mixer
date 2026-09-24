@@ -13,7 +13,7 @@
 const RESUME_SUPPORTED = new Set(['claude', 'codex', 'opencode', 'devin']);
 
 function buildResumeArgs(command, sessionId) {
-  const name = String(command || '').toLowerCase().replace(/\.exe$/, '');
+  const name = String(command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
   if (!RESUME_SUPPORTED.has(name)) return null;
   if (!sessionId) return null;
   if (name === 'claude') {

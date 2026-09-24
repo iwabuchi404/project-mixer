@@ -1,13 +1,15 @@
-function isProjectMixerHook(hook) {
-  return Boolean(
-    hook
-    && typeof hook === 'object'
-    && typeof hook.command === 'string'
-    && hook.command.includes('project-mixer-hook')
-  );
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function upsertProjectMixerHook(entries, pmHookEntry) {
+function isProjectMixerHook(hook, hookPath) {
+  if (!hook || typeof hook !== 'object' || typeof hook.command !== 'string') return false;
+  const expectedPath = hookPath || 'project-mixer-hook.cjs';
+  const pattern = new RegExp(`(?:^|["'\\s])${escapeRegExp(expectedPath)}(?=["'\\s]|$)`);
+  return pattern.test(hook.command);
+}
+
+function upsertProjectMixerHook(entries, pmHookEntry, hookPath) {
   if (entries === undefined) {
     return [{ matcher: '', hooks: [pmHookEntry] }];
   }
@@ -22,7 +24,7 @@ function upsertProjectMixerHook(entries, pmHookEntry) {
       continue;
     }
 
-    const hooks = entry.hooks.filter((hook) => !isProjectMixerHook(hook));
+    const hooks = entry.hooks.filter((hook) => !isProjectMixerHook(hook, hookPath));
     if (hooks.length === entry.hooks.length) {
       preservedEntries.push(entry);
     } else if (hooks.length > 0) {

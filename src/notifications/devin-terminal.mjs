@@ -2,12 +2,8 @@ const DEVIN_NEEDS_INPUT = 'Devin needs input';
 const DEVIN_FINISHED = 'Devin finished';
 
 export function isDevinCommand(command) {
-  const executable = String(command || '')
-    .replaceAll('\\', '/')
-    .split('/')
-    .pop()
-    .toLowerCase();
-  return executable === 'devin' || executable === 'devin.exe';
+  const executable = String(command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+  return executable === 'devin';
 }
 
 export function normalizeDevinTerminalNotification(identifier, data) {
