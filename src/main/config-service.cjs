@@ -164,12 +164,21 @@ function validateLayout(value) {
     if (saved.direction !== undefined && saved.direction !== 'row' && saved.direction !== 'column') {
       return { ok: false, code: 'INVALID_PANE_DIRECTION', message: `invalid pane direction for ${projectId}` };
     }
+    if (saved.layoutMode !== undefined && !['single', 'row', 'column', 'grid'].includes(saved.layoutMode)) {
+      return { ok: false, code: 'INVALID_PANE_LAYOUT_MODE', message: `invalid pane layout mode for ${projectId}` };
+    }
+    if (saved.panes.length > 4) {
+      return { ok: false, code: 'TOO_MANY_PANES', message: `pane layout for ${projectId} exceeds four panes` };
+    }
     for (const pane of saved.panes) {
       if (!isRecord(pane) || !Array.isArray(pane.members)) {
         return { ok: false, code: 'INVALID_PANE', message: `invalid pane entry for ${projectId}` };
       }
       if (pane.size !== undefined && (!Number.isFinite(pane.size) || pane.size < 0)) {
         return { ok: false, code: 'INVALID_PANE_SIZE', message: `invalid pane size for ${projectId}` };
+      }
+      if (pane.slot !== undefined && pane.slot !== null && (!Number.isInteger(pane.slot) || pane.slot < 0 || pane.slot > 3)) {
+        return { ok: false, code: 'INVALID_PANE_SLOT', message: `invalid pane slot for ${projectId}` };
       }
       if (!pane.members.every((index) => Number.isInteger(index) && index >= 0)
         || new Set(pane.members).size !== pane.members.length) {

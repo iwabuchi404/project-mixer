@@ -74,6 +74,12 @@
         <button id="new-tab-btn" class="tab-add" title="New terminal">+</button>
         <button id="split-pane-btn" class="tab-add" title="Split pane (Ctrl+\)">&#x25EB;</button>
       </div>
+      <div id="pane-layout-bar">
+        <span class="pane-layout-label">Workspace</span>
+        <button id="pane-layout-btn" class="pane-layout-btn" aria-haspopup="menu" aria-expanded="false" title="Choose workspace layout">
+          <span id="pane-layout-label-text">Single</span> <span aria-hidden="true">▾</span>
+        </button>
+      </div>
       <div id="find-bar" class="hidden">
         <input id="find-input" type="text" placeholder="Find..." title="Find (Ctrl+F)" />
         <span id="find-count"></span>
@@ -163,6 +169,7 @@
   </div>
   <div id="menu-backdrop" class="hidden"></div>
   <div id="new-tab-menu" class="dropdown-menu hidden"></div>
+  <div id="layout-menu" class="dropdown-menu hidden" role="menu" aria-label="Workspace layouts"></div>
   <div id="context-menu" class="context-menu hidden">
     <div class="context-menu-item" data-action="preview">Open in Preview</div>
     <div class="context-menu-item" data-action="edit">Edit in Editor</div>

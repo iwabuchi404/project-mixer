@@ -13,18 +13,24 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 test('B1: pane commands are declared in types.js AND schemas.js (D19)', () => {
   const types = read('src/commands/types.js');
   const schemas = read('src/commands/schemas.js');
-  for (const name of ['pane_split', 'pane_close', 'focus_pane']) {
+  for (const name of ['pane_split', 'pane_layout', 'pane_close', 'focus_pane']) {
     assert.match(types, new RegExp(`^\\s{2}${name}: \\{`, 'm'), `${name} missing in types.js`);
     assert.match(schemas, new RegExp(`^\\s{2}${name}: p\\(`, 'm'), `${name} missing in schemas.js`);
   }
 });
 
-test('B1: renderer keeps a flat pane model with a soft limit', () => {
+test('B1: renderer keeps a bounded pane model with fixed layout presets', () => {
   const renderer = read('renderer.js');
   assert.match(renderer, /const MAX_PANES = 4;/);
   assert.match(renderer, /let panes = \[\];/);
   assert.match(renderer, /function renderPanes\(\)/);
   assert.match(renderer, /function ensureDefaultPane\(\)/);
+  assert.match(renderer, /const PANE_LAYOUT_MODES = new Set\(\['single', 'row', 'column', 'grid'\]\)/);
+  assert.match(renderer, /function setPaneLayoutMode\(mode\)/);
+  assert.match(renderer, /if \(panes\.length >= MAX_PANES\)/);
+  assert.match(read('styles.css'), /#terminal-container\.grid-layout/);
+  assert.match(read('index.html'), /id="pane-layout-btn"/);
+  assert.match(read('index.html'), /id="layout-menu"/);
 });
 
 test('B1: switchTab shows each pane active terminal instead of hide-all-show-one', () => {

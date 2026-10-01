@@ -152,6 +152,29 @@ test('R4/config: validateLayout accepts the current pane schema', () => {
   assert.equal(result.ok, true);
 });
 
+test('R4/config: validateLayout accepts 2x2 layout metadata and bounds panes', () => {
+  const result = validateLayout({
+    paneLayouts: {
+      p1: {
+        direction: 'row',
+        layoutMode: 'grid',
+        activeIndex: 0,
+        panes: [0, 1, 2, 3].map((slot) => ({ size: 0, members: [], active: null, slot, view: null })),
+      },
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(validateLayout({
+    paneLayouts: {
+      p1: {
+        layoutMode: 'grid',
+        activeIndex: 0,
+        panes: [0, 1, 2, 3, 4].map((slot) => ({ members: [], slot, view: null })),
+      },
+    },
+  }).ok, false);
+});
+
 test('R4/config: validateLayout rejects malformed nested pane data', () => {
   assert.equal(validateLayout({
     paneLayouts: {

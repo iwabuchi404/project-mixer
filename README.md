@@ -4,8 +4,6 @@
 
 Claude Code、Codex、Devin CLI、OpenCode などの AI エージェントを複数同時に走らせるワークフローを想定した Electron 製デスクトップアプリです。ターミナル・エディタ・ファイルプレビュー・ローカルブラウザを統合し、VSCode を複数枚開かなくてもプロジェクト横断の作業が完結します。
 
-![Main View](screenshots/main-view.png)
-
 ## 特徴
 
 - **マルチプロジェクト管理**: サイドバーに複数プロジェクトを登録し、ワンクリックで切り替え。各プロジェクトのタブ・エディタ・ペイン構成は自動保存・復元
@@ -24,8 +22,6 @@ Claude Code、Codex、Devin CLI、OpenCode などの AI エージェントを複
 - **ファイル操作**: 新規ファイル/フォルダ作成、削除（確認ダイアログ付き）、パスコピー、OS で開く
 - **クロスプラットフォーム**: Windows / macOS / Linux に対応
 
-![Multi-pane Layout](screenshots/multi-pane.png)
-
 ## セキュリティ
 
 プレビュー対象の HTML / Markdown は信頼できない入力（AI エージェント生成物・クローン元 README 等）を想定し、多層防御を採っています：
@@ -36,7 +32,7 @@ Claude Code、Codex、Devin CLI、OpenCode などの AI エージェントを複
 
 ## 必要環境
 
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 20+
 - ネイティブビルドツール（`node-pty` のコンパイルに必要）
   - Windows: Visual Studio Build Tools または Visual Studio（C++ ワークロード）
   - macOS: Xcode Command Line Tools (`xcode-select --install`)
@@ -54,6 +50,17 @@ npm run rebuild
 # 起動
 npm start
 ```
+
+### 開発・UI smoke
+
+`npm run dev:v2` はレンダラーをビルド・監視してから、`--dev` プロファイルでElectronを起動します。UI smoke用のremote debugging portは環境変数または引数で指定できます。
+
+```powershell
+$env:PM_REMOTE_DEBUGGING_PORT = '9235'
+npm run dev:v2
+```
+
+別のターミナルで `npm run ui:smoke` を実行すると、起動中のアプリへ接続してUI smoke checkを行います。通知系は `npm run ui:smoke:agent -- 9235 47842`、`npm run ui:smoke:devin -- 9235` のように実行します。
 
 ## 配布ビルド
 
@@ -105,8 +112,6 @@ npm run dist:linux
 - 選択範囲を `Ctrl+Shift+Enter` で `path:L10-L20` 形式でスクラッチへ挿入
 
 ### プレビュー
-
-![Markdown Preview](screenshots/markdown-preview.png)
 
 | 種別 | 拡張子 | 表示方法 |
 |---|---|---|

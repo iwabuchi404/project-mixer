@@ -88,6 +88,7 @@ export const COMMAND_SCHEMAS = {
   find_close: p({}),
   // Phase 8 B1: flat pane operations. Not exposed to MCP (D11).
   pane_split: p({ direction: optStr }),
+  pane_layout: p({ mode: z.enum(['single', 'row', 'column', 'grid']) }),
   pane_close: p({}),
   focus_pane: p({ index: z.number() }),
   focus_pane_1: p({}),

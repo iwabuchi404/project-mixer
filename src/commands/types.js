@@ -219,6 +219,10 @@ export const COMMAND_TYPES = {
     args: { direction: "'row' | 'column' | 'toggle'?" },
     returns: 'void',
   },
+  pane_layout: {
+    args: { mode: "'single' | 'row' | 'column' | 'grid'" },
+    returns: 'void',
+  },
   pane_close: {
     args: {},
     returns: 'void',

@@ -885,6 +885,19 @@ textarea:focus-visible,
   background: var(--g-1);
 }
 
+#terminal-container.grid-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+#terminal-container.grid-layout .terminal-pane-item {
+  min-width: 0;
+  min-height: 0;
+  flex: none;
+}
+
 /* Phase 8 / B1: flat pane layout inside the terminal container.
    Boundaries stay visible at all times (1px --g-2 outline); keyboard focus
    upgrades the outline to --act. */
@@ -920,6 +933,46 @@ textarea:focus-visible,
 /* B6: hide the shared main tab bar — pane headers own tabs and buttons now. */
 #main-tab-bar {
   display: none !important;
+}
+
+#pane-layout-bar {
+  display: flex;
+  height: 30px;
+  min-height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 0 var(--s-2);
+  background: var(--g-0);
+  border-bottom: 1px solid var(--g-2);
+}
+
+.pane-layout-label {
+  color: var(--g-3);
+  font-size: var(--t-xs);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.pane-layout-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  min-height: 24px;
+  padding: 2px var(--s-2);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-1);
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.pane-layout-btn:hover,
+.pane-layout-btn[aria-expanded="true"] {
+  border-color: var(--g-4);
+  background: var(--g-2);
+  color: var(--g-6);
 }
 
 .pane-tab-bar {
@@ -1386,6 +1439,12 @@ textarea:focus-visible,
 .context-menu-item:hover {
   color: var(--g-6);
   background: var(--g-3);
+}
+
+.dropdown-item[aria-current="true"] {
+  color: var(--g-6);
+  background: var(--g-3);
+  box-shadow: inset 2px 0 0 var(--act);
 }
 
 .dropdown-item-browser {

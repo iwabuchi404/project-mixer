@@ -5,6 +5,7 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import sharedScrollbarCss from './scrollbars.css';
@@ -167,6 +168,9 @@ const terminalContainer = document.getElementById('terminal-container');
 const terminalParking = document.getElementById('terminal-parking');
 const terminalPane = document.getElementById('terminal-pane');
 const newTabBtn = document.getElementById('new-tab-btn');
+const paneLayoutBtn = document.getElementById('pane-layout-btn');
+const paneLayoutLabel = document.getElementById('pane-layout-label-text');
+const layoutMenu = document.getElementById('layout-menu');
 const editorPane = document.getElementById('editor-pane');
 const scratchEditorMount = document.getElementById('scratch-editor-mount');
 const fileEditorPane = document.getElementById('file-editor-pane');
@@ -497,7 +501,11 @@ function placeSurfaces() {
   layoutNonTerminalTabs();
   markShownTabs();
   updatePaneFocusClasses();
-  requestAnimationFrame(handleResize);
+  requestAnimationFrame(() => {
+    handleResize();
+    // After layout settles, so the visibility check reads real boxes.
+    syncWebglRenderers();
+  });
 }
 
 // Return a single surface node home (hidden). Validates the saved anchor so
@@ -659,13 +667,37 @@ function clearTerminalWaitingForUserInput(tabId) {
   });
 }
 
+// PTY output batching: agent TUIs emit redraws as many small chunks, and
+// feeding each chunk through a separate write/scroll/paint saturates the
+// renderer (keystroke echo queues behind them, which reads as input lag).
+// Coalesce roughly one frame of output per PTY into a single write.
+const PTY_OUTPUT_BATCH_MS = 16;
+const ptyOutputBuffers = new Map(); // ptyId -> { chunks: string[], timer: Timeout|null }
+
 window.api.onPtyData(({ id, data }) => {
+  let buffer = ptyOutputBuffers.get(id);
+  if (!buffer) {
+    buffer = { chunks: [], timer: null };
+    ptyOutputBuffers.set(id, buffer);
+  }
+  buffer.chunks.push(data);
+  if (buffer.timer === null) {
+    buffer.timer = setTimeout(() => flushPtyOutput(id), PTY_OUTPUT_BATCH_MS);
+  }
+});
+
+function flushPtyOutput(ptyId) {
+  const buffer = ptyOutputBuffers.get(ptyId);
+  if (!buffer) return;
+  buffer.timer = null;
+  const data = buffer.chunks.join('');
+  buffer.chunks.length = 0;
   for (const [tabId, t] of tabs) {
-    if (t.ptyId === id) {
+    if (t.ptyId === ptyId) {
       const followToken = captureTerminalFollowToken(t);
       t.terminal.write(data, () => {
         if (tabs.get(tabId) === t && shouldFollowTerminalOutput(t, followToken)) {
-          t.terminal.scrollToBottom();
+          scheduleTerminalScrollToBottom(t);
         }
       });
       // PTY output can SET waiting (e.g. detecting a prompt pattern) but
@@ -681,9 +713,116 @@ window.api.onPtyData(({ id, data }) => {
       return;
     }
   }
-});
+}
+
+// Scroll follows are rAF-throttled: during output floods at most one
+// scrollToBottom per frame instead of one per write callback.
+function scheduleTerminalScrollToBottom(t) {
+  if (t.scrollRafId != null) return;
+  t.scrollRafId = requestAnimationFrame(() => {
+    t.scrollRafId = null;
+    if (t.pinnedToBottom) t.terminal.scrollToBottom();
+  });
+}
+
+// WebGL renderer lifecycle. Two constraints shape this code.
+//
+// 1. preserveDrawingBuffer must stay true. renderPanes() rebuilds the pane
+//    DOM and re-parents every terminal element on each layout change, and a
+//    WebGL canvas without a preserved drawing buffer is blanked by the
+//    compositor the moment it leaves the document. xterm cannot observe
+//    that, so it only repaints on the next write or resize — a pane whose
+//    size did not change stayed blank until new output arrived.
+// 2. Chromium caps live WebGL contexts (~16) and force-loses the excess
+//    without restoring them. A session restores every project's terminals,
+//    so contexts go to visible terminals first and are capped by an LRU
+//    budget; everyone else renders through xterm's DOM fallback, which is
+//    slower but never loses content.
+const WEBGL_CONTEXT_BUDGET = 8;
+const WEBGL_RETRY_MS = 5000;
+const webglRenderers = new Map(); // Terminal -> { addon, usedAt }
+const webglRetryAfter = new Map(); // Terminal -> timestamp
+let webglUsedCounter = 0;
+
+function ensureWebglRenderer(terminal) {
+  const entry = webglRenderers.get(terminal);
+  if (entry) {
+    entry.usedAt = ++webglUsedCounter;
+    return;
+  }
+  if ((webglRetryAfter.get(terminal) || 0) > Date.now()) return;
+  const addon = new WebglAddon(true);
+  try {
+    terminal.loadAddon(addon);
+  } catch {
+    webglRetryAfter.set(terminal, Date.now() + WEBGL_RETRY_MS);
+    return;
+  }
+  webglRenderers.set(terminal, { addon, usedAt: ++webglUsedCounter });
+  addon.onContextLoss(() => {
+    if (webglRenderers.get(terminal)?.addon !== addon) return;
+    webglRenderers.delete(terminal);
+    // Cool down so the next sync does not immediately fight for the slot
+    // that just evicted this context.
+    webglRetryAfter.set(terminal, Date.now() + WEBGL_RETRY_MS);
+    // Restores the DOM renderer, so the terminal stays readable while the
+    // cooldown holds.
+    addon.dispose();
+  });
+}
+
+function releaseWebglRenderer(terminal) {
+  const entry = webglRenderers.get(terminal);
+  if (!entry) return;
+  webglRenderers.delete(terminal);
+  webglRetryAfter.delete(terminal);
+  // WebglAddon.dispose() swaps xterm's DOM renderer back in and forces a
+  // full repaint, so the terminal keeps showing its scrollback.
+  entry.addon.dispose();
+}
+
+// Terminal teardown: drop the bookkeeping without disposing, the terminal
+// itself is about to go away.
+function dropWebglRenderer(terminal) {
+  webglRenderers.delete(terminal);
+  webglRetryAfter.delete(terminal);
+}
+
+// style.display is the per-pane signal placeSurfaces()/switchTab() set; the
+// box check additionally rules out terminals parked in #terminal-parking and
+// terminals behind a collapsed pane body.
+function isTerminalVisible(t) {
+  if (t.projectId !== activeProjectId) return false;
+  if (t.termEl.style.display === 'none' || !t.termEl.isConnected) return false;
+  return t.termEl.offsetWidth > 0 && t.termEl.offsetHeight > 0;
+}
+
+// Single place that decides who owns a GPU context. Visible terminals keep
+// or acquire one; the least recently shown hidden terminals give theirs up
+// once the budget is exceeded.
+function syncWebglRenderers() {
+  const visible = new Set();
+  for (const t of tabs.values()) {
+    if (!isTerminalVisible(t)) continue;
+    visible.add(t.terminal);
+    ensureWebglRenderer(t.terminal);
+  }
+  if (webglRenderers.size <= WEBGL_CONTEXT_BUDGET) return;
+  const evictable = [];
+  for (const [terminal, entry] of webglRenderers) {
+    if (!visible.has(terminal)) evictable.push([terminal, entry.usedAt]);
+  }
+  evictable.sort((a, b) => a[1] - b[1]);
+  for (const [terminal] of evictable) {
+    if (webglRenderers.size <= WEBGL_CONTEXT_BUDGET) break;
+    releaseWebglRenderer(terminal);
+  }
+}
 
 window.api.onPtyExit(({ id, exitCode }) => {
+  // Flush any batched output first so the exit marker stays last.
+  flushPtyOutput(id);
+  ptyOutputBuffers.delete(id);
   for (const [tabId, t] of tabs) {
     if (t.ptyId === id) {
       t.terminal.write(`\r\n\x1b[90m[process exited with code ${exitCode}]\x1b[0m\r\n`);
@@ -930,6 +1069,7 @@ async function removeProject(projectId) {
     dispatch('agent_session_unbound', { tabId: tid });
     dispatch('terminal_clear_attention', { tabId: tid });
     window.api.ptyKill(t.ptyId);
+    dropWebglRenderer(t.terminal);
     t.terminal.dispose();
     t.termEl.remove();
     t.tabElement.remove();
@@ -1952,9 +2092,17 @@ let editorStateInitialized = false;
 // has a single direction ('row' | 'column') and panes split it evenly.
 // One pane is exactly the pre-B1 behavior.
 const MAX_PANES = 4;
-let panes = []; // [{ id, tabIds: [], activeTabId, size }] for the active project
+const PANE_LAYOUT_MODES = new Set(['single', 'row', 'column', 'grid']);
+const PANE_LAYOUT_LABELS = {
+  single: 'Single',
+  row: 'Split right',
+  column: 'Split down',
+  grid: '2 × 2 grid',
+};
+let panes = []; // [{ id, tabIds: [], activeTabId, size, slot }] for the active project
 let activePaneId = null;
 let paneDirection = 'row'; // 'row' = side-by-side, 'column' = stacked
+let paneLayoutMode = 'single';
 let nextPaneId = 1;
 const paneEls = new Map(); // paneId -> { root, header, tabBar, body }
 // Pane skeletons for projects that have no full editor state yet (e.g.
@@ -2090,10 +2238,12 @@ function saveCurrentEditorState() {
       tabIds: [...p.tabIds],
       activeTabId: p.activeTabId,
       size: p.size,
+      slot: p.slot ?? null,
       view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null,
     })),
     activePaneId,
     paneDirection,
+    paneLayoutMode,
     nextPaneId,
   });
 }
@@ -2217,6 +2367,10 @@ async function switchProjectEditor(projectId) {
       : null;
     lastSentContent = state.lastSentContent;
     lastSentTabPath = state.lastSentTabPath;
+    paneLayoutMode = normalizePaneLayoutMode(
+      state.paneLayoutMode,
+      state.panes?.length > 1 ? state.paneDirection : 'single',
+    );
     // B1: restore pane structure (validated against live tabs).
     panes = Array.isArray(state.panes) && state.panes.length > 0
       ? state.panes
@@ -2225,12 +2379,17 @@ async function switchProjectEditor(projectId) {
           tabIds: (p.tabIds || []).filter((id) => tabs.has(id)),
           activeTabId: p.activeTabId !== null && tabs.has(p.activeTabId) ? p.activeTabId : null,
           size: Number(p.size) || 0,
+          slot: Number.isInteger(p.slot) ? p.slot : null,
           view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null,
         }))
-        .filter((p) => p.tabIds.length > 0 || p.view)
+        .filter((p) => paneLayoutMode === 'grid' || p.tabIds.length > 0 || p.view)
       : [];
     if (panes.length === 0) {
-      panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0 }];
+      panes = [createEmptyPane(0)];
+    }
+    if (paneLayoutMode === 'grid') {
+      while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+      normalizePaneSlots();
     }
     // Monotonic raise ONLY — per-project counters can be much lower, and a
     // lowered global counter makes splitFocusedPane allocate ids that
@@ -2255,9 +2414,19 @@ async function switchProjectEditor(projectId) {
     // into this project before it was ever opened.
     const sk = projectPaneSkeletons.get(projectId);
     adoptedSkeleton = Boolean(sk && sk.panes.length > 0);
+    paneLayoutMode = normalizePaneLayoutMode(
+      sk?.layoutMode,
+      sk?.panes?.length > 1 ? sk?.direction : 'single',
+    );
+    paneDirection = sk?.direction === 'column' ? 'column' : 'row';
     panes = sk && sk.panes.length > 0
       ? sk.panes.map((p) => ({ ...p, view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null }))
       : [];
+    if (panes.length === 0) panes = [createEmptyPane(0)];
+    if (paneLayoutMode === 'grid') {
+      while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+      normalizePaneSlots();
+    }
     // Skeleton pane ids came from the global counter — never let the next
     // allocation collide with them.
     if (panes.length > 0) {
@@ -2366,6 +2535,7 @@ function removeProjectEditorState(projectId) {
     panes = [];
     activePaneId = null;
     paneDirection = 'row';
+    paneLayoutMode = 'single';
     nextPaneId = 1;
     paneEls.clear();
     switchProjectEditor(null);
@@ -3812,7 +3982,9 @@ function buildPushFocusContext({ project, activeFilePath, isPreview, selectedTex
 // '' when the main area is not split (single pane = no distribution).
 function buildPaneContextSummary() {
   if (panes.length <= 1) return '';
-  const dir = paneDirection === 'column' ? 'vertically stacked' : 'side-by-side';
+  const dir = paneLayoutMode === 'grid'
+    ? '2 x 2 grid'
+    : paneDirection === 'column' ? 'vertically stacked' : 'side-by-side';
   const lines = panes.map((p, i) => {
     let label;
     if (p.view && p.view.type !== 'terminal') {
@@ -4178,6 +4350,9 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
 
   await new Promise((resolve) => requestAnimationFrame(resolve));
   terminal.open(termEl);
+  // Skip GPU acquisition for terminals parked hidden for background
+  // projects — they get it from ensureWebglRenderer when first shown.
+  if (targetIsActive) ensureWebglRenderer(terminal);
   fitAddon.fit();
 
   // ターミナルのコピー機能（Electron は標準コンテキストメニューが出ないため自前で実装）
@@ -4224,6 +4399,7 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
       resumeSessionId: resumeSessionId || undefined,
     });
   } catch (error) {
+    dropWebglRenderer(terminal);
     terminal.dispose();
     termEl.remove();
     throw error;
@@ -4318,6 +4494,7 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     dispatch('terminal_clear_attention', { tabId });
     tabs.delete(tabId);
     window.api.ptyKill(ptyId);
+    dropWebglRenderer(terminal);
     terminal.dispose();
     termEl.remove();
     tabEl.remove();
@@ -4494,6 +4671,29 @@ function showProjectTabs(projectId) {
 // Phase 8 / B1: panes
 // ============================================================
 
+function normalizePaneLayoutMode(mode, fallback = 'single') {
+  return PANE_LAYOUT_MODES.has(mode) ? mode : fallback;
+}
+
+function createEmptyPane(slot = null) {
+  return { id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null, slot };
+}
+
+function normalizePaneSlots() {
+  if (paneLayoutMode !== 'grid') {
+    panes.forEach((pane) => { pane.slot = null; });
+    return;
+  }
+  const usedSlots = new Set();
+  let nextSlot = 0;
+  panes.forEach((pane) => {
+    while (usedSlots.has(nextSlot)) nextSlot++;
+    if (!Number.isInteger(pane.slot) || usedSlots.has(pane.slot)) pane.slot = nextSlot;
+    usedSlots.add(pane.slot);
+    nextSlot++;
+  });
+}
+
 function ensureDefaultPane() {
   if (panes.length === 0) {
     panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
@@ -4594,6 +4794,17 @@ function updatePaneFocusClasses() {
 }
 
 function applyPaneSizes() {
+  if (paneLayoutMode === 'grid') {
+    panes.forEach((p) => {
+      const els = paneEls.get(p.id);
+      if (!els) return;
+      els.root.style.width = '';
+      els.root.style.height = '';
+      els.root.style.flexBasis = '';
+      els.root.style.flexGrow = '';
+    });
+    return;
+  }
   const horizontal = paneDirection !== 'column';
   panes.forEach((p, index) => {
     const els = paneEls.get(p.id);
@@ -4695,8 +4906,61 @@ function makePaneSplitter(splitterEl, prevRoot, nextRoot, prevState, nextState, 
   });
 }
 
+function mergePaneInto(target, source) {
+  if (!target || !source || target.id === source.id) return;
+  target.tabIds.push(...source.tabIds.filter((id) => tabs.has(id) && !target.tabIds.includes(id)));
+  if (target.activeTabId === null && source.activeTabId !== null && tabs.has(source.activeTabId)) {
+    target.activeTabId = source.activeTabId;
+  }
+  if (!target.view && source.view) target.view = source.view;
+  retirePaneMembership(source.id, target.id);
+}
+
+function reducePanesToCount(count) {
+  if (panes.length <= count) return;
+  const target = panes[count - 1];
+  for (const source of panes.slice(count)) mergePaneInto(target, source);
+  panes = panes.slice(0, count);
+  if (!panes.some((pane) => pane.id === activePaneId)) activePaneId = panes[0].id;
+}
+
+function setPaneLayoutMode(mode) {
+  const nextMode = normalizePaneLayoutMode(mode);
+  if (panes.length === 0) panes.push(createEmptyPane(0));
+  if (nextMode === 'grid') {
+    paneLayoutMode = 'grid';
+    paneDirection = 'row';
+    normalizePaneSlots();
+    while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+    normalizePaneSlots();
+    panes.sort((a, b) => (a.slot ?? MAX_PANES) - (b.slot ?? MAX_PANES));
+  } else {
+    reducePanesToCount(nextMode === 'single' ? 1 : 2);
+    paneLayoutMode = nextMode;
+    paneDirection = nextMode === 'column' ? 'column' : 'row';
+    if (nextMode !== 'single' && panes.length < 2) {
+      panes.push(createEmptyPane());
+      activePaneId = panes[panes.length - 1].id;
+    }
+  }
+  updatePaneLayoutUi();
+  renderPanes();
+  saveCurrentEditorState();
+  void saveLayout();
+  requestAnimationFrame(handleResize);
+  if (nextMode !== 'single' && panes.length === 2 && panes[1].tabIds.length === 0 && !panes[1].view) {
+    const project = projects.get(activeProjectId);
+    void dispatch('create_terminal', {
+      command: defaultShell(),
+      cwd: project?.path,
+      projectId: activeProjectId,
+    });
+  }
+}
+
 function renderPanes() {
   ensureDefaultPane();
+  updatePaneLayoutUi();
   normalizePaneMembership();
   // Rescue hosted surface nodes BEFORE clearing the container. Detach (not
   // home) so re-placement costs a single move — homing first would move
@@ -4711,11 +4975,17 @@ function renderPanes() {
   }
   terminalContainer.innerHTML = '';
   paneEls.clear();
-  terminalContainer.style.flexDirection = paneDirection === 'column' ? 'column' : 'row';
+  terminalContainer.classList.toggle('grid-layout', paneLayoutMode === 'grid');
+  terminalContainer.style.flexDirection = paneLayoutMode === 'grid' ? 'row' : paneDirection === 'column' ? 'column' : 'row';
   panes.forEach((pane, i) => {
     const root = document.createElement('div');
     root.className = 'terminal-pane-item';
     root.dataset.paneId = String(pane.id);
+    if (paneLayoutMode === 'grid') {
+      const slot = Number.isInteger(pane.slot) ? pane.slot : i;
+      root.style.gridColumn = String((slot % 2) + 1);
+      root.style.gridRow = String(Math.floor(slot / 2) + 1);
+    }
 
     // B6: pane header with per-pane tab bar + new-tab + direction toggle + close.
     const header = document.createElement('div');
@@ -4728,6 +4998,7 @@ function renderPanes() {
     const addBtn = document.createElement('button');
     addBtn.className = 'pane-add-btn';
     addBtn.title = 'New terminal';
+    addBtn.setAttribute('aria-label', 'New terminal in this pane');
     addBtn.innerHTML = '+';
     addBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -4742,30 +5013,11 @@ function renderPanes() {
       newTabMenu.classList.remove('hidden');
     });
     header.appendChild(addBtn);
-    // Direction toggle / split button (Step 3).
-    const dirBtn = document.createElement('button');
-    dirBtn.className = 'pane-dir-btn';
-    dirBtn.title = panes.length > 1 ? 'Toggle split direction' : 'Split pane';
-    dirBtn.innerHTML = paneDirection === 'column' ? '&#x2502;' : '&#x2500;';
-    dirBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setFocusedPane(pane.id);
-      if (panes.length > 1) {
-        // Toggle direction without creating a new pane.
-        paneDirection = paneDirection === 'row' ? 'column' : 'row';
-        renderPanes();
-        saveCurrentEditorState();
-        void saveLayout();
-        requestAnimationFrame(handleResize);
-      } else {
-        dispatch('pane_split', {});
-      }
-    });
-    header.appendChild(dirBtn);
     // Close button (Step 2). Disabled when only one pane exists.
     const closeBtn = document.createElement('button');
     closeBtn.className = 'pane-close-btn';
     closeBtn.title = 'Close pane';
+    closeBtn.setAttribute('aria-label', 'Close pane');
     closeBtn.innerHTML = '&times;';
     closeBtn.disabled = panes.length <= 1;
     closeBtn.addEventListener('click', (e) => {
@@ -4781,8 +5033,7 @@ function renderPanes() {
     root.appendChild(body);
     terminalContainer.appendChild(root);
     paneEls.set(pane.id, { root, header, tabBar: paneTabBar, body });
-    // Splitter goes BETWEEN adjacent panes (inserted before this root).
-    if (i > 0) addPaneSplitter(panes[i - 1], pane);
+    if (i > 0 && paneLayoutMode !== 'grid') addPaneSplitter(panes[i - 1], pane);
     // Move member terminals into this pane's body (xterm tolerates DOM
     // moves; fit() is re-run by handleResize afterwards).
     pane.tabIds.forEach((tabId) => {
@@ -4978,22 +5229,34 @@ function showPaneActiveTerminals() {
 
 async function splitFocusedPane(direction) {
   ensureDefaultPane();
-  // Soft limit (spec §4.1): warn but do not hard-block above MAX_PANES.
   if (panes.length >= MAX_PANES) {
-    showToast({ key: 'pane-limit', type: 'warn', message: `More than ${MAX_PANES} panes may impact memory` });
+    showToast({ key: 'pane-limit', type: 'warn', message: `The workspace supports up to ${MAX_PANES} panes` });
+    return;
+  }
+  if (paneLayoutMode === 'grid') {
+    const slot = panes.reduce((max, pane) => Math.max(max, Number.isInteger(pane.slot) ? pane.slot : -1), -1) + 1;
+    const pane = createEmptyPane(slot);
+    panes.push(pane);
+    normalizePaneSlots();
+    activePaneId = pane.id;
+    renderPanes();
+    saveCurrentEditorState();
+    void saveLayout();
+    return;
   }
   if (direction === 'row' || direction === 'column') {
     paneDirection = direction;
+    paneLayoutMode = direction;
   } else {
     paneDirection = paneDirection === 'row' ? 'column' : 'row';
+    paneLayoutMode = paneDirection;
   }
-  const pane = { id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null };
+  const pane = createEmptyPane();
   panes.push(pane);
   activePaneId = pane.id;
   renderPanes();
   saveCurrentEditorState();
   void saveLayout();
-  // The new pane is empty: spawn a terminal in it.
   const p = projects.get(activeProjectId);
   await dispatch('create_terminal', { command: defaultShell(), cwd: p?.path, projectId: activeProjectId });
   requestAnimationFrame(handleResize);
@@ -5004,6 +5267,10 @@ function closeFocusedPane() {
   if (panes.length <= 1) return;
   const idx = panes.findIndex((p) => p.id === activePaneId);
   const [gone] = panes.splice(idx, 1);
+  if (paneLayoutMode === 'grid' && panes.length < MAX_PANES) {
+    paneLayoutMode = 'row';
+    paneDirection = 'row';
+  }
   const target = panes[Math.max(0, idx - 1)];
   // Tabs survive: they move to the remaining pane (spec §4.4).
   // Dedupe: a corrupted duplicate must not end up claimed twice.
@@ -5146,6 +5413,10 @@ function detachTabFromPanes(tabId) {
       getPane(survivorId).view = pane.view;
     }
     panes = panes.filter((p) => p.id !== pane.id);
+    if (paneLayoutMode === 'grid') {
+      paneLayoutMode = 'row';
+      paneDirection = 'row';
+    }
     if (activePaneId === pane.id) activePaneId = panes[0].id;
     if (survivorId !== null) retirePaneMembership(pane.id, survivorId);
     renderPanes();
@@ -5220,6 +5491,7 @@ function switchTab(tabId, { focus = true } = {}) {
 function resizeTerminalToContainer(t) {
   const rect = t.termEl.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
+  ensureWebglRenderer(t.terminal);
 
   const oldCols = t.terminal.cols;
   const oldRows = t.terminal.rows;
@@ -5244,8 +5516,13 @@ function closeTerminal(tabId) {
   const projectId = t.projectId;
   const closedPane = paneOfTab(tabId);
   const paneHadView = Boolean(closedPane?.view);
+  const pendingOutput = ptyOutputBuffers.get(t.ptyId);
+  if (pendingOutput?.timer) clearTimeout(pendingOutput.timer);
+  ptyOutputBuffers.delete(t.ptyId);
+  if (t.scrollRafId != null) cancelAnimationFrame(t.scrollRafId);
   void window.api.devinUnbind(t.ptyId);
   window.api.ptyKill(t.ptyId);
+  dropWebglRenderer(t.terminal);
   t.terminal.dispose();
   t.termEl.remove();
   t.tabElement.remove();
@@ -5370,6 +5647,51 @@ function updateProjectStatus(projectId) {
 // ============================================================
 
 const newTabMenu = document.getElementById('new-tab-menu');
+const PANE_LAYOUT_ITEMS = [
+  { mode: 'single', label: 'Single' },
+  { mode: 'row', label: 'Split right' },
+  { mode: 'column', label: 'Split down' },
+  { mode: 'grid', label: '2 × 2 grid' },
+];
+
+function updatePaneLayoutUi() {
+  if (paneLayoutLabel) paneLayoutLabel.textContent = PANE_LAYOUT_LABELS[paneLayoutMode] || 'Single';
+  layoutMenu?.querySelectorAll('[data-layout-mode]').forEach((item) => {
+    item.setAttribute('aria-current', item.dataset.layoutMode === paneLayoutMode ? 'true' : 'false');
+  });
+}
+
+function buildPaneLayoutMenu() {
+  layoutMenu.innerHTML = '';
+  PANE_LAYOUT_ITEMS.forEach(({ mode, label }) => {
+    const item = document.createElement('div');
+    item.className = 'dropdown-item';
+    item.dataset.layoutMode = mode;
+    item.textContent = label;
+    item.addEventListener('click', (event) => {
+      event.stopPropagation();
+      layoutMenu.classList.add('hidden');
+      paneLayoutBtn.setAttribute('aria-expanded', 'false');
+      setPaneLayoutMode(mode);
+    });
+    layoutMenu.appendChild(item);
+  });
+  updatePaneLayoutUi();
+}
+
+paneLayoutBtn.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const opening = layoutMenu.classList.contains('hidden');
+  if (opening) {
+    const rect = paneLayoutBtn.getBoundingClientRect();
+    layoutMenu.style.left = `${rect.left}px`;
+    layoutMenu.style.top = `${rect.bottom}px`;
+  }
+  layoutMenu.classList.toggle('hidden', !opening);
+  paneLayoutBtn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+});
+
+buildPaneLayoutMenu();
 
 document.getElementById('split-pane-btn').addEventListener('click', () => {
   dispatch('pane_split', {});
@@ -5431,6 +5753,8 @@ buildTerminalMenu();
 // Close menu when clicking outside
 document.addEventListener('click', () => {
   newTabMenu.classList.add('hidden');
+  layoutMenu.classList.add('hidden');
+  paneLayoutBtn.setAttribute('aria-expanded', 'false');
 });
 
 // ============================================================
@@ -5442,13 +5766,15 @@ document.addEventListener('click', () => {
 // ============================================================
 
 const menuBackdrop = document.getElementById('menu-backdrop');
-const overlayMenus = [contextMenu, tabContextMenu, newTabMenu, previewContextMenu];
+const overlayMenus = [contextMenu, tabContextMenu, newTabMenu, previewContextMenu, layoutMenu];
 
 function closeOverlayMenus() {
   hideContextMenu();
   hideTabContextMenu();
   newTabMenu.classList.add('hidden');
   previewContextMenu.classList.add('hidden');
+  layoutMenu.classList.add('hidden');
+  paneLayoutBtn.setAttribute('aria-expanded', 'false');
 }
 
 function syncMenuBackdrop() {
@@ -5581,7 +5907,10 @@ let resizeTimeout;
 function handleResize() {
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(() => {
-    // B1: fit every visible terminal, not just the globally active one —
+    // Trim first: a pane can collapse to zero width during the drag, and
+    // its terminal must give up its context before the fit loop runs.
+    syncWebglRenderers();
+    // B1: fit every visible terminal, not just the globally active one ?
     // each visible pane has its own live xterm instance.
     tabs.forEach((t) => {
       if (t.termEl.style.display === 'none') return;
@@ -5878,8 +6207,9 @@ async function saveLayout() {
   Array.from(tabs.values()).forEach((t, i) => tabIndex.set(t.id, i));
 
   const nonTerminalTabs = [];
-  const serializePanes = (dir, arr, act, projectId, fileMap = new Map()) => ({
+  const serializePanes = (dir, arr, act, projectId, fileMap = new Map(), layoutMode = 'single') => ({
     direction: dir === 'column' ? 'column' : 'row',
+    layoutMode: normalizePaneLayoutMode(layoutMode, arr.length > 1 ? dir : 'single'),
     activeIndex: Math.max(0, arr.findIndex((p) => p.id === act)),
     panes: arr.map((p, paneIndex) => {
       const nonTerminalMembers = [];
@@ -5912,6 +6242,7 @@ async function saveLayout() {
       }
       return {
         size: p.size || 0,
+        slot: p.slot ?? null,
         members: p.tabIds.map((id) => tabIndex.get(id)).filter((i) => i !== undefined),
         nonTerminalMembers,
         active: p.activeTabId !== null && tabIndex.has(p.activeTabId) ? tabIndex.get(p.activeTabId) : null,
@@ -5922,16 +6253,16 @@ async function saveLayout() {
 
   const paneLayouts = {};
   if (activeEditorProjectId && panes.length > 0) {
-    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId, activeEditorProjectId, openFiles);
+    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId, activeEditorProjectId, openFiles, paneLayoutMode);
   }
   projectEditorStates.forEach((st, pid) => {
     if (pid !== activeEditorProjectId && Array.isArray(st.panes) && st.panes.length > 0) {
-      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId, pid, st.openFiles);
+      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId, pid, st.openFiles, st.paneLayoutMode);
     }
   });
   projectPaneSkeletons.forEach((sk, pid) => {
     if (sk.panes.length > 0) {
-      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId, pid);
+      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId, pid, new Map(), sk.layoutMode);
     }
   });
 
@@ -6035,16 +6366,26 @@ async function applySavedPaneLayouts(activePid, idMap) {
         tabIds: members,
         activeTabId: act,
         size: Number(sp.size) || 0,
+        slot: Number.isInteger(sp.slot) ? sp.slot : null,
         view: sv && sv.type !== 'terminal'
           ? { type: sv.type, path: sv.path || null, ...(sv.sourcePath ? { sourcePath: sv.sourcePath } : {}) }
           : null,
       };
     });
+    const savedLayoutMode = normalizePaneLayoutMode(
+      saved.layoutMode,
+      saved.panes.length > 1 ? saved.direction : 'single',
+    );
     if (pid === activePid) {
-      paneDirection = saved.direction === 'column' ? 'column' : 'row';
+      paneLayoutMode = savedLayoutMode;
+      paneDirection = savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row';
       panes = build();
       if (panes.length === 0) {
-        panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
+        panes = [createEmptyPane(0)];
+      }
+      if (paneLayoutMode === 'grid') {
+        while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+        normalizePaneSlots();
       }
       activePaneId = panes[Math.min(Number(saved.activeIndex) || 0, panes.length - 1)].id;
       renderPanes();
@@ -6099,6 +6440,8 @@ async function applySavedPaneLayouts(activePid, idMap) {
     } else {
       const built = build();
       projectPaneSkeletons.set(pid, {
+        layoutMode: savedLayoutMode,
+        direction: savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row',
         panes: built,
         activePaneId: built[Math.min(Number(saved.activeIndex) || 0, built.length - 1)]?.id ?? built[0]?.id,
       });
@@ -6310,6 +6653,10 @@ register('focus_terminal', ({ tabId }) => {
 // Phase 8 B1: pane operations (not exposed to MCP — D11)
 register('pane_split', ({ direction } = {}) => {
   return splitFocusedPane(direction);
+});
+
+register('pane_layout', ({ mode }) => {
+  setPaneLayoutMode(mode);
 });
 
 register('pane_close', () => {
