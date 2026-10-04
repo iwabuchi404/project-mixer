@@ -17,6 +17,7 @@ const {
   parseDevinSessionList,
   pickDevinResumeCandidate,
   isSafeCwd,
+  normalizePathKey,
   MAX_JSON_BYTES,
 } = require('./src/main/devin-session-index.cjs');
 const {
@@ -880,6 +881,13 @@ ipcMain.handle('devin:latest-session', async (event, payload) => {
     });
     const { sessions, truncated } = parseDevinSessionList(stdout);
     const picked = pickDevinResumeCandidate(sessions, cwd);
+    // `all` lets layout restore offer a specific session when several
+    // devin tabs are reopening, instead of only the newest.
+    const all = sessions
+      .filter((s) => normalizePathKey(s.workingDirectory) === normalizePathKey(cwd))
+      .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0))
+      .slice(0, 20)
+      .map((s) => ({ id: s.id, title: s.title, lastActivityAt: s.lastActivityAt }));
     return {
       ok: true,
       candidate: picked.candidate ? {
@@ -890,6 +898,7 @@ ipcMain.handle('devin:latest-session', async (event, payload) => {
       count: picked.count,
       ambiguous: picked.ambiguous,
       truncated,
+      all,
     };
   } catch (e) {
     // Devin CLI missing, not logged in, or timed out: the caller falls

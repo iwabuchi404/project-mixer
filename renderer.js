@@ -137,13 +137,19 @@ function commitAttention(patch) {
 function commitTerminalAttention(terminalAttention, options) {
   setState({ terminalAttention });
   reconcileAttention(terminalAttention);
-  if (!options) return;
-  if (options.forgetTabId) {
+  if (options?.forgetTabId) {
     forgetTabAttention(options.forgetProjectId, options.forgetTabId);
   }
-  if (options.answeredTabId) {
+  if (options?.answeredTabId) {
     answerTabAttention(options.answeredProjectId, options.answeredTabId);
   }
+  // Must run on EVERY commit, including the common one with no options.
+  // It used to sit after an early `if (!options) return`, so a plain
+  // agent_notification_received refreshed nothing: the Inbox kept showing
+  // its empty state while the store already held the item. Found by the
+  // live check in test/attention-inbox-ui-check.cjs, which is why the
+  // earlier manual pass missed it (there the Inbox was opened after the
+  // notification arrived, and activateAttentionTab redrew unconditionally).
   refreshAttentionSurface();
 }
 
@@ -1067,7 +1073,7 @@ async function selectProject(projectId) {
     if (activeProjectId !== projectId) return;
     // Phase 5 S1: build tree index for filtering (async, non-blocking).
     buildTreeIndex(p.path);
-    window.api.hookSetup(p.path);
+    void reportHookSetup(p.path);
   }
   if (activeProjectId !== projectId || selectionGeneration !== projectSelectionGeneration) return;
   showProjectTabs(projectId);
@@ -1941,6 +1947,81 @@ async function unbindDevinSession(tabId) {
   await window.api.devinUnbind(terminal.ptyId);
   dispatch('agent_session_unbound', { tabId });
   showToast({ key: `devin-unbound-${tabId}`, message: 'Devin Cloud session disconnected' });
+}
+
+// hook:setup runs on every project switch, so a report would repeat each
+// time. Remember which (project, tool, outcome) triples were already
+// surfaced and only speak up on a change.
+const reportedHookSetups = new Set();
+
+// hook:setup returns one result per agent. Most are silent successes; the
+// interesting ones are `skipped` (something else already owns the config
+// slot) and failures, because both mean "this agent will not report".
+function summarizeHookSetup(results) {
+  if (!Array.isArray(results)) return [];
+  const notes = [];
+  for (const r of results) {
+    if (!r || typeof r.tool !== 'string') continue;
+    const label = TERMINAL_LABELS[r.tool] || r.tool;
+    if (r.success === false) {
+      notes.push({ tool: r.tool, type: 'error', message: `${label} hook setup failed`, detail: r.error || 'Unknown error' });
+    } else if (r.skipped) {
+      // Codex only: notify is a single-value slot that Project Mixer
+      // refuses to overwrite, so resume and turn badges stay off.
+      notes.push({
+        tool: r.tool,
+        type: 'warn',
+        message: `${label} notify is already configured`,
+        detail: r.note || 'Project Mixer did not modify it.',
+        persistent: true,
+      });
+    }
+  }
+  return notes;
+}
+
+// Ask which of several devin sessions to resume. Reuses the prompt modal
+// with a numbered list; the returned value is a session object so the
+// caller's ambiguity wording stays accurate.
+async function promptDevinSessionChoice(sessions) {
+  const lines = sessions.slice(0, 10).map((s, i) => {
+    const title = s.title ? `"${s.title}"` : s.id;
+    return `${i + 1}. ${title}\n   ${s.id}`;
+  });
+  const answer = await showPrompt(
+    'Resume Devin Session',
+    `Which session?\n\n${lines.join('\n')}\n\nEnter a number (or an exact session id):`,
+    '1',
+  );
+  if (!answer) return null;
+  const trimmed = String(answer).trim();
+  const index = Number.parseInt(trimmed, 10);
+  if (Number.isInteger(index) && index >= 1 && index <= Math.min(sessions.length, 10)) {
+    return sessions[index - 1];
+  }
+  const exact = sessions.find((s) => s.id === trimmed);
+  return exact || null;
+}
+
+async function reportHookSetup(projectPath) {
+  let results = null;
+  try {
+    results = await window.api.hookSetup(projectPath);
+  } catch {
+    return;
+  }
+  for (const note of summarizeHookSetup(results)) {
+    const key = `hook-setup:${projectPath}:${note.tool}:${note.type}`;
+    if (reportedHookSetups.has(key)) continue;
+    reportedHookSetups.add(key);
+    showToast({
+      key,
+      message: note.message,
+      detail: note.detail,
+      type: note.type,
+      persistent: Boolean(note.persistent),
+    });
+  }
 }
 
 document.addEventListener('click', () => hideTabContextMenu());
@@ -6356,6 +6437,53 @@ const tabsOut = Array.from(tabs.values()).map(t => {
   }
 }
 
+// Devin publishes no hook, so a devin tab can only learn its session id
+// from `devin list --format json` (see src/main/devin-session-index.cjs).
+// Layout restore needs one query per project, not per tab: the CLI is a
+// process launch and a 20-tab layout would otherwise spawn 20 of them.
+//
+// Returns Map<projectId, Array<{id,title}>> holding that project's
+// sessions, newest first. Each entry is handed out at most once by
+// takeDevinResumeCandidate, so two reopening devin tabs get two different
+// sessions rather than both attaching to the same one.
+//
+// Assigning by recency is a heuristic, not a guarantee: the index exposes
+// no per-tab identity. Newest-first is the best available ordering, and it
+// only ever applies to tabs that would otherwise start fresh.
+async function buildDevinResumePool(tabsToRestore) {
+  const pool = new Map();
+  const needsLookup = new Set();
+  for (const tab of tabsToRestore || []) {
+    if (tab.resumeSessionId || tab.devinSessionId) continue;
+    if (normalizeRendererCommand(tab.command) !== 'devin') continue;
+    const project = projects.get(tab.projectId);
+    if (project?.path) needsLookup.add(tab.projectId);
+  }
+  if (needsLookup.size === 0) return pool;
+  await Promise.all([...needsLookup].map(async (projectId) => {
+    const projectPath = projects.get(projectId)?.path;
+    if (!projectPath) return;
+    try {
+      const found = await window.api.devinLatestSession(projectPath);
+      if (found?.ok && Array.isArray(found.all) && found.all.length > 0) {
+        pool.set(projectId, found.all.map((s) => ({ id: s.id, title: s.title })));
+      }
+    } catch {
+      // CLI missing, unauthenticated, or slow: those tabs start fresh,
+      // which is the pre-existing behaviour.
+    }
+  }));
+  return pool;
+}
+
+// Hand out one pooled session per tab and remove it, so a second devin tab
+// in the same project cannot resume the session the first one just claimed.
+function takeDevinResumeCandidate(pool, projectId) {
+  const list = pool.get(projectId);
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return list.shift();
+}
+
 async function loadLayout() {
   const layout = await window.api.layoutLoad();
   if (!layout) return;
@@ -6384,6 +6512,11 @@ async function loadLayout() {
     const idMap = [];
     if (layout.tabs && layout.tabs.length > 0) {
       const lastSessions = loadLastSessions();
+      // Devin tabs saved before per-tab resume existed carry no id, and
+      // devin has no hook to supply one later. Query the CLI index once
+      // per affected project and hand each reopening devin tab a distinct
+      // session instead of letting them all start fresh.
+      const devinResumePool = await buildDevinResumePool(layout.tabs);
       for (const tab of layout.tabs) {
         try {
           // Per-tab id first (written by saveLayout), then devin's cloud id,
@@ -6392,7 +6525,12 @@ async function loadLayout() {
           const tracked = !tab.devinSessionId && !tab.resumeSessionId && tab.projectId && tab.command
             ? lastSessions[`${tab.projectId}:${normalizeRendererCommand(tab.command)}`]?.sessionId
             : null;
-          const resumeId = tab.resumeSessionId || tab.devinSessionId || tracked || null;
+          // Consume a pooled devin session only when nothing better exists.
+          const pooled = (!tab.resumeSessionId && !tab.devinSessionId && !tracked
+            && normalizeRendererCommand(tab.command) === 'devin')
+            ? takeDevinResumeCandidate(devinResumePool, tab.projectId)
+            : null;
+          const resumeId = tab.resumeSessionId || tab.devinSessionId || tracked || pooled?.id || null;
           const args = resumeId ? { ...tab, resumeSessionId: resumeId } : tab;
           const newId = await dispatch('create_terminal', args);
           idMap.push(newId);
@@ -6907,13 +7045,23 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
     let looked_up = null;
     let looked_up_count = 0;
     let looked_up_ambiguous = false;
+    let looked_up_chosen = false;
     if (!tracked && commandKey === 'devin' && cwd_) {
       try {
         const found = await window.api.devinLatestSession(cwd_);
-        if (found?.ok && found.candidate?.id) {
-          looked_up = found.candidate;
-          looked_up_count = found.count;
-          looked_up_ambiguous = Boolean(found.ambiguous);
+        if (found?.ok && Array.isArray(found.all) && found.all.length > 0) {
+          // More than one session: ask which, rather than silently picking
+          // the newest, because the index cannot say which one this tab was.
+          if (found.all.length > 1) {
+            looked_up = await promptDevinSessionChoice(found.all);
+            looked_up_count = found.count;
+            looked_up_ambiguous = true;
+            looked_up_chosen = Boolean(looked_up);
+          } else {
+            looked_up = found.all[0];
+            looked_up_count = found.count;
+            looked_up_ambiguous = Boolean(found.ambiguous);
+          }
         }
       } catch {
         // CLI missing / timeout / IPC failure: fall through to fresh.
@@ -6922,7 +7070,15 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
     const candidate = tracked
       ? { sessionId: tracked, source: 'tracked' }
       : looked_up
-        ? { sessionId: looked_up.id, source: 'devin-cli', title: looked_up.title, ambiguous: looked_up_ambiguous, count: looked_up_count }
+        ? {
+          sessionId: looked_up.id,
+          source: 'devin-cli',
+          title: looked_up.title,
+          ambiguous: looked_up_ambiguous,
+          count: looked_up_count,
+          // The human already picked from the list, so do not ask again.
+          chosen: looked_up_chosen,
+        }
         : null;
     if (candidate) {
       if (mode === 'auto') {
@@ -6932,7 +7088,9 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
         // say which one this tab was, so name the ambiguity instead of
         // silently attaching to the newest.
         const detail = candidate.source === 'devin-cli' && candidate.ambiguous
-          ? `Resume "${candidate.title || candidate.sessionId}"? ${candidate.count} sessions exist in this directory and Devin reports no per-tab mapping, so this is the most recent one.`
+          ? (candidate.chosen
+            ? `Resume "${candidate.title || candidate.sessionId}"?`
+            : `Resume "${candidate.title || candidate.sessionId}"? ${candidate.count} sessions exist in this directory and Devin reports no per-tab mapping, so this is the most recent one.`)
           : 'A previous session was found for this project. Resume it instead of starting fresh?';
         const ok = await showConfirm(
           `Resume ${TERMINAL_LABELS[commandKey] || commandKey}?`,
