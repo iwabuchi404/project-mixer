@@ -170,6 +170,16 @@ export const COMMAND_TYPES = {
     args: {},
     returns: 'void',
   },
+  // AL-3: the Attention Inbox. Open only — it never moves the human's focus on
+  // its own, which is what 2.3 requires of cross-project attention.
+  attention_inbox_open: {
+    args: {},
+    returns: 'void',
+  },
+  attention_open: {
+    args: { attentionId: 'string' },
+    returns: 'void',
+  },
   terminal_select_all: {
     args: {},
     returns: 'void',

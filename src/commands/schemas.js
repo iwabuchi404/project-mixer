@@ -96,4 +96,7 @@ export const COMMAND_SCHEMAS = {
   focus_pane_3: p({}),
   focus_pane_4: p({}),
   tab_move_to_pane: p({ tabId: optNum, filePath: optStr, paneIndex: z.number() }),
+  // AL-3: Attention Inbox. Not exposed to MCP (D11 — not a view share).
+  attention_inbox_open: p({}),
+  attention_open: p({ attentionId: z.string() }),
 };

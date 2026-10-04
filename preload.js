@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   devinBind: (ptyId, sessionId) => ipcRenderer.invoke('devin:bind', { ptyId, sessionId }),
   devinUnbind: (ptyId) => ipcRenderer.invoke('devin:unbind', { ptyId }),
+  devinLatestSession: (cwd) => ipcRenderer.invoke('devin:latest-session', { cwd }),
   onDevinMonitorError: (callback) => ipcRenderer.on('devin:monitor-error', (_event, data) => callback(data)),
 
   // Command availability check

@@ -13,6 +13,7 @@ import { register, dispatch } from './src/commands/registry.js';
 import { BINDINGS, validateBindings, matchBinding, keyToString, evaluateWhen } from './src/keybindings/registry.js';
 import { getState, setState, subscribe, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
 import { clearTerminalAttention, markAgentNotificationSeen, receiveAgentNotification, setTerminalWaiting } from './src/notifications/state.mjs';
+import { reconcileAttention, forgetTabAttention, answerTabAttention, getAttentionStore, acknowledgeAttention } from './src/attention/attention-wiring.mjs';
 import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
 import {
   clampLineRange,
@@ -129,6 +130,32 @@ function commitAttention(patch) {
   setState(patch);
 }
 
+// 4.6: the single writer for terminalAttention. The Attention Store is
+// reconciled here rather than at each call site, because four call sites
+// remembered to call it and the fifth would not have. Callers that changed the
+// value but not the identity must still route through here.
+function commitTerminalAttention(terminalAttention, options) {
+  setState({ terminalAttention });
+  reconcileAttention(terminalAttention);
+  if (!options) return;
+  if (options.forgetTabId) {
+    forgetTabAttention(options.forgetProjectId, options.forgetTabId);
+  }
+  if (options.answeredTabId) {
+    answerTabAttention(options.answeredProjectId, options.answeredTabId);
+  }
+  refreshAttentionSurface();
+}
+
+// The Inbox is a projection of the store, so it is redrawn from the same commit
+// that produced the store change. Rendering is skipped while the tab is closed
+// or the list is empty, so an open Inbox is never rebuilt without a reason.
+function refreshAttentionSurface() {
+  if (!attentionTabEl) return;
+  attentionGroupSignature = '';
+  renderAttentionList();
+}
+
 let subscribedBadgesRef = null;
 let subscribedAttentionRef = null;
 subscribe((s) => {
@@ -178,6 +205,9 @@ const fileEditorMount = document.getElementById('file-editor-mount');
 const previewWebview = document.getElementById('preview-webview');
 const previewPane = document.getElementById('preview-pane');
 const searchPane = document.getElementById('search-pane');
+const attentionPane = document.getElementById('attention-pane');
+const attentionList = document.getElementById('attention-list');
+const attentionCount = document.getElementById('attention-count');
 const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
 const searchStatus = document.getElementById('search-status');
@@ -429,6 +459,7 @@ function surfaceNodeFor(kind) {
   if (kind === 'file') return fileEditorPane;
   if (kind === 'preview') return previewPane;
   if (kind === 'search') return searchPane;
+  if (kind === 'attention') return attentionPane;
   return null;
 }
 
@@ -436,6 +467,7 @@ function kindOfSurfaceNode(node) {
   if (node === fileEditorPane) return 'file';
   if (node === previewPane) return 'preview';
   if (node === searchPane) return 'search';
+  if (node === attentionPane) return 'attention';
   return null;
 }
 
@@ -464,7 +496,10 @@ function showAllPaneTerminals() {
 // "home everything then re-place" churn reloaded the preview on every pane
 // operation (split/close/move/project-switch).
 function placeSurfaces() {
-  [fileEditorPane, previewPane, searchPane].forEach(rememberSurfaceHome);
+  // Every surface node must be listed here, not just in surfaceNodeFor. Missing
+  // one leaves it homed in #main-surface with `hidden`, so the tab exists and the
+  // content renders into it but the pane is never shown.
+  [fileEditorPane, previewPane, searchPane, attentionPane].forEach(rememberSurfaceHome);
   const hostOf = {}; // kind -> pane
   panes.forEach((p) => {
     if (p.view && p.view.type !== 'terminal' && !hostOf[p.view.type]) {
@@ -473,7 +508,7 @@ function placeSurfaces() {
       p.view = null; // same-kind conflict: first pane wins
     }
   });
-  [fileEditorPane, previewPane, searchPane].forEach((node) => {
+  [fileEditorPane, previewPane, searchPane, attentionPane].forEach((node) => {
     const kind = kindOfSurfaceNode(node);
     const host = hostOf[kind];
     if (host) {
@@ -2301,6 +2336,7 @@ async function restoreSkeletonPaneViews(projectId, paneList, isCurrent = () => t
 async function restoreNonTerminalTabs(projectId, paneList, isCurrent = () => true) {
   const entries = savedNonTerminalTabs.filter((entry) => entry.projectId === projectId);
   let searchRestored = false;
+  let attentionRestored = false;
   for (const entry of entries) {
     if (!isCurrent()) return;
     const pane = paneList[entry.paneIndex];
@@ -2327,6 +2363,15 @@ async function restoreNonTerminalTabs(projectId, paneList, isCurrent = () => tru
         createSearchTab(pane.id);
       }
       searchRestored = true;
+    } else if (entry.type === 'attention') {
+      if (attentionRestored) continue;
+      if (attentionTabEl) {
+        insertTabIntoPane(attentionTabEl, pane.id);
+        attentionTabEl._paneId = pane.id;
+      } else {
+        createAttentionTab(pane.id);
+      }
+      attentionRestored = true;
     }
     if (!isCurrent()) return;
   }
@@ -2481,6 +2526,10 @@ async function switchProjectEditor(projectId) {
     activeMainView = 'search';
     activeSurface = 'search';
     activateSearchTab();
+  } else if (focusedView?.type === 'attention' && attentionTabEl) {
+    activeMainView = 'attention';
+    activeSurface = 'attention';
+    activateAttentionTab();
   } else if (activeMainView === 'preview' && activePreviewPath) {
     await switchPreviewTab(activePreviewPath);
     if (activeEditorProjectId !== projectId || projectSelectionGeneration !== selectionGeneration) return;
@@ -4483,6 +4532,10 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     command,
     label,
     cwd,
+    // Agent session this PTY was launched with. Persisted per tab so a
+    // restart resumes each tab on its own session. null until a hook /
+    // plugin payload reports one, or the resume prompt supplied one.
+    resumeSessionId: resumeSessionId || null,
     pinnedToBottom: true,
     outputFollowRevision: 0,
     userScrollActive: false,
@@ -4965,7 +5018,7 @@ function renderPanes() {
   // Rescue hosted surface nodes BEFORE clearing the container. Detach (not
   // home) so re-placement costs a single move — homing first would move
   // twice and reload the <webview> guest twice.
-  [fileEditorPane, previewPane, searchPane].forEach((node) => {
+  [fileEditorPane, previewPane, searchPane, attentionPane].forEach((node) => {
     if (node.parentElement && terminalContainer.contains(node)) {
       node.remove();
     }
@@ -5123,6 +5176,13 @@ function layoutNonTerminalTabs() {
   if (typeof searchTabEl !== 'undefined' && searchTabEl) {
     if (!getPane(searchTabEl._paneId)) searchTabEl._paneId = fallback?.id ?? null;
     place(searchTabEl, searchTabEl._paneId);
+  }
+  // Same for the Inbox. Without this the tab survives a pane re-render as an
+  // orphan: the pane shows the surface but no tab exists to switch away from it,
+  // and closing the pane cannot reach it.
+  if (typeof attentionTabEl !== 'undefined' && attentionTabEl) {
+    if (!getPane(attentionTabEl._paneId)) attentionTabEl._paneId = fallback?.id ?? null;
+    place(attentionTabEl, attentionTabEl._paneId);
   }
 }
 
@@ -5836,6 +5896,11 @@ function getFocusContext() {
     ctx = new Set(['treeFocus']);
   } else if (ae === searchInput || ae?.closest('#search-pane')) {
     ctx = new Set(['searchFocus']);
+  } else if (ae?.closest('#attention-pane')) {
+    // The Inbox has no input, so it gets no focus context of its own. Without
+    // this it would fall through to the activeMainView branch and report a
+    // terminal context while the human is looking at the list.
+    ctx = new Set(['attentionFocus']);
   // When a terminal tab is active, treat as terminalFocus even if focus
   // is on <body> (e.g. after closing a modal). This ensures Ctrl+B
   // (!terminalFocus) correctly defers to the shell's tmux prefix.
@@ -6190,14 +6255,20 @@ async function saveLayout() {
   // B1: persist pane structure per project INCLUDING tab membership.
   // Members are stored as indices into the saved `tabs` array (stable
   // across restarts — tabIds are regenerated on startup).
-  const tabsOut = Array.from(tabs.values()).map(t => {
+const tabsOut = Array.from(tabs.values()).map(t => {
     const binding = getTerminalAgentBinding(t.id);
     return {
       command: t.command,
       label: t.label,
       cwd: t.cwd,
       projectId: t.projectId,
-      // Devin cloud session link — restored with `devin -r` + silent re-bind.
+      // Per-tab agent session id. Preferred over the localStorage
+      // project+command index at restore, because that index only ever held
+      // ONE session per pair \u2014 two tabs of the same agent in one project
+      // collided onto the same id. Devin's cloud id stays separate so
+      // `devin -r` + silent re-bind keeps working.
+      ...(t.resumeSessionId ? { resumeSessionId: t.resumeSessionId } : {}),
+      // Devin cloud session link ? restored with `devin -r` + silent re-bind.
       ...(binding?.provider === 'devin' && binding.sessionId
         ? { devinSessionId: binding.sessionId }
         : {}),
@@ -6239,6 +6310,10 @@ async function saveLayout() {
       if (searchTabEl && projectId === activeEditorProjectId && searchTabEl._paneId === p.id) {
         nonTerminalMembers.push(nonTerminalTabs.length);
         nonTerminalTabs.push({ type: 'search', projectId, paneIndex });
+      }
+      if (attentionTabEl && projectId === activeEditorProjectId && attentionTabEl._paneId === p.id) {
+        nonTerminalMembers.push(nonTerminalTabs.length);
+        nonTerminalTabs.push({ type: 'attention', projectId, paneIndex });
       }
       return {
         size: p.size || 0,
@@ -6311,10 +6386,13 @@ async function loadLayout() {
       const lastSessions = loadLastSessions();
       for (const tab of layout.tabs) {
         try {
-          const tracked = !tab.devinSessionId && tab.projectId && tab.command
+          // Per-tab id first (written by saveLayout), then devin's cloud id,
+          // then the project+command index as a fallback for tabs saved
+          // before per-tab persistence existed.
+          const tracked = !tab.devinSessionId && !tab.resumeSessionId && tab.projectId && tab.command
             ? lastSessions[`${tab.projectId}:${normalizeRendererCommand(tab.command)}`]?.sessionId
             : null;
-          const resumeId = tab.devinSessionId || tracked || null;
+          const resumeId = tab.resumeSessionId || tab.devinSessionId || tracked || null;
           const args = resumeId ? { ...tab, resumeSessionId: resumeId } : tab;
           const newId = await dispatch('create_terminal', args);
           idMap.push(newId);
@@ -6741,6 +6819,14 @@ register('search_text_open', () => {
   openSearchTab();
 });
 
+register('attention_inbox_open', () => {
+  openAttentionTab();
+});
+
+register('attention_open', ({ attentionId }) => {
+  void openAttention(attentionId);
+});
+
 register('search_close', () => {
   invalidateSearch();
   searchInput.value = '';
@@ -6753,8 +6839,20 @@ register('search_close', () => {
 // Session resume (previous-session restore on tab open)
 // ============================================================
 //
-// Tracks the last agent session id per project+command and offers to
-// resume it when the user opens a new terminal of the same kind.
+// Two independent records, because they answer different questions:
+//
+// 1. Per tab (tabs[].resumeSessionId, persisted into layout.json).
+//    "Which session was THIS PTY running?" Restoring the layout replays
+//    each tab onto its own session. This is the only path that survives a
+//    restart even when no hook ever fired.
+//
+// 2. Per project+command (localStorage below).
+//    "Which session did this project last run with this agent?" Used only
+//    to offer a resume when the human opens a NEW terminal from the menu.
+//    Two tabs of the same agent in one project share this key by design \u2014
+//    the prompt is asking about a *new* tab, so last-writer-wins is correct
+//    there. It was never a valid source for restoring existing tabs.
+//
 // Resume flags per agent live in src/main/resume-args.cjs (devin resumes
 // its cloud session via `devin -r <id>`).
 
@@ -6794,22 +6892,53 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
   // restore must reopen tabs silently. The File menu checkbox
   // (Auto-Resume Previous Sessions) switches between ask and auto modes.
   if (resumePrompt && !effectiveResumeId && !resumeSkip && RESUME_SUPPORTED.has(commandKey)) {
-    const last = loadLastSessions()[`${pid}:${commandKey}`];
-    if (last && last.sessionId) {
-      let mode = 'ask';
+    let mode = 'ask';
+    try {
+      mode = (await window.api.getSettings()).resumeMode || 'ask';
+    } catch {
+      // Fall back to asking when settings are unavailable.
+    }
+    // Tracked session (hook/plugin reported it) wins over a CLI lookup.
+    const tracked = loadLastSessions()[`${pid}:${commandKey}`]?.sessionId || null;
+    // Devin has no hook, so its id is only discoverable via
+    // `devin list --format json`. Ask the main process rather than
+    // trusting the localStorage index, which stays empty for devin
+    // because binding is manual.
+    let looked_up = null;
+    let looked_up_count = 0;
+    let looked_up_ambiguous = false;
+    if (!tracked && commandKey === 'devin' && cwd_) {
       try {
-        mode = (await window.api.getSettings()).resumeMode || 'ask';
+        const found = await window.api.devinLatestSession(cwd_);
+        if (found?.ok && found.candidate?.id) {
+          looked_up = found.candidate;
+          looked_up_count = found.count;
+          looked_up_ambiguous = Boolean(found.ambiguous);
+        }
       } catch {
-        // Fall back to asking when settings are unavailable.
+        // CLI missing / timeout / IPC failure: fall through to fresh.
       }
+    }
+    const candidate = tracked
+      ? { sessionId: tracked, source: 'tracked' }
+      : looked_up
+        ? { sessionId: looked_up.id, source: 'devin-cli', title: looked_up.title, ambiguous: looked_up_ambiguous, count: looked_up_count }
+        : null;
+    if (candidate) {
       if (mode === 'auto') {
-        effectiveResumeId = last.sessionId;
+        effectiveResumeId = candidate.sessionId;
       } else {
+        // With several devin sessions in this directory the index cannot
+        // say which one this tab was, so name the ambiguity instead of
+        // silently attaching to the newest.
+        const detail = candidate.source === 'devin-cli' && candidate.ambiguous
+          ? `Resume "${candidate.title || candidate.sessionId}"? ${candidate.count} sessions exist in this directory and Devin reports no per-tab mapping, so this is the most recent one.`
+          : 'A previous session was found for this project. Resume it instead of starting fresh?';
         const ok = await showConfirm(
-           `Resume ${TERMINAL_LABELS[commandKey] || commandKey}?`,
-          'A previous session was found for this project. Resume it instead of starting fresh?',
+          `Resume ${TERMINAL_LABELS[commandKey] || commandKey}?`,
+          detail,
         );
-        if (ok) effectiveResumeId = last.sessionId;
+        if (ok) effectiveResumeId = candidate.sessionId;
       }
     }
   }
@@ -6964,13 +7093,18 @@ register('agent_notification_received', ({ tabId, projectId, kind, eventType, so
     sessionId,
     unread,
   });
-  setState({ terminalAttention });
+  commitTerminalAttention(terminalAttention);
   if (wasWaiting && !terminalAttention[tabId]?.waiting) closeOsNotification(tabId);
   updateTabStatus(tabId);
   updateProjectStatus(projectId);
-  // Resume tracking: hook/plugin payloads carry the session id.
+  // Resume tracking: hook/plugin payloads carry the session id. Writing it
+  // onto the tab record is what makes saveLayout able to persist it, which
+  // is the only resume path that survives a restart without a hook firing.
   const notifiedTab = tabs.get(tabId);
-  if (notifiedTab) rememberAgentSession(notifiedTab.projectId, notifiedTab.command, sessionId);
+  if (notifiedTab) {
+    notifiedTab.resumeSessionId = sessionId || notifiedTab.resumeSessionId || null;
+    rememberAgentSession(notifiedTab.projectId, notifiedTab.command, sessionId);
+  }
   if (source === 'devin' && sessionId) {
     const current = getTerminalAgentBinding(tabId);
     if (current?.sessionId === sessionId) {
@@ -6996,16 +7130,22 @@ register('agent_notification_received', ({ tabId, projectId, kind, eventType, so
 register('agent_notification_seen', ({ tabId }) => {
   const tab = tabs.get(tabId);
   const terminalAttention = markAgentNotificationSeen(getState().terminalAttention, tabId);
-  if (terminalAttention !== getState().terminalAttention) setState({ terminalAttention });
+  if (terminalAttention !== getState().terminalAttention) commitTerminalAttention(terminalAttention);
   updateTabStatus(tabId);
   if (tab) updateProjectStatus(tab.projectId);
 });
 
 register('terminal_set_waiting', ({ tabId, projectId, waiting, cause }) => {
-  const wasWaiting = Boolean(getTabAttention(tabId)?.waiting);
+  const previous = getTabAttention(tabId);
+  const wasWaiting = Boolean(previous?.waiting);
   const terminalAttention = setTerminalWaiting(getState().terminalAttention, { tabId, projectId, waiting, cause });
-  setState({ terminalAttention });
   const isWaiting = Boolean(terminalAttention[tabId]?.waiting);
+  // Only a human keystroke resolves an input prompt. Waiting also clears on PTY
+  // exit and on losing the waiting state to a resize-triggered redraw, and
+  // neither means the human answered.
+  commitTerminalAttention(terminalAttention, wasWaiting && !isWaiting && cause === 'input'
+    ? { answeredTabId: tabId, answeredProjectId: previous?.projectId || projectId }
+    : undefined);
   if (wasWaiting && !isWaiting) closeOsNotification(tabId);
   if (!wasWaiting && isWaiting) {
     const tab = tabs.get(tabId);
@@ -7024,9 +7164,15 @@ register('terminal_set_waiting', ({ tabId, projectId, waiting, cause }) => {
 
 register('terminal_clear_attention', ({ tabId }) => {
   const tab = tabs.get(tabId);
-  const projectId = tab?.projectId || getTabAttention(tabId)?.projectId;
+  const previous = getTabAttention(tabId);
+  const projectId = tab?.projectId || previous?.projectId;
   const terminalAttention = clearTerminalAttention(getState().terminalAttention, tabId);
-  if (terminalAttention !== getState().terminalAttention) setState({ terminalAttention });
+  // The reducer drops the entry, so reconcile() would keep a blocking attention
+  // alive on the grounds that it still needs an answer. A cleared terminal has
+  // nothing to answer from, so drop it explicitly.
+  if (terminalAttention !== getState().terminalAttention) {
+    commitTerminalAttention(terminalAttention, { forgetTabId: tabId, forgetProjectId: projectId });
+  }
   closeOsNotification(tabId);
   if (projectId) updateProjectStatus(projectId);
 });
@@ -7041,6 +7187,7 @@ register('agent_session_bound', ({ tabId, provider, sessionId, status }) => {
   tabs.get(tabId).tabElement.title = `${provider}: ${sessionId}${status ? ` (${status})` : ''}`;
   // Resume tracking: remember this as the tab's last session.
   const t = tabs.get(tabId);
+  t.resumeSessionId = sessionId || t.resumeSessionId || null;
   rememberAgentSession(t.projectId, t.command, sessionId);
 });
 
@@ -7251,6 +7398,222 @@ register('get_focus', ({ $session: session = null } = {}) => {
 
 // ============================================================
 // Phase 5 S2: Project text search (git grep / rg)
+// ============================================================
+// AL-3: Attention Inbox
+//
+// Grouping is spatial, not ranked: items whose tab is visible (or holds the
+// keyboard) come first, everything else after. IMPLEMENTATION_PLAN 6.3 — a
+// global priority sort would collapse the human's attention to one value, which
+// D24 forbids.
+
+let attentionTabEl = null;
+let attentionGroupSignature = '';
+
+function relativeTime(timestamp) {
+  if (!timestamp) return '';
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+// The tabs a human can currently see. Panes decide what is in view (8), so the
+// Inbox asks them rather than recomputing visibility.
+function attentionInViewTabIds() {
+  const ids = [];
+  for (const pane of panes) {
+    if (pane.view) continue; // a surface pane shows no terminal
+    if (pane.activeTabId !== null && pane.activeTabId !== undefined) ids.push(pane.activeTabId);
+  }
+  return ids;
+}
+
+function attentionProjectName(projectId) {
+  return projects.get(projectId)?.name || projectId || 'unknown';
+}
+
+function attentionTabLabel(item) {
+  const tab = tabs.get(item.tabId);
+  if (!tab) return attentionProjectName(item.projectId);
+  const command = String(tab.command || '').split(/[\\/]/).pop().replace(/\.(exe|cmd|bat)$/, '');
+  return `${attentionProjectName(item.projectId)} / ${command || 'agent'}`;
+}
+
+function renderAttentionList() {
+  if (!attentionList) return;
+  const store = getAttentionStore();
+  const inViewTabIds = attentionInViewTabIds();
+  const inView = store.getAttentionInView(inViewTabIds, activeTabId);
+  const outOfView = store.getAttentionOutOfView(inViewTabIds, activeTabId);
+  const open = inView.length + outOfView.length;
+
+  attentionCount.textContent = open === 0
+    ? ''
+    : `${open} item${open === 1 ? '' : 's'} need${open === 1 ? 's' : ''} you`;
+
+  attentionList.innerHTML = '';
+  if (open === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'attention-empty';
+    empty.textContent = 'Nothing is waiting. Agents running normally are hidden.';
+    attentionList.appendChild(empty);
+    attentionGroupSignature = '';
+    return;
+  }
+
+  // Group signature lets callers skip a rebuild when nothing relevant moved.
+  const signature = JSON.stringify([
+    inView.map((item) => [item.id, item.state, item.blocking, item.title]),
+    outOfView.map((item) => [item.id, item.state, item.blocking, item.title]),
+  ]);
+  if (signature === attentionGroupSignature) return;
+  attentionGroupSignature = signature;
+
+  const appendGroup = (label, items) => {
+    if (items.length === 0) return;
+    const header = document.createElement('div');
+    header.className = 'attention-group';
+    header.textContent = label;
+    attentionList.appendChild(header);
+    for (const item of items) attentionList.appendChild(createAttentionItem(item));
+  };
+
+  appendGroup('IN VIEW', inView);
+  appendGroup('OUT OF VIEW', outOfView);
+}
+
+function createAttentionItem(item) {
+  const el = document.createElement('div');
+  el.className = 'attention-item';
+  if (item.blocking) el.classList.add('attention-blocking');
+  if (item.state === 'ACKNOWLEDGED') el.classList.add('attention-acknowledged');
+  el.dataset.attentionId = item.id;
+  el.title = item.blocking
+    ? 'Waiting for the human — click to go there'
+    : 'Click to go there';
+
+  const main = document.createElement('div');
+  main.className = 'attention-item-main';
+
+  const title = document.createElement('div');
+  title.className = 'attention-item-title';
+  title.textContent = item.title;
+  main.appendChild(title);
+
+  if (item.summary) {
+    const summary = document.createElement('div');
+    summary.className = 'attention-item-summary';
+    summary.textContent = item.summary;
+    main.appendChild(summary);
+  }
+  el.appendChild(main);
+
+  const meta = document.createElement('div');
+  meta.className = 'attention-item-meta';
+  const source = document.createElement('span');
+  source.textContent = attentionTabLabel(item);
+  meta.appendChild(source);
+  const age = document.createElement('span');
+  age.textContent = relativeTime(item.createdAt);
+  meta.appendChild(age);
+  el.appendChild(meta);
+
+  el.addEventListener('click', () => { void openAttention(item.id); });
+  return el;
+}
+
+// AL-4: go where the attention is. A file target reuses preview_open /
+// preview_reveal rather than adding a second navigation path.
+async function openAttention(id) {
+  const item = getAttentionStore().get(id);
+  if (!item) return;
+  if (!acknowledgeAttention(item.id)) return;
+
+  if (item.projectId && item.projectId !== activeProjectId) {
+    const project = projects.get(item.projectId);
+    if (project) await selectProject(project.id);
+  }
+
+  if (item.filePath) {
+    const revealed = await dispatch('preview_open', {
+      path: item.filePath,
+      reason: item.title,
+      newTab: true,
+    });
+    if (revealed?.shown && item.line) {
+      await dispatch('preview_reveal', {
+        previewPath: revealed.previewPath,
+        line: item.line,
+        endLine: item.endLine,
+      });
+    }
+  } else if (item.tabId !== undefined && tabs.has(item.tabId)) {
+    switchTab(item.tabId);
+  }
+
+  renderAttentionList();
+  updateProjectStatus(item.projectId);
+}
+
+function openAttentionTab() {
+  if (!attentionTabEl) createAttentionTab();
+  activateAttentionTab();
+}
+
+function createAttentionTab(paneId = null) {
+  attentionTabEl = createMainTab({
+    kind: 'attention',
+    ident: { key: 'attentionTab', value: 'attention' },
+    label: 'Needs You',
+    closeSelector: 'editor-tab-close',
+    actions: {
+      onSwitch: () => activateAttentionTab(),
+      onClose: () => closeAttentionTab(),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'attention' }),
+    },
+  });
+  insertTabIntoPane(attentionTabEl, paneId);
+  attentionTabEl._paneId = paneId ?? focusedPane()?.id ?? null;
+}
+
+function activateAttentionTab() {
+  document.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === attentionTabEl));
+  if (attentionTabEl) attentionTabEl._paneId = focusedPane()?.id ?? null;
+  showMainSurface('attention');
+  activeMainView = 'attention';
+  activeSurface = 'attention';
+  // The human is looking at the Inbox, not at any agent, so nothing is in view.
+  attentionGroupSignature = '';
+  renderAttentionList();
+  saveCurrentEditorState();
+  void saveLayout();
+}
+
+function closeAttentionTab({ restoreSurface = true, persist = true } = {}) {
+  if (!attentionTabEl) return;
+  const wasActive = activeMainView === 'attention';
+  attentionTabEl.remove();
+  attentionTabEl = null;
+  panes.forEach((pane) => {
+    if (pane.view?.type === 'attention') pane.view = null;
+  });
+  if (restoreSurface && wasActive) {
+    showMainSurface('terminal');
+    activeMainView = 'terminal';
+    activeSurface = 'editor';
+  } else if (!restoreSurface && wasActive) {
+    activeMainView = 'terminal';
+    activeSurface = 'editor';
+  }
+  if (persist) {
+    saveCurrentEditorState();
+    void saveLayout();
+  }
+}
+
 // ============================================================
 
 let searchTabEl = null;
@@ -7676,6 +8039,21 @@ previewWebview.addEventListener('found-in-page', (e) => {
 // Returns a JSON-serializable focus state
 window.__pmDispatch = (name, args = {}) => {
   return dispatch(name, args);
+};
+
+// AL: expose the Attention Store for dev-time inspection (ui:smoke checks).
+window.__pmAttentionDebug = () => {
+  const store = getAttentionStore();
+  return {
+    open: store.getOpenAttention().map((i) => ({
+      id: i.id, tabId: i.tabId, kind: i.kind, blocking: i.blocking, state: i.state, title: i.title,
+    })),
+    inViewTabIds: attentionInViewTabIds(),
+    activeTabId,
+    terminalAttention: Object.keys(getState().terminalAttention).map((k) => ({
+      tabId: Number(k), waiting: getState().terminalAttention[k].waiting, kind: getState().terminalAttention[k].kind,
+    })),
+  };
 };
 
 // ============================================================

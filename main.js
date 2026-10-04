@@ -5,7 +5,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const http = require('http');
 const crypto = require('crypto');
-const { execFileSync, spawn } = require('child_process');
+const { execFileSync, execFile, spawn } = require('child_process');
 const { fileURLToPath, pathToFileURL } = require('url');
 const pty = require('node-pty');
 const { upsertProjectMixerHook } = require('./hook-settings.cjs');
@@ -13,6 +13,16 @@ const { PLUGIN_SOURCE: OPENCODE_PLUGIN_SOURCE } = require('./src/main/opencode-p
 const { startMcpServer } = require('./src/mcp/server.cjs');
 const { buildAgentMcpArgs, buildPowerShellInvocation } = require('./src/mcp/launch.cjs');
 const { buildResumeArgs } = require('./src/main/resume-args.cjs');
+const {
+  parseDevinSessionList,
+  pickDevinResumeCandidate,
+  isSafeCwd,
+  MAX_JSON_BYTES,
+} = require('./src/main/devin-session-index.cjs');
+const {
+  WRAPPER_SOURCE: CODEX_WRAPPER_SOURCE,
+  planCodexNotifyInstall,
+} = require('./src/main/codex-notify.cjs');
 const { buildPortRecord, writeJsonAtomic, writeTextAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, validateSettings, ConfigParseError } = require('./src/main/config-service.cjs');
@@ -845,6 +855,47 @@ ipcMain.handle('devin:unbind', (event, payload) => {
   assertTrustedMainIpcEvent(event);
   if (!payload || !Number.isInteger(payload.ptyId) || payload.ptyId <= 0) throw new TypeError('PTY id is invalid');
   return { ok: Boolean(devinMonitor?.unbind(payload.ptyId)) };
+});
+
+// Devin has no hook, so its session id can only come from the CLI's own
+// index: `devin list --format json` is cwd-scoped and machine-readable.
+// Runs async (never execFileSync) so a slow or hung CLI cannot freeze the
+// main process, and is bounded on both time and output size.
+ipcMain.handle('devin:latest-session', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.cwd !== 'string' || !isSafeCwd(payload.cwd)) {
+    throw new TypeError('devin:latest-session payload is invalid');
+  }
+  const cwd = resolveProjectRoot(loadProjectsConfig(), payload.cwd).target;
+  try {
+    const stdout = await new Promise((resolve, reject) => {
+      execFile('devin', ['list', '--format', 'json'], {
+        cwd,
+        encoding: 'utf8',
+        timeout: 8000,
+        maxBuffer: MAX_JSON_BYTES,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }, (err, out) => (err ? reject(err) : resolve(out)));
+    });
+    const { sessions, truncated } = parseDevinSessionList(stdout);
+    const picked = pickDevinResumeCandidate(sessions, cwd);
+    return {
+      ok: true,
+      candidate: picked.candidate ? {
+        id: picked.candidate.id,
+        title: picked.candidate.title,
+        lastActivityAt: picked.candidate.lastActivityAt,
+      } : null,
+      count: picked.count,
+      ambiguous: picked.ambiguous,
+      truncated,
+    };
+  } catch (e) {
+    // Devin CLI missing, not logged in, or timed out: the caller falls
+    // back to a fresh session. Never surface as an error toast.
+    return { ok: false, candidate: null, count: 0, ambiguous: false, error: String(e.message || e).slice(0, 200) };
+  }
 });
 
 ipcMain.handle('window:focus', async (event) => {
@@ -1682,7 +1733,29 @@ ipcMain.handle('hook:setup', async (event, payload) => {
     results.push({ tool: 'claude', success: false, error: e.message });
   }
 
-  results.push({ tool: 'codex', success: true, note: 'Ready for Codex notify or trusted project hooks' });
+  // Codex: install the notify bridge ONLY when `notify` is unset. Codex
+  // accepts a single program there, so overwriting an existing one (the
+  // Codex Desktop computer-use integration uses it) would break that
+  // feature. Report the conflict instead of touching the file.
+  try {
+    const codexConfigPath = path.join(os.homedir(), '.codex', 'config.toml');
+    const existingToml = fs.existsSync(codexConfigPath)
+      ? fs.readFileSync(codexConfigPath, 'utf-8')
+      : null;
+    const codexDir = path.dirname(codexConfigPath);
+    fs.mkdirSync(codexDir, { recursive: true });
+    const wrapperPath = path.join(codexDir, 'project-mixer-notify.cjs');
+    const plan = planCodexNotifyInstall({ existingToml, wrapperPath });
+    if (plan.action === 'skip') {
+      results.push({ tool: 'codex', success: true, skipped: true, note: plan.note, existing: plan.existing });
+    } else {
+      writeTextAtomic(wrapperPath, CODEX_WRAPPER_SOURCE, 'utf-8');
+      writeTextAtomic(codexConfigPath, plan.toml, 'utf-8');
+      results.push({ tool: 'codex', success: true, path: codexConfigPath });
+    }
+  } catch (e) {
+    results.push({ tool: 'codex', success: false, error: e.message });
+  }
 
   try {
     const opencodePluginDir = ensureProjectDirectory(path.join('.opencode', 'plugins'));

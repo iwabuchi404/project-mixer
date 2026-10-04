@@ -32,6 +32,9 @@ export const BINDINGS = [
 
   // Phase 5 additions.
   { key: 'Ctrl+Shift+F', command: 'search_text_open', when: null },
+  // AL-3: the Attention Inbox. Global like Ctrl+Shift+F, because the whole
+  // point is reaching it without first finding the project or terminal.
+  { key: 'Ctrl+Shift+A', command: 'attention_inbox_open', when: null },
   { key: 'Slash', command: 'tree_filter_focus', when: 'treeFocus' },
   { key: 'Escape', command: 'tree_filter_clear', when: '!findOpen && treeFocus || !findOpen && treeFilterFocus' },
   { key: 'Escape', command: 'search_close', when: '!findOpen && searchFocus' },
@@ -174,13 +177,16 @@ function extractConstraints(expr) {
 const FOCUS_CONTEXTS = new Set([
   'terminalFocus', 'editorFocus', 'previewFocus', 'treeFocus',
   'scratchFocus', 'searchFocus', 'treeFilterFocus',
+  // AL-3: the Attention Inbox. Declared so a binding can name it; no binding
+  // does yet, but an undeclared context silently never matches.
+  'attentionFocus',
 ]);
 
 // All context names used in the binding table's `when` clauses.
 // Used to enumerate all possible context combinations for overlap checking.
 const ALL_CONTEXTS = [
   'terminalFocus', 'editorFocus', 'previewFocus', 'treeFocus',
-  'scratchFocus', 'searchFocus', 'treeFilterFocus',
+  'scratchFocus', 'searchFocus', 'treeFilterFocus', 'attentionFocus',
   'findOpen', 'paletteOpen',
 ];
 

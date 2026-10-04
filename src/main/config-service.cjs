@@ -138,10 +138,11 @@ function validateLayout(value) {
     }
     for (const tab of value.nonTerminalTabs) {
       if (!isRecord(tab)
-        || !['file', 'preview', 'search'].includes(tab.type)
+        || !['file', 'preview', 'search', 'attention'].includes(tab.type)
         || typeof tab.projectId !== 'string' || !tab.projectId
         || !Number.isInteger(tab.paneIndex) || tab.paneIndex < 0
-        || (tab.type !== 'search' && typeof tab.path !== 'string')
+        // search and attention are panes, not files, so they carry no path.
+        || (!['search', 'attention'].includes(tab.type) && typeof tab.path !== 'string')
         || (tab.type === 'preview' && typeof tab.previewPath !== 'string')) {
         return { ok: false, code: 'INVALID_NON_TERMINAL_TAB', message: 'layout contains an invalid non-terminal tab' };
       }
