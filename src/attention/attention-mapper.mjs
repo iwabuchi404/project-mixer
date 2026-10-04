@@ -126,18 +126,21 @@ export function mapAttentionItem(tabId, item) {
   const kind = classifyKind(item);
   if (!kind) return null;
 
-  const requestedPriority = classifyPriority(kind);
+const requestedPriority = classifyPriority(kind);
 
-  return {
-    id: attentionId(projectId, tabId),
-    projectId,
-    tabId,
-    sessionId: optionalText(item.sessionId),
-    kind,
-    requestedPriority,
-    // AL-6 replaces this with an Attention Policy result.
-    effectivePriority: requestedPriority,
-    blocking: Boolean(item.waiting),
+    return {
+      id: attentionId(projectId, tabId),
+      projectId,
+      tabId,
+      sessionId: optionalText(item.sessionId),
+      kind,
+      requestedPriority,
+      // Placeholder. Attention Policy (AL-6, attention-policy.mjs) owns this
+      // field and recomputes it; the mapper must not smuggle in a policy
+      // decision, so it only mirrors requestedPriority until the store runs
+      // the policy over the projection.
+      effectivePriority: requestedPriority,
+      blocking: Boolean(item.waiting),
     title: classifyTitle(kind, item),
     summary: optionalText(item.message),
     reason: optionalText(item.reason),

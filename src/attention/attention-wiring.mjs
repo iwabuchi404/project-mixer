@@ -15,11 +15,47 @@
 // path.
 
 import { createAttentionStore } from './attention-store.mjs';
+import {
+  normalizeHumanContext,
+  projectPresentation,
+  strongestPresentation,
+} from './attention-policy.mjs';
 
 let store = createAttentionStore();
 
 export function getAttentionStore() {
   return store;
+}
+
+// Attention Policy (AL-6) read path. Human context is passed in rather than
+// read from renderer state so this module stays free of UI dependencies and
+// the policy stays unit-testable.
+//
+// Only presentation is computed here. effectivePriority is applied inside the
+// store on reconcile because it depends only on the event kind.
+export function presentAttention(humanContext) {
+  return store.presentAttention(normalizeHumanContext(humanContext));
+}
+
+// Strongest presentation across the human's current open attention. The
+// sidebar uses this so a blocking item cannot be masked by a quieter sibling.
+export function currentAttentionPresentation(humanContext) {
+  return strongestPresentation(presentAttention(humanContext).map((item) => item.presentation));
+}
+
+// Per-project rollup, for sidebar badges.
+export function projectAttentionPresentations(humanContext) {
+  const presented = presentAttention(humanContext);
+  const byProject = new Map();
+  for (const item of presented) {
+    if (!byProject.has(item.projectId)) byProject.set(item.projectId, []);
+    byProject.get(item.projectId).push(item);
+  }
+  const result = {};
+  for (const [projectId, items] of byProject) {
+    result[projectId] = projectPresentation(items);
+  }
+  return result;
 }
 
 // Reconcile after a terminalAttention transition. Returns the store diff so a

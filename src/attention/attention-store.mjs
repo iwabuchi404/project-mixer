@@ -13,6 +13,7 @@
 // stay pure and lets a re-projection preserve createdAt across ticks.
 
 import { mapAttention, attentionId } from './attention-mapper.mjs';
+import { effectivePriorityFor, applyPolicy, applyPolicyToAll } from './attention-policy.mjs';
 
 const OPEN = 'OPEN';
 const ACKNOWLEDGED = 'ACKNOWLEDGED';
@@ -32,8 +33,21 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
 
   // Fold a fresh projection into the store. Existing entries keep createdAt and
   // any acknowledgement. Only genuinely new or newly blocking entries move.
+  //
+  // Attention Policy (AL-6) runs here, but only its half that does not depend
+  // on the human: effectivePriority. Presentation needs to know where the
+  // human is, which changes without any agent event, so it is applied at read
+  // time via presentAttention() instead of being frozen into stored state.
+  //
+  // effectivePriorityFor() rather than applyPolicy() on purpose: applyPolicy
+  // also computes presentation, and persisting that would pin the routing
+  // decision to whatever the human happened to be looking at when the event
+  // arrived.
   function reconcile(attention) {
-    const projected = mapAttention(attention);
+    const projected = mapAttention(attention).map((draft) => ({
+      ...draft,
+      effectivePriority: effectivePriorityFor(draft),
+    }));
     const timestamp = now();
     const seen = new Set();
     const created = [];
@@ -141,6 +155,14 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
     return snapshot().filter((item) => item.state !== RESOLVED);
   }
 
+  // Attach `presentation` to each open item given where the human currently
+  // is. Called by the renderer on every render because human context changes
+  // without any agent event (the human switching panes or projects is itself a
+  // routing signal), so presentation must never be persisted as state.
+  function presentAttention(humanContext) {
+    return applyPolicyToAll(getOpenAttention(), humanContext);
+  }
+
   function getProjectAttention(projectId) {
     return getOpenAttention().filter((item) => item.projectId === projectId);
   }
@@ -194,6 +216,7 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
     answerAttention,
     acknowledgeAttention,
     resolveAttention,
+    presentAttention,
     get,
     getOpenAttention,
     getProjectAttention,
