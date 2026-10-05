@@ -123,6 +123,26 @@ export const COMMAND_TYPES = {
     args: { tabId: 'number' },
     returns: 'void',
   },
+  // AL-5: an agent asking for the human's attention over MCP. Distinct from
+  // agent_notification_received because that one is evidence (a hook or plugin
+  // reported something that happened) while this is an assertion by the agent
+  // about itself. `ptyId` arrives instead of `tabId`: main knows the PTY, the
+  // renderer owns the ptyId -> tabId map.
+  agent_request_attention: {
+    args: {
+      ptyId: 'number',
+      projectId: 'string',
+      kind: 'string',
+      requestedPriority: 'string?',
+      title: 'string',
+      summary: 'string?',
+      blocking: 'boolean?',
+      source: 'string?',
+      sessionId: 'string?',
+      agentDeclaredBlocking: 'boolean?',
+    },
+    returns: 'object',
+  },
   terminal_set_waiting: {
     args: { tabId: 'number', projectId: 'string?', waiting: 'boolean', cause: 'string?' },
     returns: 'void',

@@ -19,15 +19,37 @@ const OPEN = 'OPEN';
 const ACKNOWLEDGED = 'ACKNOWLEDGED';
 const RESOLVED = 'RESOLVED';
 
+// AL-5: the open-attention cap for agent-asserted items (plan 8.5.7). Applied
+// per session, not per project, so one chatty agent cannot fill the human's
+// Inbox and cannot silence the others either.
+export const AGENT_MAX_OPEN_ATTENTION = 3;
+
 export function createAttentionStore({ now = () => Date.now() } = {}) {
-  const items = new Map(); // id -> AttentionRequest
+  // Two maps, deliberately.
+  //
+  // `items` holds evidence: projections of terminalAttention, i.e. things a
+  // hook, plugin or session file reported. reconcile() owns it end to end.
+  //
+  // `assertions` holds agent-asserted items from MCP request_attention: an
+  // agent saying "the human should look at this". These are NOT evidence and
+  // must never be laundered through the mapper, because the mapper's output
+  // feeds terminalAttention and `waiting` -- letting an agent write there
+  // would let it forge the amber state that the whole rung hierarchy treats
+  // as ground truth.
+  //
+  // They also cannot live in `items`, because reconcile() withdraws anything
+  // missing from the projection, so an agent item would be deleted on the very
+  // next event.
+  const items = new Map(); // id -> AttentionRequest (evidence)
+  const assertions = new Map(); // id -> AttentionRequest (agent-asserted)
 
   function snapshot() {
-    return Array.from(items.values(), (item) => ({ ...item }));
+    return Array.from(items.values(), (item) => ({ ...item }))
+      .concat(Array.from(assertions.values(), (item) => ({ ...item })));
   }
 
   function get(id) {
-    const item = items.get(id);
+    const item = items.get(id) || assertions.get(id);
     return item ? { ...item } : null;
   }
 
@@ -109,12 +131,29 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
   // that cleared waiting, so this is the one path that may resolve it. Anything
   // else would leave a prompt that can never be dismissed.
   function answerAttention(projectId, tabId) {
-    const existing = items.get(attentionId(projectId, tabId));
-    if (!existing || existing.state === RESOLVED) return null;
-    const timestamp = now();
-    const next = { ...existing, state: RESOLVED, resolvedAt: timestamp, updatedAt: timestamp };
-    items.set(attentionId(projectId, tabId), next);
-    return { ...next };
+    // Also clears anything the agent raised for this tab: the human answered in
+    // the terminal, so the question is answered regardless of which channel
+    // delivered it.
+    const id = attentionId(projectId, tabId);
+    let resolved = null;
+    const existing = items.get(id);
+    if (existing && existing.state !== RESOLVED) {
+      const timestamp = now();
+      const next = { ...existing, state: RESOLVED, resolvedAt: timestamp, updatedAt: timestamp };
+      items.set(id, next);
+      resolved = { ...next };
+    }
+    for (const [assertionId, assertion] of Array.from(assertions)) {
+      if (assertion.tabId !== tabId || assertion.state === RESOLVED) continue;
+      assertions.set(assertionId, {
+        ...assertion,
+        state: RESOLVED,
+        resolvedAt: now(),
+        updatedAt: now(),
+      });
+      resolved = resolved || { ...assertion, state: RESOLVED };
+    }
+    return resolved;
   }
 
   // Unconditional removal, for the cases where the source state itself dropped
@@ -125,29 +164,115 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
   function forget(projectId, tabId) {
     const id = attentionId(projectId, tabId);
     const existing = items.get(id);
-    if (!existing) return null;
-    items.delete(id);
-    return { ...existing, state: RESOLVED, updatedAt: now() };
+    let forgotten = existing ? { ...existing, state: RESOLVED, updatedAt: now() } : null;
+    if (existing) items.delete(id);
+    // A closed tab cannot answer anything, so agent-asserted items for it are
+    // dropped outright rather than left to block the per-session cap forever.
+    for (const [assertionId, assertion] of Array.from(assertions)) {
+      if (assertion.tabId !== tabId) continue;
+      assertions.delete(assertionId);
+      forgotten = forgotten || { ...assertion, state: RESOLVED, updatedAt: now() };
+    }
+    return forgotten;
   }
 
   function acknowledgeAttention(id) {
-    const existing = items.get(id);
+    const map = items.has(id) ? items : assertions.has(id) ? assertions : null;
+    if (!map) return null;
+    const existing = map.get(id);
     if (!existing || existing.state === RESOLVED) return null;
     const timestamp = now();
     const next = { ...existing, state: ACKNOWLEDGED, acknowledgedAt: timestamp, updatedAt: timestamp };
-    items.set(id, next);
+    map.set(id, next);
     return { ...next };
+  }
+
+  // AL-5: an agent asked for the human's attention over MCP.
+  //
+  // Returns { ok, created, deduped } rather than throwing, because the caller
+  // is an MCP tool whose failure has to be reported back to an agent as data.
+  //
+  // blocking is forced false here as well as in the main-process guard. Two
+  // layers on purpose: this one is the store's invariant and survives any
+  // future caller, the other rejects the value before it can reach us at all.
+function requestAgentAttention(draft) {
+     if (!draft || typeof draft !== 'object') {
+       return { ok: false, error: 'Malformed attention request.' };
+     }
+     if (!Number.isInteger(draft.tabId) || draft.tabId <= 0) {
+       return { ok: false, error: 'Could not resolve this MCP session to a terminal tab.' };
+     }
+     const title = typeof draft.title === 'string' ? draft.title.trim() : '';
+     if (!title) return { ok: false, error: 'title is required' };
+     // `blocking` on the draft is ignored outright, whatever it says. The
+     // attempt is still recorded from either field so a caller that skipped
+     // the main-process guard cannot hide that it tried.
+     const agentDeclaredBlocking = draft.agentDeclaredBlocking === true || draft.blocking === true;
+
+    // Distinct id space from evidence items. The evidence id is
+    // `${projectId}:${tabId}`; an agent may raise several distinct items for
+    // one tab, so a shared id would overwrite the evidence item and, worse,
+    // make a request look like it came from a hook.
+    const id = `agent:${draft.projectId}:${draft.tabId}:${draft.kind}:${title}`
+      .slice(0, 200);
+    const timestamp = now();
+
+    const existing = assertions.get(id);
+    if (existing && existing.state !== RESOLVED) {
+      // Idempotent (plan 8.5.7). Deliberately does NOT touch updatedAt: a
+      // retrying agent would otherwise keep bumping recency and an old item
+      // would refuse to sink in the Inbox.
+      return { ok: true, deduped: true, attention: { ...existing } };
+    }
+    if (existing) {
+      return { ok: false, error: 'That attention was already resolved.' };
+    }
+
+    // Per-session open cap (plan 8.5.7).
+    const openForTab = Array.from(assertions.values())
+      .filter((item) => item.tabId === draft.tabId && item.state !== RESOLVED);
+    if (openForTab.length >= AGENT_MAX_OPEN_ATTENTION) {
+      return {
+        ok: false,
+        error: `This session already has ${openForTab.length} open attentions `
+          + `(limit ${AGENT_MAX_OPEN_ATTENTION}). Wait for the human to handle one.`,
+      };
+    }
+
+    const item = {
+      id,
+      projectId: draft.projectId,
+      tabId: draft.tabId,
+      sessionId: draft.sessionId || null,
+      kind: draft.kind,
+      requestedPriority: draft.requestedPriority || 'normal',
+      effectivePriority: effectivePriorityFor({ kind: draft.kind, blocking: false }),
+      // An agent cannot mark itself blocking (plan 8.5.7).
+      blocking: false,
+      title,
+      summary: draft.summary || null,
+      source: 'mcp',
+      confidence: null,
+      agentDeclaredBlocking,
+      state: OPEN,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    assertions.set(id, item);
+    return { ok: true, deduped: false, attention: { ...item } };
   }
 
   // Refuses to resolve a blocking attention. The human has to answer the agent
   // first; otherwise the item would vanish while the agent still waits.
   function resolveAttention(id) {
-    const existing = items.get(id);
+    const map = items.has(id) ? items : assertions.has(id) ? assertions : null;
+    if (!map) return null;
+    const existing = map.get(id);
     if (!existing || existing.state === RESOLVED) return null;
     if (existing.blocking) return null;
     const timestamp = now();
     const next = { ...existing, state: RESOLVED, resolvedAt: timestamp, updatedAt: timestamp };
-    items.set(id, next);
+    map.set(id, next);
     return { ...next };
   }
 
@@ -208,6 +333,7 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
 
   function clear() {
     items.clear();
+    assertions.clear();
   }
 
   return {
@@ -216,6 +342,7 @@ export function createAttentionStore({ now = () => Date.now() } = {}) {
     answerAttention,
     acknowledgeAttention,
     resolveAttention,
+    requestAgentAttention,
     presentAttention,
     get,
     getOpenAttention,

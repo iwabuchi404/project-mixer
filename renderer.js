@@ -13,7 +13,7 @@ import { register, dispatch } from './src/commands/registry.js';
 import { BINDINGS, validateBindings, matchBinding, keyToString, evaluateWhen } from './src/keybindings/registry.js';
 import { getState, setState, subscribe, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
 import { clearTerminalAttention, markAgentNotificationSeen, receiveAgentNotification, setTerminalWaiting } from './src/notifications/state.mjs';
-import { reconcileAttention, forgetTabAttention, answerTabAttention, getAttentionStore, acknowledgeAttention } from './src/attention/attention-wiring.mjs';
+import { reconcileAttention, forgetTabAttention, answerTabAttention, getAttentionStore, acknowledgeAttention, requestAgentAttention } from './src/attention/attention-wiring.mjs';
 import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
 import {
   clampLineRange,
@@ -7283,6 +7283,50 @@ register('agent_notification_received', ({ tabId, projectId, kind, eventType, so
   if (kind === 'needs_attention' || kind === 'turn_failed') {
     showOsNotification({ tabId, projectId, kind, source, reason, title, message, eventType });
   }
+});
+
+// AL-5: MCP request_attention arrives here. The ptyId -> tabId resolution lives
+// in the renderer because the renderer owns the tab map; main only knows PTYs.
+// A ptyId with no live tab means the terminal was closed between the agent's
+// call and this handler, which is reported as data rather than thrown.
+register('agent_request_attention', ({
+  ptyId, projectId, kind, requestedPriority, title, summary, sessionId, agentDeclaredBlocking,
+}) => {
+  let tabId = null;
+  for (const [candidate, terminal] of tabs) {
+    if (terminal.ptyId === ptyId) { tabId = candidate; break; }
+  }
+  if (tabId === null) {
+    return { ok: false, error: 'That terminal is no longer open.' };
+  }
+  const result = requestAgentAttention({
+    projectId,
+    tabId,
+    kind,
+    requestedPriority,
+    title,
+    summary,
+    sessionId,
+    agentDeclaredBlocking,
+    blocking: false,
+  });
+  if (!result.ok) return result;
+
+  // The store is the source of truth, but the pane may not be rendered yet,
+  // and the Inbox is only redrawn when it is open.
+  refreshAttentionSurface();
+  updateTabStatus(tabId);
+  updateProjectStatus(projectId);
+
+  // Tell the agent what actually happened, including a dedup hit, so a retry
+  // loop can tell "already listed" from "listed just now".
+  return {
+    ok: true,
+    deduped: Boolean(result.deduped),
+    id: result.attention.id,
+    state: result.attention.state,
+    blocking: false,
+  };
 });
 
 register('agent_notification_seen', ({ tabId }) => {

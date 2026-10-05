@@ -64,6 +64,15 @@ export function reconcileAttention(terminalAttention) {
   return store.reconcile(terminalAttention || {});
 }
 
+// AL-5: an agent asked for the human's attention. Goes straight into the
+// store's assertion space and deliberately does NOT touch terminalAttention:
+// that map is evidence derived from hooks, and letting an agent write there
+// would let it forge the amber `waiting` state the rest of the system treats
+// as ground truth.
+export function requestAgentAttention(draft) {
+  return store.requestAgentAttention(draft);
+}
+
 // Explicit human actions. Neither is ever inferred from a projection: opening a
 // tab is not acknowledgement, and nothing but the human resolves.
 export function acknowledgeAttention(id) {

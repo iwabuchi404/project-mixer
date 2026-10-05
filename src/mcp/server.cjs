@@ -8,6 +8,11 @@ const crypto = require('crypto');
 const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
+const {
+  prepareAgentAttention,
+  AGENT_KINDS,
+  AGENT_PRIORITIES,
+} = require('../main/attention-request.cjs');
 
 function createMcpServer(dispatchToRenderer, sessionContext = null) {
   const mcpServer = new McpServer({
@@ -72,6 +77,59 @@ function createMcpServer(dispatchToRenderer, sessionContext = null) {
         }],
       };
     }
+  );
+
+  // AL-5: request_attention.
+  //
+  // Supplementary channel, NOT a detection mechanism (plan 8.5.6): rung 1
+  // hooks are the primary path and this only compensates for rung 3 PTY
+  // heuristics, so an agent calling it does not improve detection. It is a
+  // way for an agent to say "the human should look at this".
+  //
+  // Identity (project / terminal) comes from the session context bound to this
+  // MCP connection, never from the arguments (plan 8.4). The agent therefore
+  // cannot attribute a request to another tab.
+  mcpServer.tool(
+    'request_attention',
+    'Ask the human to look at something. Use this when your work cannot continue '
+    + 'without a decision, when you are genuinely blocked, or when a review needs '
+    + 'a human. Do NOT use it for progress updates: those are not attention, and '
+    + 'repeating yourself will be de-duplicated. The item appears in the human\'s '
+    + '"Needs You" inbox; nothing is opened or focused automatically.',
+    {
+      kind: z.enum(AGENT_KINDS).optional()
+        .describe('What is needed: question, decision, blocked, error, review, completed, info'),
+      title: z.string().min(1).max(120)
+        .describe('Short imperative title, e.g. "API compatibility decision"'),
+      summary: z.string().max(400).optional()
+        .describe('One or two sentences of context the human needs to decide'),
+      priority: z.enum(AGENT_PRIORITIES).optional()
+        .describe('Your own assessment of urgency. Advisory: the human decides how it is shown'),
+      blocking: z.boolean().optional()
+        .describe('Ignored. Only the human can decide what stops their own work'),
+    },
+    async (args) => {
+      // Guards run before anything reaches the renderer, so an agent cannot
+      // skip them by however it constructs the call (plan 8.5.7).
+      const prepared = prepareAgentAttention(args, sessionContext);
+      if (!prepared.ok) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: JSON.stringify({ ok: false, error: prepared.error }, null, 2) }],
+        };
+      }
+      const result = await dispatchToRenderer(
+        'agent_request_attention',
+        prepared.attention,
+        sessionContext,
+      );
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ ...result, notices: prepared.notices }, null, 2),
+        }],
+      };
+    },
   );
 
   return mcpServer;

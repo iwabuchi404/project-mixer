@@ -58,6 +58,20 @@ export const COMMAND_SCHEMAS = {
     sessionId: optStr,
   }),
   agent_notification_seen: p({ tabId: z.number() }),
+  // AL-5. `blocking` is accepted but the store forces it false; see
+  // src/main/attention-request.cjs for why an agent cannot set it.
+  agent_request_attention: p({
+    ptyId: z.number(),
+    projectId: z.string(),
+    kind: z.string(),
+    requestedPriority: optStr,
+    title: z.string(),
+    summary: optStr,
+    blocking: z.boolean().optional(),
+    source: optStr,
+    sessionId: optStr,
+    agentDeclaredBlocking: z.boolean().optional(),
+  }),
   terminal_set_waiting: p({ tabId: z.number(), projectId: optStr, waiting: z.boolean(), cause: optStr }),
   terminal_clear_attention: p({ tabId: z.number() }),
   agent_session_bound: p({ tabId: z.number(), provider: z.string(), sessionId: z.string(), status: optStr }),
