@@ -308,12 +308,27 @@ function startMcpServer(basePort, dispatchToRenderer, onReady, onFailed) {
     });
   }
 
+  // Is an agent actually talking to us over this token? Used by the
+  // integration probe (src/main/integration-probe.cjs) to decide whether a
+  // session can be treated as protocol-capable. A registered token only means
+  // the URL was handed out; the transport appears when the agent dials in, so
+  // the two states are genuinely different and conflating them would claim a
+  // capability that has not been exercised.
+  function isSessionConnected(token) {
+    if (!token) return false;
+    for (const session of transports.values()) {
+      if (session.token === token) return true;
+    }
+    return false;
+  }
+
   tryListen(basePort);
   return {
     registerSession,
     revokeSession,
     getPort: () => listeningPort,
     hasSession: (token) => sessionTokens.has(token),
+    isSessionConnected,
     close: async () => {
       const closingTransports = Array.from(
         transports.values(),

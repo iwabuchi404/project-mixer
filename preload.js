@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   ptyAttach: (id) => ipcRenderer.invoke('pty:attach', { id }),
   ptyWrite: (id, data) => ipcRenderer.invoke('pty:write', { id, data }),
   ptyResize: (id, cols, rows) => ipcRenderer.invoke('pty:resize', { id, cols, rows }),
+  probeIntegration: (ptyId) => ipcRenderer.invoke('probe:integration', { ptyId }),
   ptyKill: (id) => ipcRenderer.invoke('pty:kill', { id }),
   onPtyData: (callback) => ipcRenderer.on('pty:data', (_e, payload) => callback(payload)),
   onPtyExit: (callback) => ipcRenderer.on('pty:exit', (_e, payload) => callback(payload)),

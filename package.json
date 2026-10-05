@@ -25,7 +25,7 @@
     "test:codemirror": "node --test test/codemirror.test.cjs",
     "test:agent-notifications": "node --test test/agent-notifications.test.cjs",
     "test:devin-notifications": "node --test test/devin-session-monitor.test.cjs test/devin-terminal-notifications.test.cjs test/devin-terminal-signal-probe.test.cjs test/devin-session-index.test.cjs",
-    "test:codex-notify": "node --test test/codex-notify.test.cjs",
+    "test:codex-notify": "node --test test/codex-notify.test.cjs test/integration-probe.test.cjs",
     "test:refactor-r0": "node --test test/refactor-r0.test.cjs",
     "test:refactor-r2": "node --test test/refactor-r2.test.cjs",
     "test:refactor-r4": "node --test test/refactor-r4.test.cjs",

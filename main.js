@@ -20,6 +20,7 @@ const {
   normalizePathKey,
   MAX_JSON_BYTES,
 } = require('./src/main/devin-session-index.cjs');
+const { probeIntegration } = require('./src/main/integration-probe.cjs');
 const {
   WRAPPER_SOURCE: CODEX_WRAPPER_SOURCE,
   planCodexNotifyInstall,
@@ -736,6 +737,18 @@ ipcMain.handle('pty:create', async (event, payload) => {
     ptys.set(id, ptyRecord);
     if (hookToken) hookTokens.set(hookToken, id);
 
+    // Integration capability (src/main/integration-probe.cjs), probed once at
+    // spawn rather than declared per provider. Deliberately not awaited: an
+    // MCP transport appears only once the agent dials in, so probing for that
+    // here would always report false, and the file reads must never delay the
+    // PTY. mcpConnected therefore starts false and is refreshed by
+    // probe:integration when something asks.
+    ptyRecord.integration = probeIntegration({
+      command: ptyRecord.command,
+      projectRoot: options.projectId ? resolveProjectRoot(loadProjectsConfig(), options.cwd).target : null,
+      mcpConnected: Boolean(mcpControl?.isSessionConnected(mcpToken)),
+    });
+
     ptyProcess.onData((data) => {
       const record = ptys.get(id);
       if (!record) return;
@@ -810,6 +823,27 @@ ipcMain.handle('pty:write', (event, payload) => {
   if (payload.data.length > 1024 * 1024) throw new TypeError('PTY write payload is too large');
   const p = ptys.get(payload.id);
   if (p) p.process.write(payload.data);
+});
+
+// Re-probe a live session. Cheap enough to call whenever the renderer wants a
+// current answer, and necessary because MCP connectivity changes AFTER spawn:
+// the token exists at pty:create but the transport only appears when the agent
+// dials in, which for a slow-starting CLI is seconds later.
+ipcMain.handle('probe:integration', (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || !Number.isInteger(payload.ptyId) || payload.ptyId <= 0) {
+    throw new TypeError('probe:integration payload is invalid');
+  }
+  const p = ptys.get(payload.ptyId);
+  if (!p) return { ok: false, error: 'That terminal is no longer running.' };
+  const projectRoot = p.cwd ? resolveProjectRoot(loadProjectsConfig(), p.cwd).target : null;
+  const result = probeIntegration({
+    command: p.command,
+    projectRoot,
+    mcpConnected: Boolean(mcpControl?.isSessionConnected(p.mcpToken)),
+  });
+  p.integration = result;
+  return { ok: true, ...result };
 });
 
 ipcMain.handle('pty:resize', (event, payload) => {
