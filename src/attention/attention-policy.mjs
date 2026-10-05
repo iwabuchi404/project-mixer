@@ -23,6 +23,10 @@
 // human context in. That keeps the policy testable and makes an accidental
 // priority mutation impossible to hide.
 
+// One import, and it is a pure classifier module. The policy's own purity
+// guard (test/attention-policy.test.cjs) allows exactly this.
+import { mayInterrupt } from './provenance.mjs';
+
 export const ATTENTION_PRIORITIES = Object.freeze(['low', 'normal', 'high']);
 
 export const ATTENTION_PRESENTATIONS = Object.freeze([
@@ -103,7 +107,18 @@ export function presentationFor(item, humanContext = {}) {
   const inView = Boolean(humanContext.inViewTabIds?.includes(item?.tabId))
     || humanContext.activeTabId === item?.tabId;
 
-  if (blocking && inView) return 'interrupt';
+  // Provenance gate (step 0d). Only an explicit signal may interrupt the
+  // human. Measured: the PTY prompt patterns match ordinary log lines
+  // ("grpc: allowing ...", "Did the build succeed?", "PASS test_allow_list"),
+  // and before this gate one such match became a modal OS notification plus
+  // an amber dot that only a real keystroke could clear.
+  //
+  // An inferred signal is still shown -- it becomes an Inbox row and a sidebar
+  // dot -- because hiding it entirely would leave codex and devin permanently
+  // unobservable: measured, codex has no usable notify slot on this machine
+  // (the single-value config entry belongs to another tool) and devin has no
+  // hook mechanism at all. PTY observation is the only channel they have.
+  if (blocking && inView && mayInterrupt(item?.certainty)) return 'interrupt';
   // A completed turn is history, not a task: visible as a dot so the human can
   // tell "finished" from "never ran", but never listed.
   if (priority === 'low' && !blocking) return 'presence';

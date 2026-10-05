@@ -1,6 +1,10 @@
 // src/attention/attention-mapper.mjs
 // Pure projection: terminalAttention -> AttentionRequest.
 //
+// Provenance: `certainty` is read from the notification record rather than
+// re-derived from `source`, because source alone cannot distinguish a
+// hook assertion from a PTY observation that looked similar.
+//
 // Purity is the point, not a style choice. The "an input prompt is never
 // cleared by a late completion event" rule already lives in
 // src/notifications/state.mjs. A pure re-labelling cannot violate that rule;
@@ -10,6 +14,8 @@
 // Timestamps are deliberately absent (IMPLEMENTATION_PLAN 4.2 / 3.1):
 // createdAt / updatedAt / acknowledgedAt / resolvedAt belong to the
 // Attention Store, which is the only writer of state transitions.
+
+import { classifyCertainty, mayBlock } from './provenance.mjs';
 
 export const ATTENTION_KINDS = Object.freeze([
   'question',
@@ -32,8 +38,9 @@ const DEFAULT_TITLES = Object.freeze({
 });
 
 // rung 3 (PTY heuristic) is the only source that cannot state where its
-// evidence came from, so its confidence is materially lower than a hook,
-// plugin or session-file event.
+// evidence came from, so it is recorded as inferred provenance rather than a
+// bare source string. See src/attention/provenance.mjs for why certainty is
+// three-way and what it gates.
 const HEURISTIC_SOURCE = 'pty';
 const HEURISTIC_CONFIDENCE = 0.5;
 
@@ -89,6 +96,14 @@ function classifyConfidence(rawSource) {
   return rawSource === HEURISTIC_SOURCE ? HEURISTIC_CONFIDENCE : 1;
 }
 
+// Provenance travels with the item instead of being re-derived here. The
+// notification layer already recorded how the signal arrived; re-deriving it
+// from `source` would be exactly the guesswork this replaced.
+function classifyCertaintyOf(item) {
+  if (typeof item.certainty === 'string') return item.certainty;
+  return classifyCertainty(item.source, null);
+}
+
 function classifyTitle(kind, item) {
   const declared = typeof item.title === 'string' ? item.title.trim() : '';
   if (declared) return declared;
@@ -116,6 +131,21 @@ export function attentionId(projectId, tabId) {
 
 // Returns the classification part of an AttentionRequest, or null when the
 // item does not warrant attention.
+// Provenance-aware blocking. `item.waiting` alone would let a PTY regex
+// match become a blocking attention, and resolveAttention() refuses blocking
+// items -- so a false positive would survive every click. The notification
+// layer records `blockingCertain` for exactly this decision.
+function classifyBlocking(item) {
+  if (!item.waiting) return false;
+  if (typeof item.blockingCertain === 'boolean') return item.blockingCertain;
+  if (typeof item.certainty === 'string') return mayBlock(classifyCertaintyOf(item));
+  // Neither field present: a hand-built fixture or a producer that predates
+  // provenance. `waiting` was the whole signal before, and these records are
+  // not observations, so honour it. Only real signals carry a certainty, and
+  // those are gated above.
+  return true;
+}
+
 export function mapAttentionItem(tabId, item) {
   if (!Number.isInteger(tabId) || tabId <= 0) return null;
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
@@ -128,24 +158,25 @@ export function mapAttentionItem(tabId, item) {
 
 const requestedPriority = classifyPriority(kind);
 
-    return {
-      id: attentionId(projectId, tabId),
-      projectId,
-      tabId,
-      sessionId: optionalText(item.sessionId),
-      kind,
-      requestedPriority,
-      // Placeholder. Attention Policy (AL-6, attention-policy.mjs) owns this
-      // field and recomputes it; the mapper must not smuggle in a policy
-      // decision, so it only mirrors requestedPriority until the store runs
-      // the policy over the projection.
-      effectivePriority: requestedPriority,
-      blocking: Boolean(item.waiting),
+  return {
+    id: attentionId(projectId, tabId),
+    projectId,
+    tabId,
+    sessionId: optionalText(item.sessionId),
+    kind,
+    requestedPriority,
+    // Placeholder. Attention Policy (AL-6, attention-policy.mjs) owns this
+    // field and recomputes it; the mapper must not smuggle in a policy
+    // decision, so it only mirrors requestedPriority until the store runs
+    // the policy over the projection.
+    effectivePriority: requestedPriority,
+    blocking: classifyBlocking(item),
     title: classifyTitle(kind, item),
     summary: optionalText(item.message),
     reason: optionalText(item.reason),
     source: classifySource(item.source),
     confidence: classifyConfidence(item.source),
+    certainty: classifyCertaintyOf(item),
   };
 }
 

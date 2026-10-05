@@ -14,6 +14,7 @@
 
 import { mapAttention, attentionId } from './attention-mapper.mjs';
 import { effectivePriorityFor, applyPolicy, applyPolicyToAll } from './attention-policy.mjs';
+import { mayInterrupt } from './provenance.mjs';
 
 const OPEN = 'OPEN';
 const ACKNOWLEDGED = 'ACKNOWLEDGED';
@@ -249,6 +250,8 @@ function requestAgentAttention(draft) {
       effectivePriority: effectivePriorityFor({ kind: draft.kind, blocking: false }),
       // An agent cannot mark itself blocking (plan 8.5.7).
       blocking: false,
+      // Agent requests arrive over MCP, which is an explicit protocol.
+      certainty: 'explicit',
       title,
       summary: draft.summary || null,
       source: 'mcp',

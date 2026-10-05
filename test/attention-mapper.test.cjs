@@ -30,6 +30,9 @@ function waitingItem(overrides = {}) {
     title: null,
     message: null,
     sessionId: 's1',
+    // What the notification layer records for a hook/plugin event.
+    certainty: 'explicit',
+    blockingCertain: true,
     ...overrides,
   };
 }
@@ -51,6 +54,9 @@ test('maps an input prompt to a blocking question', async () => {
     reason: 'input',
     source: 'agent',
     confidence: 1,
+    // Carried from the notification record, not re-derived. A hook event is
+    // explicit and may block.
+    certainty: 'explicit',
   });
 });
 

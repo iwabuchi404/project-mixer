@@ -47,7 +47,7 @@
     "dist:mac": "electron-builder --mac",
     "dist:linux": "electron-builder --linux",
     "test:phase8": "node --test test/phase8-pane.test.cjs",
-    "test:attention": "node --test test/attention-mapper.test.cjs test/attention-store.test.cjs test/attention-policy.test.cjs test/attention-request.test.cjs test/attention-wiring.test.cjs test/attention-single-writer.test.cjs test/attention-inbox-ui.test.cjs test/attention-surface-wiring.test.cjs test/attention-inbox-live-regressions.test.cjs"
+    "test:attention": "node --test test/attention-mapper.test.cjs test/attention-store.test.cjs test/attention-policy.test.cjs test/attention-provenance.test.cjs test/attention-request.test.cjs test/attention-wiring.test.cjs test/attention-single-writer.test.cjs test/attention-inbox-ui.test.cjs test/attention-surface-wiring.test.cjs test/attention-inbox-live-regressions.test.cjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",

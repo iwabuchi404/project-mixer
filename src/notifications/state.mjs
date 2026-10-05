@@ -1,3 +1,5 @@
+import { classifyCertainty, mayBlock } from '../attention/provenance.mjs';
+
 export function receiveAgentNotification(attention, {
   tabId,
   projectId,
@@ -39,6 +41,11 @@ export function receiveAgentNotification(attention, {
     return next;
   }
 
+  // A structured lifecycle event from a hook or plugin is explicit. The
+  // `asserted` case has no producer here yet; devinBind will be the first,
+  // and it arrives through a different path.
+  const certainty = classifyCertainty(source, null);
+
   next[tabId] = {
     projectId,
     waiting,
@@ -48,6 +55,8 @@ export function receiveAgentNotification(attention, {
     kind,
     eventType,
     source,
+    blockingCertain: mayBlock(certainty),
+    certainty,
     reason,
     title,
     message,
@@ -56,7 +65,9 @@ export function receiveAgentNotification(attention, {
   return next;
 }
 
-export function setTerminalWaiting(attention, { tabId, projectId, waiting, cause = 'output' }) {
+export function setTerminalWaiting(attention, {
+  tabId, projectId, waiting, cause = 'output', certainty = null,
+}) {
   const next = { ...attention };
   const current = next[tabId];
 
@@ -76,6 +87,13 @@ export function setTerminalWaiting(attention, { tabId, projectId, waiting, cause
     return next;
   }
 
+  // Recorded, not consumed. Previously `cause` decided the behaviour and was
+  // then discarded, so a hook-sourced waiting and a regex-sourced one ended up
+  // as the same object and nothing downstream could tell them apart.
+  const resolvedCertainty = certainty
+    || (current && !waiting ? current.certainty : null)
+    || classifyCertainty(current?.source || 'pty', cause);
+
   next[tabId] = {
     projectId,
     waiting: Boolean(waiting),
@@ -83,6 +101,12 @@ export function setTerminalWaiting(attention, { tabId, projectId, waiting, cause
     kind: waiting ? 'needs_attention' : current?.kind || 'turn_completed',
     eventType: current?.eventType || null,
     source: current?.source || 'pty',
+    // An inferred prompt may not claim blocking. Blocking means the human's
+    // keystroke is the only resolution, and resolveAttention() refuses
+    // blocking items -- so a false positive would be undismissable by clicking
+    // and would escalate to a modal notification.
+    blockingCertain: mayBlock(resolvedCertainty),
+    certainty: resolvedCertainty,
     reason: waiting ? 'input' : current?.reason || null,
     title: current?.title || null,
     message: current?.message || null,

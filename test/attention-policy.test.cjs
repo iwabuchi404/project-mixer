@@ -40,7 +40,9 @@ test('kind=error outranks blocking', async () => {
 // human never finds out".
 test('human context cannot change effectivePriority', async () => {
   const { applyPolicy } = await load();
-  const item = { kind: 'error', blocking: true, tabId: 7, projectId: 'p-other', effectivePriority: 'low' };
+  const item = {
+    kind: 'error', blocking: true, tabId: 7, projectId: 'p-other', effectivePriority: 'low', certainty: 'explicit',
+  };
   const here = applyPolicy(item, {
     inViewTabIds: [7], activeTabId: 7, activeProjectId: 'p-here',
   });
@@ -63,13 +65,17 @@ test('resolved items are never presented', async () => {
   // state: 'RESOLVED' is what the store sets; a draft without a state is not
   // resolved and must still be presented.
   for (const blocking of [true, false]) {
-    const item = applyPolicy({ kind: 'question', blocking, tabId: 3, projectId: 'p', state: 'RESOLVED' }, {
+    const item = applyPolicy({
+      kind: 'question', blocking, tabId: 3, projectId: 'p', state: 'RESOLVED', certainty: 'explicit',
+    }, {
       inViewTabIds: [3], activeTabId: 3,
     });
     assert.equal(item.presentation, 'hidden', `blocking=${blocking}`);
   }
   assert.equal(
-    applyPolicy({ kind: 'question', blocking: true, tabId: 3, projectId: 'p' }, { activeTabId: 3 }).presentation,
+    applyPolicy({
+      kind: 'question', blocking: true, tabId: 3, projectId: 'p', certainty: 'explicit',
+    }, { activeTabId: 3 }).presentation,
     'interrupt',
     'a draft with no state is not resolved',
   );
@@ -77,7 +83,9 @@ test('resolved items are never presented', async () => {
 
 test('blocking in the current pane interrupts; out of view highlights', async () => {
   const { applyPolicy } = await load();
-  const blocking = { kind: 'question', blocking: true, tabId: 3, projectId: 'p' };
+  const blocking = {
+    kind: 'question', blocking: true, tabId: 3, projectId: 'p', certainty: 'explicit',
+  };
   assert.equal(applyPolicy(blocking, { inViewTabIds: [3], activeTabId: 3 }).presentation, 'interrupt');
   assert.equal(applyPolicy(blocking, { inViewTabIds: [9], activeTabId: 9 }).presentation, 'highlight');
   // Active tab counts as in view even if the pane list missed it.
@@ -230,7 +238,7 @@ test('wiring exposes the policy read path', async () => {
   wiring.__resetAttentionStoreForTest();
 });
 
-test('the policy module does not read renderer state or a clock', () => {
+test('the policy module stays free of renderer state, a clock and storage', () => {
   // Structural guard. A policy that imported the store, touched `document` or
   // called Date.now() would be impossible to unit test and would smuggle
   // human context into priority.
@@ -238,6 +246,9 @@ test('the policy module does not read renderer state or a clock', () => {
   assert.doesNotMatch(source, /\bdocument\b/);
   assert.doesNotMatch(source, /\bwindow\b/);
   assert.doesNotMatch(source, /Date\.now|new Date/);
-  assert.doesNotMatch(source, /^import /m, 'the policy must have no imports at all');
   assert.doesNotMatch(source, /localStorage/);
+  // Its one import is the pure provenance classifier. Anything else would
+  // break the reason the policy can be tested without an Electron instance.
+  const imports = [...source.matchAll(/^import .*?from '([^']+)';/gm)].map((m) => m[1]);
+  assert.deepEqual(imports, ['./provenance.mjs']);
 });
