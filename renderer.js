@@ -14,6 +14,13 @@ import { BINDINGS, validateBindings, matchBinding, keyToString, evaluateWhen } f
 import { getState, setState, subscribe, buildFocusState, getProjectScratchContent, getProjectBadge, getTabAttention, getTerminalAttentionSummary, getTerminalAgentBinding } from './src/store/index.js';
 import { clearTerminalAttention, markAgentNotificationSeen, receiveAgentNotification, setTerminalWaiting } from './src/notifications/state.mjs';
 import { reconcileAttention, forgetTabAttention, answerTabAttention, getAttentionStore, acknowledgeAttention, requestAgentAttention } from './src/attention/attention-wiring.mjs';
+import {
+  createInitialAgentState,
+  reduceAgentState,
+  applyStaleness,
+  describeAgentState,
+} from './src/attention/agent-state-reducer.mjs';
+import { classifyCertainty } from './src/attention/provenance.mjs';
 import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
 import {
   clampLineRange,
@@ -698,15 +705,19 @@ function detectWaiting(command, data) {
 }
 
 function clearTerminalWaitingForUserInput(tabId) {
-  const terminal = tabs.get(tabId);
-  if (!terminal || !getTabAttention(tabId)?.waiting) return;
-  dispatch('terminal_set_waiting', {
-    tabId,
-    projectId: terminal.projectId,
-    waiting: false,
-    cause: 'input',
-  });
-}
+     const terminal = tabs.get(tabId);
+     if (!terminal || !getTabAttention(tabId)?.waiting) return;
+     // A keystroke is the human answering, so it clears both an explicit request
+     // and an inferred candidate. The reducer is told too, so its state does not
+     // keep a waiting the UI no longer shows.
+     reduceForTab(tabId, { type: 'user_input' });
+     dispatch('terminal_set_waiting', {
+       tabId,
+       projectId: terminal.projectId,
+       waiting: false,
+       cause: 'input',
+     });
+   }
 
 // PTY output batching: agent TUIs emit redraws as many small chunks, and
 // feeding each chunk through a separate write/scroll/paint saturates the
@@ -727,6 +738,48 @@ window.api.onPtyData(({ id, data }) => {
   }
 });
 
+// One chunk of PTY output, for one tab. Split out of flushPtyOutput so the
+// live check can drive the exact production path instead of re-implementing
+// it, which is how the refutation rule gets tested for real.
+function flushPtyChunk(tabId, t, data) {
+  const followToken = captureTerminalFollowToken(t);
+  t.terminal.write(data, () => {
+    if (tabs.get(tabId) === t && shouldFollowTerminalOutput(t, followToken)) {
+      scheduleTerminalScrollToBottom(t);
+    }
+  });
+  // Agent State Reducer (src/attention/agent-state-reducer.mjs) decides what
+  // this chunk MEANS, so no single regex can flip the state on its own.
+  //
+  // Two things happen here, and the distinction matters:
+  //   - a match sets an INFERRED waiting candidate, which decays (step 0b)
+  //   - a chunk that follows such a candidate REFUTES it immediately
+  //
+  // The refutation is the sharp half: measured, /Allow/i matches
+  // 'grpc: allowing unauthenticated access' while output is still streaming,
+  // so the next chunk disproves it. A real prompt sits still until the human
+  // types. Explicit waiting is never refuted, because a permission prompt is
+  // routinely followed by a spinner.
+  const now = Date.now();
+  const previous = agentStates.get(tabId) || createInitialAgentState(() => now);
+  const matched = detectWaiting(t.command, data);
+  const afterOutput = reduceAgentState(previous, { type: 'output', at: now }, { now: () => now });
+  const next = matched
+    ? reduceAgentState(afterOutput, { type: 'prompt_detected', certainty: 'inferred', at: now }, { now: () => now })
+    : afterOutput;
+  agentStates.set(tabId, next);
+
+  const isWaiting = Boolean(getTabAttention(tabId)?.waiting);
+  if (matched && !isWaiting) {
+    dispatch('terminal_set_waiting', { tabId, projectId: t.projectId, waiting: true, cause: 'output' });
+  } else if (!matched && isWaiting
+    && previous.state === 'waiting' && previous.certainty === 'inferred') {
+    // The candidate was refuted, so the row must go too. An explicit waiting is
+    // left alone: a redraw must not clear a real permission request.
+    dispatch('terminal_set_waiting', { tabId, projectId: t.projectId, waiting: false, cause: 'refuted' });
+  }
+}
+
 function flushPtyOutput(ptyId) {
   const buffer = ptyOutputBuffers.get(ptyId);
   if (!buffer) return;
@@ -735,29 +788,85 @@ function flushPtyOutput(ptyId) {
   buffer.chunks.length = 0;
   for (const [tabId, t] of tabs) {
     if (t.ptyId === ptyId) {
-      const followToken = captureTerminalFollowToken(t);
-      t.terminal.write(data, () => {
-        if (tabs.get(tabId) === t && shouldFollowTerminalOutput(t, followToken)) {
-          scheduleTerminalScrollToBottom(t);
-        }
-      });
-      // PTY output can SET waiting (e.g. detecting a prompt pattern) but
-      // must never CLEAR it. Tab switches trigger terminal resize → TUI
-      // redraw → detectWaiting returns false, which would spuriously clear
-      // the amber dot. Waiting is only cleared by real user input,
-      // an explicit UserPromptSubmit, PTY exit, or tab close.
-      const waiting = detectWaiting(t.command, data);
-      const currentWaiting = Boolean(getTabAttention(tabId)?.waiting);
-      if (waiting && !currentWaiting) {
-        dispatch('terminal_set_waiting', { tabId, projectId: t.projectId, waiting: true, cause: 'output' });
-      }
+      flushPtyChunk(tabId, t, data);
       return;
     }
   }
 }
 
-// Scroll follows are rAF-throttled: during output floods at most one
-// scrollToBottom per frame instead of one per write callback.
+// ============================================================
+// Agent state sweep (Agent State Reducer, step 0b)
+// ============================================================
+
+// Per-tab reducer state, keyed by tabId. Sits beside `tabs`, not inside it:
+// a Terminal object is not the right home for agent state, and keeping it
+// separate means closing a tab cannot leave a stale entry behind by accident.
+const agentStates = new Map();
+
+function agentStateFor(tabId) {
+  return agentStates.get(tabId) || createInitialAgentState();
+}
+
+// Drop the reducer state for a tab. Called wherever a tab goes away, because
+// a leaked entry would keep decaying forever and a reused tabId would inherit
+// a previous tab's waitingSince.
+function forgetAgentState(tabId) {
+  agentStates.delete(tabId);
+}
+
+// Fold a non-output event into a tab's agent state. Lifecycle events, input
+// and exit all belong here so the reducer stays the only place that decides
+// what a signal means.
+function reduceForTab(tabId, event) {
+  const previous = agentStateFor(tabId);
+  const next = reduceAgentState(previous, event);
+  agentStates.set(tabId, next);
+  return { previous, next };
+}
+
+// Release inferred waiting candidates that produced no further output.
+//
+// The time-based half of the staleness rule. Output already refutes most false
+// positives immediately; this catches the ones where the stream simply stopped
+// right after the match, which is exactly the "tab bar stuck amber" case.
+//
+// Explicit waiting is untouched: a permission request has no staleness rule,
+// because it is not a hypothesis.
+function sweepStaleAgentWaiting() {
+  const now = Date.now();
+  for (const [tabId, state] of Array.from(agentStates)) {
+    if (state.state !== 'waiting' || state.certainty !== 'inferred') continue;
+    const decayed = applyStaleness(state, { at: now });
+    if (decayed === state) continue;
+    agentStates.set(tabId, decayed);
+    const terminal = tabs.get(tabId);
+    if (!terminal) continue;
+    if (!getTabAttention(tabId)?.waiting) continue;
+    dispatch('terminal_set_waiting', {
+      tabId,
+      projectId: terminal.projectId,
+      waiting: false,
+      cause: 'refuted',
+    });
+  }
+}
+
+setInterval(sweepStaleAgentWaiting, 15_000);
+
+// Agent State Reducer inspection, plus a way to drive the PTY scrape path from
+// a test. __pmFlushPtyForTest feeds text through the same function real output
+// uses, so the refutation rule is exercised end to end rather than simulated.
+// Same category of seam as window.__pmDispatch.
+window.__pmAgentState = (tabId) => describeAgentState(agentStates.get(tabId));
+window.__pmFlushPtyForTest = (tabId, data) => {
+  const terminal = tabs.get(tabId);
+  if (!terminal) return false;
+  flushPtyChunk(tabId, terminal, data);
+  return true;
+};
+
+// ============================================================
+// Scroll follow (rAF-throttled)
 function scheduleTerminalScrollToBottom(t) {
   if (t.scrollRafId != null) return;
   t.scrollRafId = requestAnimationFrame(() => {
@@ -5667,9 +5776,10 @@ function closeTerminal(tabId) {
   t.terminal.dispose();
   t.termEl.remove();
   t.tabElement.remove();
-  dispatch('agent_session_unbound', { tabId });
-  tabs.delete(tabId);
-  dispatch('terminal_clear_attention', { tabId });
+dispatch('agent_session_unbound', { tabId });
+     tabs.delete(tabId);
+     forgetAgentState(tabId);
+     dispatch('terminal_clear_attention', { tabId });
   detachTabFromPanes(tabId);
 
   if (activeTabId === tabId && paneHadView) {
@@ -7239,6 +7349,14 @@ register('agent_notification_received', ({ tabId, projectId, kind, eventType, so
   if (!tabs.has(tabId)) return;
   const unread = activeMainView !== 'terminal' || activeTabId !== tabId || activeProjectId !== projectId;
   const wasWaiting = Boolean(getTabAttention(tabId)?.waiting);
+  // The reducer folds lifecycle events too, so it stays the only place that
+  // decides what a signal means. `needs_attention` is explicit by construction:
+  // only hooks, plugins and MCP reach this handler, never the PTY scraper.
+  reduceForTab(tabId, {
+    type: 'lifecycle',
+    kind,
+    certainty: classifyCertainty(source, null),
+  });
   const terminalAttention = receiveAgentNotification(getState().terminalAttention, {
     tabId,
     projectId,
