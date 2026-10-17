@@ -250,7 +250,7 @@ export const COMMAND_TYPES = {
     returns: 'void',
   },
   pane_layout: {
-    args: { mode: "'single' | 'row' | 'column' | 'grid'" },
+    args: { mode: "'single' | 'row' | 'column' | 'grid' | 't'" },
     returns: 'void',
   },
   pane_close: {

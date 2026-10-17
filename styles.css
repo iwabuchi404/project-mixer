@@ -993,9 +993,33 @@ textarea:focus-visible,
 
 #terminal-container.grid-layout {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(2, minmax(0, 1fr));
+  grid-template-columns: var(--grid-cols, repeat(2, minmax(0, 1fr)));
+  grid-template-rows: var(--grid-rows, repeat(2, minmax(0, 1fr)));
   gap: 7px;
+}
+#terminal-container.grid-layout .grid-splitter {
+  position: absolute;
+  z-index: 5;
+  background: transparent;
+}
+#terminal-container.grid-layout .grid-splitter.vertical {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 8px;
+  transform: translateX(-50%);
+  cursor: col-resize;
+}
+#terminal-container.t-layout .grid-splitter.vertical {
+  top: 50%;
+}
+#terminal-container.grid-layout .grid-splitter.horizontal {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 8px;
+  transform: translateY(-50%);
+  cursor: row-resize;
 }
 
 #terminal-container.grid-layout .terminal-pane-item {

@@ -25,7 +25,7 @@ test('B1: renderer keeps a bounded pane model with fixed layout presets', () => 
   assert.match(renderer, /let panes = \[\];/);
   assert.match(renderer, /function renderPanes\(\)/);
   assert.match(renderer, /function ensureDefaultPane\(\)/);
-  assert.match(renderer, /const PANE_LAYOUT_MODES = new Set\(\['single', 'row', 'column', 'grid'\]\)/);
+  assert.match(renderer, /const PANE_LAYOUT_MODES = new Set\(\['single', 'row', 'column', 'grid', 't'\]\)/);
   assert.match(renderer, /function setPaneLayoutMode\(mode\)/);
   assert.match(renderer, /if \(panes\.length >= MAX_PANES\)/);
   assert.match(read('styles.css'), /#terminal-container\.grid-layout/);

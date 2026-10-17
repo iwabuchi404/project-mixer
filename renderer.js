@@ -2317,12 +2317,13 @@ let editorStateInitialized = false;
 // has a single direction ('row' | 'column') and panes split it evenly.
 // One pane is exactly the pre-B1 behavior.
 const MAX_PANES = 4;
-const PANE_LAYOUT_MODES = new Set(['single', 'row', 'column', 'grid']);
+const PANE_LAYOUT_MODES = new Set(['single', 'row', 'column', 'grid', 't']);
 const PANE_LAYOUT_LABELS = {
   single: 'Single',
   row: 'Split right',
   column: 'Split down',
   grid: '2 × 2 grid',
+  t: 'T-shape',
 };
 let panes = []; // [{ id, tabIds: [], activeTabId, size, slot }] for the active project
 let activePaneId = null;
@@ -2617,13 +2618,14 @@ async function switchProjectEditor(projectId) {
           slot: Number.isInteger(p.slot) ? p.slot : null,
           view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null,
         }))
-        .filter((p) => paneLayoutMode === 'grid' || p.tabIds.length > 0 || p.view)
+        .filter((p) => paneLayoutMode === 'grid' || paneLayoutMode === 't' || p.tabIds.length > 0 || p.view)
       : [];
     if (panes.length === 0) {
       panes = [createEmptyPane(0)];
     }
-    if (paneLayoutMode === 'grid') {
-      while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+    if (paneLayoutMode === 'grid' || paneLayoutMode === 't') {
+      const targetCount = paneLayoutMode === 'grid' ? MAX_PANES : 3;
+      while (panes.length < targetCount) panes.push(createEmptyPane(panes.length));
       normalizePaneSlots();
     }
     // Monotonic raise ONLY — per-project counters can be much lower, and a
@@ -2658,8 +2660,9 @@ async function switchProjectEditor(projectId) {
       ? sk.panes.map((p) => ({ ...p, view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null }))
       : [];
     if (panes.length === 0) panes = [createEmptyPane(0)];
-    if (paneLayoutMode === 'grid') {
-      while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+    if (paneLayoutMode === 'grid' || paneLayoutMode === 't') {
+      const targetCount = paneLayoutMode === 'grid' ? MAX_PANES : 3;
+      while (panes.length < targetCount) panes.push(createEmptyPane(panes.length));
       normalizePaneSlots();
     }
     // Skeleton pane ids came from the global counter — never let the next
@@ -4923,7 +4926,7 @@ function createEmptyPane(slot = null) {
 }
 
 function normalizePaneSlots() {
-  if (paneLayoutMode !== 'grid') {
+  if (paneLayoutMode !== 'grid' && paneLayoutMode !== 't') {
     panes.forEach((pane) => { pane.slot = null; });
     return;
   }
@@ -4937,7 +4940,27 @@ function normalizePaneSlots() {
   });
 }
 
-function ensureDefaultPane() {
+function startGridResize(axis, event) {
+  event.preventDefault();
+  const container = terminalContainer;
+  const rect = container.getBoundingClientRect();
+  const onMove = (e) => {
+    if (axis === 'col') {
+      const ratio = Math.min(0.8, Math.max(0.2, (e.clientX - rect.left) / rect.width));
+      container.style.setProperty('--grid-cols', `${ratio}fr ${1 - ratio}fr`);
+    } else {
+      const ratio = Math.min(0.8, Math.max(0.2, (e.clientY - rect.top) / rect.height));
+      container.style.setProperty('--grid-rows', `${ratio}fr ${1 - ratio}fr`);
+    }
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+  function ensureDefaultPane() {
   if (panes.length === 0) {
     panes = [{ id: nextPaneId++, tabIds: [], activeTabId: null, size: 0, view: null }];
   }
@@ -5170,11 +5193,12 @@ function reducePanesToCount(count) {
 function setPaneLayoutMode(mode) {
   const nextMode = normalizePaneLayoutMode(mode);
   if (panes.length === 0) panes.push(createEmptyPane(0));
-  if (nextMode === 'grid') {
-    paneLayoutMode = 'grid';
+  if (nextMode === 'grid' || nextMode === 't') {
+    paneLayoutMode = nextMode;
     paneDirection = 'row';
+    const targetCount = nextMode === 'grid' ? MAX_PANES : 3;
     normalizePaneSlots();
-    while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
+    while (panes.length < targetCount) panes.push(createEmptyPane(panes.length));
     normalizePaneSlots();
     panes.sort((a, b) => (a.slot ?? MAX_PANES) - (b.slot ?? MAX_PANES));
   } else {
@@ -5218,16 +5242,34 @@ function renderPanes() {
   }
   terminalContainer.innerHTML = '';
   paneEls.clear();
-  terminalContainer.classList.toggle('grid-layout', paneLayoutMode === 'grid');
+  terminalContainer.classList.toggle('grid-layout', paneLayoutMode === 'grid' || paneLayoutMode === 't');
+  terminalContainer.classList.toggle('t-layout', paneLayoutMode === 't');
+  if (paneLayoutMode !== 'grid' && paneLayoutMode !== 't') {
+    terminalContainer.style.removeProperty('--grid-cols');
+    terminalContainer.style.removeProperty('--grid-rows');
+  }
   terminalContainer.style.flexDirection = paneLayoutMode === 'grid' ? 'row' : paneDirection === 'column' ? 'column' : 'row';
   panes.forEach((pane, i) => {
     const root = document.createElement('div');
     root.className = 'terminal-pane-item';
     root.dataset.paneId = String(pane.id);
-    if (paneLayoutMode === 'grid') {
+    if (paneLayoutMode === 'grid' || paneLayoutMode === 't') {
       const slot = Number.isInteger(pane.slot) ? pane.slot : i;
-      root.style.gridColumn = String((slot % 2) + 1);
-      root.style.gridRow = String(Math.floor(slot / 2) + 1);
+      if (paneLayoutMode === 't') {
+        if (slot === 0) {
+          root.style.gridColumn = '1 / span 2';
+          root.style.gridRow = '1';
+        } else if (slot === 1) {
+          root.style.gridColumn = '1';
+          root.style.gridRow = '2';
+        } else {
+          root.style.gridColumn = '2';
+          root.style.gridRow = '2';
+        }
+      } else {
+        root.style.gridColumn = String((slot % 2) + 1);
+        root.style.gridRow = String(Math.floor(slot / 2) + 1);
+      }
     }
 
     // B6: pane header with per-pane tab bar + new-tab + direction toggle + close.
@@ -5301,6 +5343,16 @@ function renderPanes() {
     setupPaneTabBarDnd(paneTabBar, pane);
   });
   applyPaneSizes();
+  if (paneLayoutMode === 'grid' || paneLayoutMode === 't') {
+    const vSplitter = document.createElement('div');
+    vSplitter.className = 'grid-splitter vertical';
+    vSplitter.addEventListener('pointerdown', (e) => startGridResize('col', e));
+    terminalContainer.appendChild(vSplitter);
+    const hSplitter = document.createElement('div');
+    hSplitter.className = 'grid-splitter horizontal';
+    hSplitter.addEventListener('pointerdown', (e) => startGridResize('row', e));
+    terminalContainer.appendChild(hSplitter);
+  }
   updatePaneFocusClasses();
   // Re-place hosted surface nodes (renderPanes wiped the pane bodies).
   // B6: always use placeSurfaces — even with a single pane. The old
@@ -5903,6 +5955,7 @@ const PANE_LAYOUT_ITEMS = [
   { mode: 'row', label: 'Split right' },
   { mode: 'column', label: 'Split down' },
   { mode: 'grid', label: '2 × 2 grid' },
+  { mode: 't', label: 'T-shape' },
 ];
 
 function updatePaneLayoutUi() {
@@ -6706,17 +6759,13 @@ async function applySavedPaneLayouts(activePid, idMap) {
       paneLayoutMode = savedLayoutMode;
       paneDirection = savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row';
       panes = build();
-      if (panes.length === 0) {
-        panes = [createEmptyPane(0)];
-      }
-      if (paneLayoutMode === 'grid') {
-        while (panes.length < MAX_PANES) panes.push(createEmptyPane(panes.length));
-        normalizePaneSlots();
-      }
-      activePaneId = panes[Math.min(Number(saved.activeIndex) || 0, panes.length - 1)].id;
+    if (paneLayoutMode === 'grid' || paneLayoutMode === 't') {
+      const targetCount = paneLayoutMode === 'grid' ? MAX_PANES : 3;
+      while (panes.length < targetCount) panes.push(createEmptyPane(panes.length));
+      normalizePaneSlots();
+    }
+    activePaneId = panes[Math.min(Number(saved.activeIndex) || 0, panes.length - 1)].id;
       renderPanes();
-
-      let searchRestored = false;
       for (const pane of panes) {
         const view = pane.view;
         if (!view) continue;

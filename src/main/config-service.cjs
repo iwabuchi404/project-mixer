@@ -165,7 +165,7 @@ function validateLayout(value) {
     if (saved.direction !== undefined && saved.direction !== 'row' && saved.direction !== 'column') {
       return { ok: false, code: 'INVALID_PANE_DIRECTION', message: `invalid pane direction for ${projectId}` };
     }
-    if (saved.layoutMode !== undefined && !['single', 'row', 'column', 'grid'].includes(saved.layoutMode)) {
+    if (saved.layoutMode !== undefined && !['single', 'row', 'column', 'grid', 't'].includes(saved.layoutMode)) {
       return { ok: false, code: 'INVALID_PANE_LAYOUT_MODE', message: `invalid pane layout mode for ${projectId}` };
     }
     if (saved.panes.length > 4) {
