@@ -2329,6 +2329,7 @@ let panes = []; // [{ id, tabIds: [], activeTabId, size, slot }] for the active 
 let activePaneId = null;
 let paneDirection = 'row'; // 'row' = side-by-side, 'column' = stacked
 let paneLayoutMode = 'single';
+let gridTrackSizes = { cols: [0.5, 0.5], rows: [0.5, 0.5] };
 let nextPaneId = 1;
 const paneEls = new Map(); // paneId -> { root, header, tabBar, body }
 // Pane skeletons for projects that have no full editor state yet (e.g.
@@ -2470,6 +2471,7 @@ function saveCurrentEditorState() {
     activePaneId,
     paneDirection,
     paneLayoutMode,
+    gridTrackSizes: { cols: [...gridTrackSizes.cols], rows: [...gridTrackSizes.rows] },
     nextPaneId,
   });
 }
@@ -2603,10 +2605,13 @@ async function switchProjectEditor(projectId) {
       : null;
     lastSentContent = state.lastSentContent;
     lastSentTabPath = state.lastSentTabPath;
-    paneLayoutMode = normalizePaneLayoutMode(
-      state.paneLayoutMode,
-      state.panes?.length > 1 ? state.paneDirection : 'single',
-    );
+     paneLayoutMode = normalizePaneLayoutMode(
+       state.paneLayoutMode,
+       state.panes?.length > 1 ? state.paneDirection : 'single',
+     );
+     if (state.gridTrackSizes && Array.isArray(state.gridTrackSizes.cols) && Array.isArray(state.gridTrackSizes.rows)) {
+       gridTrackSizes = { cols: [...state.gridTrackSizes.cols], rows: [...state.gridTrackSizes.rows] };
+     }
     // B1: restore pane structure (validated against live tabs).
     panes = Array.isArray(state.panes) && state.panes.length > 0
       ? state.panes
@@ -2651,10 +2656,13 @@ async function switchProjectEditor(projectId) {
     // into this project before it was ever opened.
     const sk = projectPaneSkeletons.get(projectId);
     adoptedSkeleton = Boolean(sk && sk.panes.length > 0);
-    paneLayoutMode = normalizePaneLayoutMode(
-      sk?.layoutMode,
-      sk?.panes?.length > 1 ? sk?.direction : 'single',
-    );
+     paneLayoutMode = normalizePaneLayoutMode(
+       sk?.layoutMode,
+       sk?.panes?.length > 1 ? sk?.direction : 'single',
+     );
+     if (sk?.gridTrackSizes && Array.isArray(sk.gridTrackSizes.cols) && Array.isArray(sk.gridTrackSizes.rows)) {
+       gridTrackSizes = { cols: [...sk.gridTrackSizes.cols], rows: [...sk.gridTrackSizes.rows] };
+     }
     paneDirection = sk?.direction === 'column' ? 'column' : 'row';
     panes = sk && sk.panes.length > 0
       ? sk.panes.map((p) => ({ ...p, view: p.view && p.view.type !== 'terminal' ? { ...p.view } : null }))
@@ -4947,9 +4955,11 @@ function startGridResize(axis, event) {
   const onMove = (e) => {
     if (axis === 'col') {
       const ratio = Math.min(0.8, Math.max(0.2, (e.clientX - rect.left) / rect.width));
+      gridTrackSizes.cols = [ratio, 1 - ratio];
       container.style.setProperty('--grid-cols', `${ratio}fr ${1 - ratio}fr`);
     } else {
       const ratio = Math.min(0.8, Math.max(0.2, (e.clientY - rect.top) / rect.height));
+      gridTrackSizes.rows = [ratio, 1 - ratio];
       container.style.setProperty('--grid-rows', `${ratio}fr ${1 - ratio}fr`);
     }
   };
@@ -5247,6 +5257,9 @@ function renderPanes() {
   if (paneLayoutMode !== 'grid' && paneLayoutMode !== 't') {
     terminalContainer.style.removeProperty('--grid-cols');
     terminalContainer.style.removeProperty('--grid-rows');
+  } else {
+    terminalContainer.style.setProperty('--grid-cols', `${gridTrackSizes.cols[0]}fr ${gridTrackSizes.cols[1]}fr`);
+    terminalContainer.style.setProperty('--grid-rows', `${gridTrackSizes.rows[0]}fr ${gridTrackSizes.rows[1]}fr`);
   }
   terminalContainer.style.flexDirection = paneLayoutMode === 'grid' ? 'row' : paneDirection === 'column' ? 'column' : 'row';
   panes.forEach((pane, i) => {
@@ -6522,9 +6535,12 @@ const tabsOut = Array.from(tabs.values()).map(t => {
   Array.from(tabs.values()).forEach((t, i) => tabIndex.set(t.id, i));
 
   const nonTerminalTabs = [];
-  const serializePanes = (dir, arr, act, projectId, fileMap = new Map(), layoutMode = 'single') => ({
+  const serializePanes = (dir, arr, act, projectId, fileMap = new Map(), layoutMode = 'single', trackSizes = gridTrackSizes) => ({
     direction: dir === 'column' ? 'column' : 'row',
     layoutMode: normalizePaneLayoutMode(layoutMode, arr.length > 1 ? dir : 'single'),
+    gridTrackSizes: trackSizes && Array.isArray(trackSizes.cols) && Array.isArray(trackSizes.rows)
+      ? { cols: [...trackSizes.cols], rows: [...trackSizes.rows] }
+      : { cols: [0.5, 0.5], rows: [0.5, 0.5] },
     activeIndex: Math.max(0, arr.findIndex((p) => p.id === act)),
     panes: arr.map((p, paneIndex) => {
       const nonTerminalMembers = [];
@@ -6572,16 +6588,16 @@ const tabsOut = Array.from(tabs.values()).map(t => {
 
   const paneLayouts = {};
   if (activeEditorProjectId && panes.length > 0) {
-    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId, activeEditorProjectId, openFiles, paneLayoutMode);
+    paneLayouts[activeEditorProjectId] = serializePanes(paneDirection, panes, activePaneId, activeEditorProjectId, openFiles, paneLayoutMode, gridTrackSizes);
   }
   projectEditorStates.forEach((st, pid) => {
     if (pid !== activeEditorProjectId && Array.isArray(st.panes) && st.panes.length > 0) {
-      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId, pid, st.openFiles, st.paneLayoutMode);
+      paneLayouts[pid] = serializePanes(st.paneDirection === 'column' ? 'column' : 'row', st.panes, st.activePaneId, pid, st.openFiles, st.paneLayoutMode, st.gridTrackSizes);
     }
   });
   projectPaneSkeletons.forEach((sk, pid) => {
     if (sk.panes.length > 0) {
-      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId, pid, new Map(), sk.layoutMode);
+      paneLayouts[pid] = serializePanes('row', sk.panes, sk.activePaneId, pid, new Map(), sk.layoutMode, sk.gridTrackSizes);
     }
   });
 
@@ -6756,8 +6772,11 @@ async function applySavedPaneLayouts(activePid, idMap) {
       saved.panes.length > 1 ? saved.direction : 'single',
     );
     if (pid === activePid) {
-      paneLayoutMode = savedLayoutMode;
-      paneDirection = savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row';
+     paneLayoutMode = savedLayoutMode;
+     paneDirection = savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row';
+     if (saved.gridTrackSizes && Array.isArray(saved.gridTrackSizes.cols) && Array.isArray(saved.gridTrackSizes.rows)) {
+       gridTrackSizes = { cols: [...saved.gridTrackSizes.cols], rows: [...saved.gridTrackSizes.rows] };
+     }
       panes = build();
     if (paneLayoutMode === 'grid' || paneLayoutMode === 't') {
       const targetCount = paneLayoutMode === 'grid' ? MAX_PANES : 3;
@@ -6814,10 +6833,13 @@ async function applySavedPaneLayouts(activePid, idMap) {
       renderPanes();
     } else {
       const built = build();
-      projectPaneSkeletons.set(pid, {
-        layoutMode: savedLayoutMode,
-        direction: savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row',
-        panes: built,
+       projectPaneSkeletons.set(pid, {
+         layoutMode: savedLayoutMode,
+         direction: savedLayoutMode === 'grid' ? 'row' : saved.direction === 'column' ? 'column' : 'row',
+         gridTrackSizes: saved.gridTrackSizes && Array.isArray(saved.gridTrackSizes.cols) && Array.isArray(saved.gridTrackSizes.rows)
+           ? { cols: [...saved.gridTrackSizes.cols], rows: [...saved.gridTrackSizes.rows] }
+           : { cols: [0.5, 0.5], rows: [0.5, 0.5] },
+         panes: built,
         activePaneId: built[Math.min(Number(saved.activeIndex) || 0, built.length - 1)]?.id ?? built[0]?.id,
       });
     }
