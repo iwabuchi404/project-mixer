@@ -7207,6 +7207,19 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
   const cwd_ = cwd || (projects.get(activeProjectId)?.path);
   const pid = projectId || activeProjectId;
   let effectiveResumeId = resumeSessionId || null;
+  // Devin has no hook to report its session id later. For non-interactive
+  // restores and unbound terminals, query the CLI index and reuse the newest
+  // session deterministically instead of leaving the tab unresumable.
+  if (!effectiveResumeId && commandKey === 'devin' && cwd_) {
+    try {
+      const found = await window.api.devinLatestSession(cwd_);
+      if (found?.ok && Array.isArray(found.all) && found.all.length > 0) {
+        effectiveResumeId = found.all[0].id;
+      }
+    } catch {
+      // CLI missing / timeout / IPC failure: fall through to fresh.
+    }
+  }
   // The prompt fires only for explicit menu-created terminals — layout
   // restore must reopen tabs silently. The File menu checkbox
   // (Auto-Resume Previous Sessions) switches between ask and auto modes.
@@ -7281,7 +7294,11 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
       }
     }
   }
-  return createTerminal(cmd, cwd_, pid, label, effectiveResumeId);
+  const newTabId = await createTerminal(cmd, cwd_, pid, label, effectiveResumeId);
+  if (newTabId !== null && commandKey === 'devin' && effectiveResumeId) {
+    dispatch('agent_session_bound', { tabId: newTabId, provider: 'devin', sessionId: effectiveResumeId });
+  }
+  return newTabId;
 });
 
 register('resume_mode_changed', ({ mode }) => {
