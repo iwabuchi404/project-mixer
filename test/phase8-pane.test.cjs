@@ -112,8 +112,23 @@ test('B1 usability: hosted views are validated on restore and persisted', () => 
 test('B1 stability: guest calls always settle, preview switches cannot hang', () => {
   const renderer = read('renderer.js');
   assert.match(renderer, /function guestJs\(promise, ms, label\)/);
-  const gate = renderer.match(/const serial = \+\+previewSwitchSerial;[\s\S]*?const previous = previewFiles\.get\(activePreviewPath\);/)[0];
-  assert.match(gate, /guestJs\(pendingPreviewScrollCapture/);
+  // The switch function: from its head to the next preview function.
+  const start = renderer.indexOf('async function switchPreviewTab(');
+  const end = renderer.indexOf('function closePreviewTab(');
+  assert.ok(start !== -1 && end !== -1 && start < end, 'switchPreviewTab and closePreviewTab exist');
+  const fn = renderer.slice(start, end);
+  assert.match(fn, /const serial = \+\+previewSwitchSerial;/);
+  assert.match(fn, /guestJs\(pendingPreviewScrollCapture/);
+  // Activation is synchronous and precedes every guest round-trip: the
+  // clicked tab must respond immediately instead of waiting on captures.
+  const activateAt = fn.indexOf('activePreviewPath = previewPath;');
+  const gateAt = fn.indexOf('guestJs(pendingPreviewScrollCapture');
+  const captureAt = fn.indexOf('capturePreviewScroll(previous)');
+  const loadAt = fn.indexOf('loadPreviewContent(f, reveal)');
+  assert.ok(activateAt !== -1 && gateAt !== -1 && captureAt !== -1 && loadAt !== -1);
+  assert.ok(activateAt < gateAt, 'activation must precede the capture gate');
+  assert.ok(gateAt < captureAt, 'the pending capture must settle before the outgoing scroll capture');
+  assert.ok(captureAt < loadAt, 'the outgoing scroll must be captured before the new content loads');
   // executeJavaScript sites go through the timeout wrapper.
   const jsCalls = renderer.match(/previewWebview\.executeJavaScript\(/g) || [];
   const wrapped = renderer.match(/guestJs\(previewWebview\.executeJavaScript\(/g) || [];

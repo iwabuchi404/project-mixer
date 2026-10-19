@@ -216,6 +216,8 @@ const scratchEditorMount = document.getElementById('scratch-editor-mount');
 const fileEditorPane = document.getElementById('file-editor-pane');
 const fileEditorMount = document.getElementById('file-editor-mount');
 const previewWebview = document.getElementById('preview-webview');
+const previewLoading = document.getElementById('preview-loading');
+const previewLoadingLabel = document.getElementById('preview-loading-label');
 const previewPane = document.getElementById('preview-pane');
 const searchPane = document.getElementById('search-pane');
 const attentionPane = document.getElementById('attention-pane');
@@ -3286,6 +3288,25 @@ previewContextMenu.addEventListener('click', async (e) => {
   }
 });
 
+// Preview loading indicator: the switch pipeline (file read, scroll capture
+// gate, guest load) can take seconds on a busy guest. Without an explicit
+// processing state the human cannot tell a slow load from a dead click — and
+// a superseded switch used to leave the previous file on screen silently.
+let previewLoadingPath = null;
+
+function beginPreviewLoading(previewPath, name) {
+  previewLoadingPath = previewPath;
+  if (previewLoadingLabel) previewLoadingLabel.textContent = `Loading ${name}…`;
+  previewLoading?.classList.remove('hidden');
+}
+
+function endPreviewLoading(previewPath) {
+  // A newer load owns the indicator once it has begun; never hide for it.
+  if (previewPath && previewLoadingPath !== previewPath) return;
+  previewLoadingPath = null;
+  previewLoading?.classList.add('hidden');
+}
+
 async function openFileInPreview(filePath, name, options = {}) {
   const projectId = options.projectId ?? activeEditorProjectId;
   const projectSelection = projectSelectionGeneration;
@@ -3293,7 +3314,9 @@ async function openFileInPreview(filePath, name, options = {}) {
   const allowOs = options.allowOs !== false;
   const paneId = options.paneId ?? null;
   const previewPath = options.previewPath || makePreviewPath(projectId, filePath);
+  beginPreviewLoading(previewPath, name);
   if (shouldOpenInOsByName(name)) {
+    endPreviewLoading(previewPath);
     if (allowOs) {
       await window.api.openInOs(filePath);
       showToast({ key: `open-os:${filePath}`, message: 'Opened with the default app', detail: name });
@@ -3304,6 +3327,8 @@ async function openFileInPreview(filePath, name, options = {}) {
     let loaded = true;
     if (activate) {
       loaded = await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention });
+    } else {
+      endPreviewLoading(previewPath);
     }
     return {
       shown: loaded && activate && activeEditorProjectId === projectId && activePreviewPath === previewPath,
@@ -3318,6 +3343,7 @@ async function openFileInPreview(filePath, name, options = {}) {
   if (!isImage(name)) {
     const result = await window.api.readFile(filePath);
     if (!result.success) {
+      endPreviewLoading(previewPath);
       return { shown: false, previewPath: null, reason: result.error || 'failed to read file' };
     }
     // The user may have switched projects while the read was in flight —
@@ -3325,9 +3351,11 @@ async function openFileInPreview(filePath, name, options = {}) {
     if (activeEditorProjectId !== projectId) {
       activate = false;
     } else if (projectSelectionGeneration !== projectSelection) {
+      endPreviewLoading(previewPath);
       return { shown: false, previewPath: null, reason: 'project changed while preview was loading' };
     }
     if (result.isBinary) {
+      endPreviewLoading(previewPath);
       if (allowOs) {
         await window.api.openInOs(filePath);
         showToast({ key: `open-os:${filePath}`, message: 'Opened binary with the default app', detail: name });
@@ -3338,11 +3366,15 @@ async function openFileInPreview(filePath, name, options = {}) {
   }
 
   if (previewFiles.has(previewPath)) {
-    const loaded = activate ? await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention }) : true;
+    if (activate) {
+      await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention });
+    } else {
+      endPreviewLoading(previewPath);
+    }
     return {
-      shown: loaded && activate && activeEditorProjectId === projectId && activePreviewPath === previewPath,
+      shown: activate && activeEditorProjectId === projectId && activePreviewPath === previewPath,
       previewPath,
-      reason: loaded ? 'reused concurrently opened preview tab' : 'preview was superseded before it finished rendering',
+      reason: activate ? 'reused concurrently opened preview tab' : 'preview was superseded before it finished rendering',
     };
   }
 
@@ -3381,11 +3413,11 @@ async function openFileInPreview(filePath, name, options = {}) {
   tabEl.style.display = projectId === activeEditorProjectId ? '' : 'none';
 
   if (activate && projectId === activeEditorProjectId) {
-    // NOTE: do NOT showPreviewPane() here. At this point activePreviewPath
-    // still points at the PREVIOUS preview, so hosting would re-host the old
-    // file into the focused pane and rewrite its tab's paneId — the "first
-    // tab migrates to the other pane" bug. switchPreviewTab sets
-    // activePreviewPath first and shows the pane itself.
+    // NOTE: do NOT showPreviewPane() here before switchPreviewTab. At this
+    // point activePreviewPath still points at the PREVIOUS preview, so
+    // hosting would re-host the old file into the focused pane and rewrite
+    // its tab's paneId — the "first tab migrates to the other pane" bug.
+    // switchPreviewTab sets activePreviewPath first and shows the pane itself.
     try {
       const loaded = await switchPreviewTab(previewPath, { preserveAttention: options.preserveAttention });
       if (!loaded || activePreviewPath !== previewPath) {
@@ -3393,11 +3425,13 @@ async function openFileInPreview(filePath, name, options = {}) {
       }
     } catch (error) {
       closePreviewTab(previewPath);
+      endPreviewLoading(previewPath);
       return { shown: false, previewPath: null, reason: error.message || 'failed to render preview' };
     }
     return { shown: true, previewPath, reason: 'opened in preview pane' };
   }
 
+  endPreviewLoading(previewPath);
   return {
     shown: false,
     previewPath,
@@ -3789,19 +3823,17 @@ async function switchPreviewTab(previewPath, { preserveAttention = false, reveal
   if (!isPreviewForProject(f, activeEditorProjectId)) return false;
 
   const serial = ++previewSwitchSerial;
-  // Belt-and-braces: the shared capture promise always settles (guestJs
-  // timeout inside capturePreviewScroll), but never let a stuck capture
-  // block tab switching — a missed scroll position is cosmetic.
-  await guestJs(pendingPreviewScrollCapture, 2500, 'pre-switch capture gate');
-  if (serial !== previewSwitchSerial || activeEditorProjectId !== f.projectId || previewFiles.get(previewPath) !== f) return false;
   const previous = previewFiles.get(activePreviewPath);
-  // Capture the outgoing preview's scroll wherever it is visible (focused
-  // surface or a hosted pane), not just the legacy single surface.
-  if (previous && isPreviewVisibleAnywhere(previous)) {
-    await capturePreviewScroll(previous);
-  }
-  if (serial !== previewSwitchSerial || activeEditorProjectId !== f.projectId || previewFiles.get(previewPath) !== f) return false;
+  // Visibility of the outgoing preview must be judged BEFORE activation
+  // replaces activePreviewPath — afterwards it is invisible by definition.
+  const previousVisible = isPreviewVisibleAnywhere(previous);
 
+  // Activate the clicked tab FIRST, synchronously: the tab highlight, the
+  // pane and activePreviewPath must respond to the click immediately. The
+  // guest round-trips below can take seconds; a superseding switch may abort
+  // this one, and activation used to be stuck behind them — leaving the
+  // human's file in the background with the already-open preview on screen.
+  // The remaining wait is now announced by the loading indicator instead.
   if (activeMainView !== 'preview') {
     previewReturnView = activeMainView;
     previewReturnFilePath = activeMainFilePath;
@@ -3817,7 +3849,22 @@ async function switchPreviewTab(previewPath, { preserveAttention = false, reveal
   }
   saveCurrentEditorState();
   void saveLayout();
+  beginPreviewLoading(previewPath, f.name);
   try {
+    // Belt-and-braces: the shared capture promise always settles (guestJs
+    // timeout inside capturePreviewScroll), but never let a stuck capture
+    // block tab switching — a missed scroll position is cosmetic.
+    await guestJs(pendingPreviewScrollCapture, 2500, 'pre-switch capture gate');
+    if (serial !== previewSwitchSerial || activeEditorProjectId !== f.projectId || previewFiles.get(previewPath) !== f) return false;
+    // Capture the outgoing preview's scroll wherever it is visible (focused
+    // surface or a hosted pane), not just the legacy single surface. This
+    // must finish before the new content replaces the guest page, but it no
+    // longer delays activation — the pane already shows the loading state.
+    if (previous && previousVisible) {
+      await capturePreviewScroll(previous);
+    }
+    if (serial !== previewSwitchSerial || activeEditorProjectId !== f.projectId || previewFiles.get(previewPath) !== f) return false;
+
     // スクロール復元は loadPreviewContent の中（描画前）で行う。
     // ここで当てると先頭で描画されてから動くのが見えてしまう。
     const loaded = await loadPreviewContent(f, reveal);
@@ -3826,8 +3873,13 @@ async function switchPreviewTab(previewPath, { preserveAttention = false, reveal
     if (!reveal) await restorePreviewScroll(f);
     return true;
   } catch (error) {
+    // The tab is already active; say WHY the content did not follow instead
+    // of silently showing the previous file under the new tab.
     console.error('[preview] Failed to load:', error);
+    showToast({ key: `preview-load:${previewPath}`, message: 'Preview failed to load', detail: f.name, type: 'error' });
     return false;
+  } finally {
+    if (serial === previewSwitchSerial) endPreviewLoading(previewPath);
   }
 }
 

@@ -102,6 +102,10 @@
           <div id="file-editor-mount"></div>
         </div>
         <div id="preview-pane" class="main-surface-pane hidden">
+          <div id="preview-loading" class="hidden" role="status" aria-live="polite">
+            <span class="preview-loading-spinner" aria-hidden="true"></span>
+            <span id="preview-loading-label">Loading…</span>
+          </div>
           <div id="preview-content">
             <webview id="preview-webview" partition="persist:preview" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
           </div>

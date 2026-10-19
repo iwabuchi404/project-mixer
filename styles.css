@@ -1365,6 +1365,46 @@ textarea:focus-visible,
   visibility: hidden;
 }
 
+/* Preview loading indicator: the switch pipeline (file read, scroll capture
+   gate, guest load) can take seconds. An explicit processing state keeps a
+   slow load from being mistaken for a dead click. */
+#preview-loading {
+  position: absolute;
+  top: var(--s-2);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 3px var(--s-3);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#preview-loading.hidden {
+  display: none;
+}
+
+.preview-loading-spinner {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--g-2);
+  border-top-color: var(--g-4);
+  border-radius: 50%;
+  animation: preview-loading-spin 0.8s linear infinite;
+}
+
+@keyframes preview-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
 #file-editor-mount,
 #scratch-editor-mount {
   display: block;
