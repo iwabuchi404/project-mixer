@@ -972,6 +972,111 @@ textarea:focus-visible,
   text-align: center;
 }
 
+/* Session history tab (SESSION_HISTORY_PLAN H1). Mirrors the Attention
+   Inbox structure: sticky provider group headers + clickable rows. */
+#sessions-content {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--g-1);
+}
+
+#sessions-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--g-2);
+  flex: 0 0 auto;
+  font-size: var(--t-sm);
+  color: var(--g-4);
+}
+
+#sessions-status {
+  flex: 1 1 auto;
+  color: var(--g-3);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#sessions-refresh {
+  flex: 0 0 auto;
+  padding: 2px var(--s-2);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  cursor: pointer;
+}
+
+#sessions-refresh:hover {
+  border-color: var(--g-4);
+  color: var(--g-5);
+}
+
+#sessions-list {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: var(--s-1) 0;
+}
+
+.sessions-group {
+  padding: var(--s-1) var(--s-3);
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  background: var(--g-1);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--g-2);
+}
+
+.sessions-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background var(--move);
+}
+
+.sessions-item:hover {
+  background: var(--g-2);
+}
+
+.sessions-item-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-item-time {
+  flex: 0 0 auto;
+  color: var(--g-3);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+
+.sessions-empty {
+  padding: var(--s-4) var(--s-3);
+  color: var(--g-3);
+  font-size: var(--t-sm);
+  text-align: center;
+}
+
+
 #terminal-container,
 #preview-content,
 #preview-webview,

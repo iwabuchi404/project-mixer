@@ -221,6 +221,10 @@ const searchPane = document.getElementById('search-pane');
 const attentionPane = document.getElementById('attention-pane');
 const attentionList = document.getElementById('attention-list');
 const attentionCount = document.getElementById('attention-count');
+const sessionsPane = document.getElementById('sessions-pane');
+const sessionsList = document.getElementById('sessions-list');
+const sessionsStatus = document.getElementById('sessions-status');
+const sessionsRefreshBtn = document.getElementById('sessions-refresh');
 const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
 const searchStatus = document.getElementById('search-status');
@@ -291,6 +295,7 @@ const TAB_ICONS = {
   browser: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M2.5 8h11M8 2c1.7 1.6 2.6 3.6 2.6 6S9.7 12.4 8 14M8 2C6.3 3.6 5.4 5.6 5.4 8s.9 4.4 2.6 6"/></svg>',
   scratch: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10M4 10l6.8-6.8 2 2L6 12H4z"/></svg>',
   search: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>',
+  sessions: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>',
 };
 
 const TREE_ICONS = {
@@ -473,6 +478,7 @@ function surfaceNodeFor(kind) {
   if (kind === 'preview') return previewPane;
   if (kind === 'search') return searchPane;
   if (kind === 'attention') return attentionPane;
+  if (kind === 'sessions') return sessionsPane;
   return null;
 }
 
@@ -481,6 +487,7 @@ function kindOfSurfaceNode(node) {
   if (node === previewPane) return 'preview';
   if (node === searchPane) return 'search';
   if (node === attentionPane) return 'attention';
+  if (node === sessionsPane) return 'sessions';
   return null;
 }
 
@@ -512,7 +519,7 @@ function placeSurfaces() {
   // Every surface node must be listed here, not just in surfaceNodeFor. Missing
   // one leaves it homed in #main-surface with `hidden`, so the tab exists and the
   // content renders into it but the pane is never shown.
-  [fileEditorPane, previewPane, searchPane, attentionPane].forEach(rememberSurfaceHome);
+  [fileEditorPane, previewPane, searchPane, attentionPane, sessionsPane].forEach(rememberSurfaceHome);
   const hostOf = {}; // kind -> pane
   panes.forEach((p) => {
     if (p.view && p.view.type !== 'terminal' && !hostOf[p.view.type]) {
@@ -521,7 +528,7 @@ function placeSurfaces() {
       p.view = null; // same-kind conflict: first pane wins
     }
   });
-  [fileEditorPane, previewPane, searchPane, attentionPane].forEach((node) => {
+  [fileEditorPane, previewPane, searchPane, attentionPane, sessionsPane].forEach((node) => {
     const kind = kindOfSurfaceNode(node);
     const host = hostOf[kind];
     if (host) {
@@ -1141,6 +1148,7 @@ async function selectProject(projectId) {
   invalidateSearch();
   closeFindBar({ restoreFocus: false });
   closeSearchTab({ restoreSurface: false });
+  closeSessionHistoryTab({ restoreSurface: false });
   flushScratchDraft();
   commitAttention({ activeProjectId: projectId });
   dispatch('project_set_badge', { projectId, kind: 'clear' });
@@ -1195,6 +1203,7 @@ async function removeProject(projectId) {
   if (wasActive) {
     projectSelectionGeneration++;
     closeSearchTab({ restoreSurface: false });
+    closeSessionHistoryTab({ restoreSurface: false });
     closeFindBar({ restoreFocus: false });
     flushScratchDraft();
     saveCurrentEditorState();
@@ -1968,6 +1977,7 @@ function buildTabMenuItems(target) {
       return items;
     }
     case 'search':
+    case 'sessions':
       return [
         { action: 'close', label: 'Close', danger: true },
       ];
@@ -1987,6 +1997,7 @@ tabContextMenu.addEventListener('click', (e) => {
     else if (t.kind === 'preview' || t.kind === 'browser') closePreviewTab(t.previewPath);
     else if (t.kind === 'editor-file') closeEditorTab(t.filePath);
     else if (t.kind === 'search') closeSearchTab();
+    else if (t.kind === 'sessions') closeSessionHistoryTab();
   } else if (action === 'copy-path') {
     if (t.filePath) {
       window.api.clipboardWriteText(t.filePath);
@@ -2478,6 +2489,7 @@ function saveCurrentEditorState() {
 
 async function restoreSkeletonPaneViews(projectId, paneList, isCurrent = () => true) {
   let searchRestored = false;
+  let sessionsRestored = false;
   for (const pane of paneList) {
     if (!isCurrent()) return;
     const view = pane.view;
@@ -2520,6 +2532,18 @@ async function restoreSkeletonPaneViews(projectId, paneList, isCurrent = () => t
         }
         searchRestored = true;
       }
+    } else if (view.type === 'sessions') {
+      if (sessionsRestored) {
+        pane.view = null;
+      } else {
+        if (sessionsTabEl) {
+          insertTabIntoPane(sessionsTabEl, pane.id);
+          sessionsTabEl._paneId = pane.id;
+        } else {
+          createSessionHistoryTab(pane.id);
+        }
+        sessionsRestored = true;
+      }
     } else {
       pane.view = null;
     }
@@ -2530,6 +2554,7 @@ async function restoreNonTerminalTabs(projectId, paneList, isCurrent = () => tru
   const entries = savedNonTerminalTabs.filter((entry) => entry.projectId === projectId);
   let searchRestored = false;
   let attentionRestored = false;
+  let sessionsRestored = false;
   for (const entry of entries) {
     if (!isCurrent()) return;
     const pane = paneList[entry.paneIndex];
@@ -2565,6 +2590,15 @@ async function restoreNonTerminalTabs(projectId, paneList, isCurrent = () => tru
         createAttentionTab(pane.id);
       }
       attentionRestored = true;
+    } else if (entry.type === 'sessions') {
+      if (sessionsRestored) continue;
+      if (sessionsTabEl) {
+        insertTabIntoPane(sessionsTabEl, pane.id);
+        sessionsTabEl._paneId = pane.id;
+      } else {
+        createSessionHistoryTab(pane.id);
+      }
+      sessionsRestored = true;
     }
     if (!isCurrent()) return;
   }
@@ -5439,6 +5473,10 @@ function layoutNonTerminalTabs() {
     if (!getPane(attentionTabEl._paneId)) attentionTabEl._paneId = fallback?.id ?? null;
     place(attentionTabEl, attentionTabEl._paneId);
   }
+  if (typeof sessionsTabEl !== 'undefined' && sessionsTabEl) {
+    if (!getPane(sessionsTabEl._paneId)) sessionsTabEl._paneId = fallback?.id ?? null;
+    place(sessionsTabEl, sessionsTabEl._paneId);
+  }
 }
 
 // B1: vertical wheel over a pane tab bar scrolls it horizontally.
@@ -6158,6 +6196,8 @@ function getFocusContext() {
     // this it would fall through to the activeMainView branch and report a
     // terminal context while the human is looking at the list.
     ctx = new Set(['attentionFocus']);
+  } else if (ae?.closest('#sessions-pane')) {
+    ctx = new Set(['sessionsFocus']);
   // When a terminal tab is active, treat as terminalFocus even if focus
   // is on <body> (e.g. after closing a modal). This ensures Ctrl+B
   // (!terminalFocus) correctly defers to the shell's tmux prefix.
@@ -6574,6 +6614,10 @@ const tabsOut = Array.from(tabs.values()).map(t => {
       if (attentionTabEl && projectId === activeEditorProjectId && attentionTabEl._paneId === p.id) {
         nonTerminalMembers.push(nonTerminalTabs.length);
         nonTerminalTabs.push({ type: 'attention', projectId, paneIndex });
+      }
+      if (sessionsTabEl && projectId === activeEditorProjectId && sessionsTabEl._paneId === p.id) {
+        nonTerminalMembers.push(nonTerminalTabs.length);
+        nonTerminalTabs.push({ type: 'sessions', projectId, paneIndex });
       }
       return {
         size: p.size || 0,
@@ -7306,6 +7350,19 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
     dispatch('agent_session_bound', { tabId: newTabId, provider: 'devin', sessionId: effectiveResumeId });
   }
   return newTabId;
+});
+
+register('session_history', async ({ cwd } = {}) => {
+  // The tab always lists the active project's sessions; when a cwd is given,
+  // switch to the project it belongs to first.
+  let pid = activeProjectId;
+  if (cwd) {
+    for (const [id, p] of projects) {
+      if (p?.path && p.path.toLowerCase() === String(cwd).toLowerCase()) { pid = id; break; }
+    }
+  }
+  if (pid !== activeProjectId) await dispatch('select_project', { projectId: pid });
+  openSessionHistoryTab();
 });
 
 register('resume_mode_changed', ({ mode }) => {
@@ -8126,6 +8183,167 @@ function closeSearchTab({ restoreSurface = true, persist = true } = {}) {
   }
 }
 
+// ============================================================
+// Session history tab (SESSION_HISTORY_PLAN H1)
+// ============================================================
+//
+// Lists past sessions (claude / codex / opencode / devin) for the active
+// project and resumes one via `create_terminal` + resumeSessionId. The list
+// is loaded on demand (open / refresh button) — no polling. Devin rows are
+// org-wide because the cloud API exposes no cwd (scanner documents this).
+// Titles/session ids come from agent-owned storage, so they render via
+// textContent only — never HTML.
+
+let sessionsTabEl = null;
+const SESSION_PROVIDER_LABELS = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  devin: 'Devin',
+};
+const SESSION_PROVIDER_ORDER = ['claude', 'codex', 'opencode', 'devin'];
+
+function openSessionHistoryTab() {
+  if (!sessionsTabEl) createSessionHistoryTab();
+  activateSessionHistoryTab();
+  void refreshSessionHistory();
+}
+
+function createSessionHistoryTab(paneId = null) {
+  sessionsTabEl = createMainTab({
+    kind: 'sessions',
+    ident: { key: 'sessionsTab', value: 'sessions' },
+    label: 'Sessions',
+    closeSelector: 'editor-tab-close',
+    actions: {
+      onSwitch: () => activateSessionHistoryTab(),
+      onClose: () => closeSessionHistoryTab(),
+      onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'sessions' }),
+    },
+  });
+  insertTabIntoPane(sessionsTabEl, paneId);
+  sessionsTabEl._paneId = paneId ?? focusedPane()?.id ?? null;
+}
+
+function activateSessionHistoryTab() {
+  document.querySelectorAll('.main-tab').forEach((el) => setTabSelected(el, el === sessionsTabEl));
+  if (sessionsTabEl) sessionsTabEl._paneId = focusedPane()?.id ?? null;
+  showMainSurface('sessions');
+  activeMainView = 'sessions';
+  activeSurface = 'sessions';
+  saveCurrentEditorState();
+  void saveLayout();
+}
+
+function closeSessionHistoryTab({ restoreSurface = true, persist = true } = {}) {
+  if (!sessionsTabEl) return;
+  const wasActive = activeMainView === 'sessions';
+  sessionsTabEl.remove();
+  sessionsTabEl = null;
+  panes.forEach((pane) => {
+    if (pane.view?.type === 'sessions') pane.view = null;
+  });
+  openFiles.forEach((f) => { if (f.tabEl) f.tabEl.style.display = ''; });
+  previewFiles.forEach((f) => {
+    if (f.tabEl && f.projectId === activeEditorProjectId) f.tabEl.style.display = '';
+  });
+  if (restoreSurface && wasActive && activeTabId !== null) {
+    const t = tabs.get(activeTabId);
+    if (t) {
+      switchTab(activeTabId);
+      return;
+    }
+  }
+  if (restoreSurface && wasActive) {
+    showMainSurface('terminal');
+    activeMainView = 'terminal';
+    activeSurface = 'editor';
+  } else if (!restoreSurface && wasActive) {
+    activeMainView = 'terminal';
+    activeSurface = 'editor';
+  }
+  if (persist) {
+    saveCurrentEditorState();
+    void saveLayout();
+  }
+}
+
+async function refreshSessionHistory() {
+  if (!sessionsPane) return;
+  const projectId = activeProjectId;
+  const projectPath = projects.get(projectId)?.path;
+  if (!projectPath) {
+    if (sessionsList) sessionsList.innerHTML = '';
+    if (sessionsStatus) sessionsStatus.textContent = 'No project selected';
+    return;
+  }
+  if (sessionsStatus) sessionsStatus.textContent = 'Loading...';
+  let sessions = [];
+  let failed = false;
+  try {
+    const res = await window.api.sessionsList(projectPath);
+    if (res?.ok) sessions = res.sessions || [];
+    else failed = true;
+  } catch {
+    failed = true;
+  }
+  // Project switched while loading: the tab was closed; drop the response.
+  if (!sessionsTabEl || projectId !== activeProjectId) return;
+  renderSessionHistory(failed ? [] : sessions, projectPath, projectId, failed);
+}
+
+function renderSessionHistory(sessions, projectPath, projectId, failed = false) {
+  if (!sessionsList) return;
+  sessionsList.innerHTML = '';
+  if (sessionsStatus) {
+    sessionsStatus.textContent = failed
+      ? 'Could not read session history'
+      : `${sessions.length} session${sessions.length === 1 ? '' : 's'}`;
+  }
+  if (!sessions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sessions-empty';
+    empty.textContent = failed
+      ? 'Could not read session history for this project.'
+      : 'No sessions found for this project.';
+    sessionsList.appendChild(empty);
+    return;
+  }
+  for (const provider of SESSION_PROVIDER_ORDER) {
+    const group = sessions.filter((s) => s.provider === provider);
+    if (!group.length) continue;
+    const header = document.createElement('div');
+    header.className = 'sessions-group';
+    header.textContent = `${SESSION_PROVIDER_LABELS[provider] || provider} (${group.length})`;
+    sessionsList.appendChild(header);
+    for (const s of group) {
+      const row = document.createElement('div');
+      row.className = 'sessions-item';
+      const title = document.createElement('span');
+      title.className = 'sessions-item-title';
+      title.textContent = s.title || s.sessionId;
+      const time = document.createElement('span');
+      time.className = 'sessions-item-time';
+      time.textContent = s.updatedAt ? new Date(s.updatedAt).toLocaleString() : '';
+      row.append(title, time);
+      row.title = 'Resume this session in a new terminal';
+      row.addEventListener('click', () => {
+        void dispatch('create_terminal', {
+          command: s.provider,
+          cwd: projectPath,
+          projectId,
+          resumeSessionId: s.sessionId,
+        });
+      });
+      sessionsList.appendChild(row);
+    }
+  }
+}
+
+sessionsRefreshBtn?.addEventListener('click', () => {
+  void refreshSessionHistory();
+});
+
 // Register the search_text command.
 register('search_text', async ({ query, cwd, caseSensitive }) => {
   const projectId = activeProjectId;
@@ -8536,3 +8754,4 @@ function escapeHtml(text) {
   }
   if (!editorStateInitialized) await switchProjectEditor(activeProjectId);
 })();
+

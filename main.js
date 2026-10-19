@@ -30,6 +30,7 @@ const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, validateSettings, ConfigParseError } = require('./src/main/config-service.cjs');
 const { normalizeAgentNotification, resolveNotificationTarget } = require('./src/main/agent-notification-service.cjs');
 const { DevinSessionMonitor } = require('./src/main/devin-session-monitor.cjs');
+const { listSessions } = require('./src/main/session-history.cjs');
 const { assertPathString, resolveProjectPath, resolveProjectRoot } = require('./src/main/path-safety.cjs');
 
 function normalizeCommandName(command) {
@@ -938,6 +939,21 @@ ipcMain.handle('devin:latest-session', async (event, payload) => {
     // Devin CLI missing, not logged in, or timed out: the caller falls
     // back to a fresh session. Never surface as an error toast.
     return { ok: false, candidate: null, count: 0, ambiguous: false, error: String(e.message || e).slice(0, 200) };
+  }
+});
+
+ipcMain.handle('sessions:list', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.cwd !== 'string' || !isSafeCwd(payload.cwd)) {
+    throw new TypeError('sessions:list payload is invalid');
+  }
+  const cwd = resolveProjectRoot(loadProjectsConfig(), payload.cwd).target;
+  const providers = Array.isArray(payload.providers) ? payload.providers : undefined;
+  try {
+    const sessions = await listSessions({ cwd, providers });
+    return { ok: true, sessions };
+  } catch (e) {
+    return { ok: false, sessions: [], error: String(e.message || e).slice(0, 200) };
   }
 });
 

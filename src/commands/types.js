@@ -59,6 +59,10 @@ export const COMMAND_TYPES = {
     args: { command: 'string?', cwd: 'string?', projectId: 'string?', label: 'string?', resumeSessionId: 'string?' },
     returns: 'number',
   },
+  session_history: {
+    args: { cwd: 'string?' },
+    returns: 'void',
+  },
   close_terminal: {
     args: { tabId: 'number' },
     returns: 'void',

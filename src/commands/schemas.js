@@ -35,6 +35,7 @@ export const COMMAND_SCHEMAS = {
     label: optStr,
     resumeSessionId: optStr,
   }),
+  session_history: p({ cwd: optStr }),
   close_terminal: p({ tabId: z.number() }),
   send_to_terminal: p({ text: optStr, tabId: optNum }),
   get_focus: p({}),
