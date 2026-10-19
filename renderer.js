@@ -7207,13 +7207,20 @@ register('create_terminal', async ({ command, cwd, projectId, label, resumeSessi
   const cwd_ = cwd || (projects.get(activeProjectId)?.path);
   const pid = projectId || activeProjectId;
   let effectiveResumeId = resumeSessionId || null;
+  // Tracked session (hook/plugin reported it) wins over a CLI lookup.
+  const trackedForRestore = loadLastSessions()[`${pid}:${commandKey}`]?.sessionId || null;
+  if (!effectiveResumeId && trackedForRestore) {
+    effectiveResumeId = trackedForRestore;
+  }
   // Devin has no hook to report its session id later. For non-interactive
   // restores and unbound terminals, query the CLI index and reuse the newest
-  // session deterministically instead of leaving the tab unresumable.
+  // session deterministically instead of leaving the tab unresumable — but
+  // only when the directory holds a single unambiguous session, so we never
+  // silently attach to the wrong one.
   if (!effectiveResumeId && commandKey === 'devin' && cwd_) {
     try {
       const found = await window.api.devinLatestSession(cwd_);
-      if (found?.ok && Array.isArray(found.all) && found.all.length > 0) {
+      if (found?.ok && Array.isArray(found.all) && found.all.length === 1 && !found.ambiguous) {
         effectiveResumeId = found.all[0].id;
       }
     } catch {
