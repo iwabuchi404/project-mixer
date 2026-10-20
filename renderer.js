@@ -7748,7 +7748,7 @@ register('tab_activate', ({ filePath }) => {
 
 // preview_open: open a file in the preview area (show_file core)
 // Returns { shown: boolean, reason: string }
-register('preview_open', async ({ path: filePath, reason, newTab }) => {
+register('preview_open', async ({ path: filePath, reason, newTab, $session: session = null }) => {
   if (!filePath) return { shown: false, reason: 'no path' };
 
   // Compare complete path segments and prefer the deepest nested project.
@@ -7775,6 +7775,27 @@ register('preview_open', async ({ path: filePath, reason, newTab }) => {
   });
   const { activate, preserveAttention } = activation;
 
+  function markNotified(result) {
+    if (result.previewPath && reason) {
+      const preview = previewFiles.get(result.previewPath);
+      if (preview) {
+        preview.tabEl.classList.add('notified');
+        preview.tabEl.title = `${filePath} — ${reason}`;
+      }
+    }
+    return result;
+  }
+
+  // The requested preview is already the visible one: do not re-render it.
+  // Re-running the load pipeline re-reads the file and replays the guest
+  // round-trips (seconds when the guest is busy), visibly churns the page,
+  // and buys nothing — the human is already looking at this exact document.
+  // preview_reveal still re-renders on purpose when it needs to point at a
+  // line. The notified marker below is kept so agent activity stays visible.
+  if (activation.reason === 'already-visible') {
+    return markNotified({ shown: true, previewPath, reason: 'already-visible' });
+  }
+
   const result = await openFileInPreview(filePath, name, {
     projectId: targetProjectId,
     previewPath,
@@ -7784,12 +7805,20 @@ register('preview_open', async ({ path: filePath, reason, newTab }) => {
     allowOs: false,
   });
 
-  if (result.previewPath && reason) {
-    const preview = previewFiles.get(result.previewPath);
-    if (preview) {
-      preview.tabEl.classList.add('notified');
-      preview.tabEl.title = `${filePath} — ${reason}`;
-    }
+  markNotified(result);
+
+  // When an MCP session (an agent) takes over the visible preview, say so.
+  // Without this the human returns to a replaced document with no hint about
+  // what switched it — the "I opened X but Y is on screen" confusion.
+  if (session && activate && result.shown) {
+    const agentTab = tabs.get(session.ptyId);
+    const agentName = agentTab ? normalizeRendererCommand(agentTab.command) : 'agent';
+    showToast({
+      key: 'agent-preview',
+      message: `${agentName} opened ${name} in preview`,
+      detail: reason || '',
+      duration: 4000,
+    });
   }
 
   if (!sameProject) {
