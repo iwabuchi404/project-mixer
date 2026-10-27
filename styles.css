@@ -1076,6 +1076,121 @@ textarea:focus-visible,
   text-align: center;
 }
 
+.sessions-item-resume {
+  flex: 0 0 auto;
+  padding: 1px var(--s-2);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  cursor: pointer;
+}
+
+.sessions-item-resume:hover {
+  border-color: var(--g-4);
+  color: var(--g-5);
+}
+
+/* H2: transcript detail view. Rows are click targets for opening it, so the
+   detail pane replaces the list inside the same surface. */
+#sessions-detail {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#sessions-detail.hidden {
+  display: none;
+}
+
+.sessions-detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--g-2);
+  flex: 0 0 auto;
+}
+
+.sessions-back {
+  flex: 0 0 auto;
+  padding: 1px var(--s-2);
+  border: 1px solid var(--g-2);
+  border-radius: var(--r-1);
+  background: var(--g-0);
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  cursor: pointer;
+}
+
+.sessions-back:hover {
+  border-color: var(--g-4);
+  color: var(--g-5);
+}
+
+.sessions-detail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-detail-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: var(--s-1) 0;
+}
+
+.sessions-truncated {
+  padding: var(--s-1) var(--s-3);
+  color: var(--g-3);
+  font-size: var(--t-xs);
+}
+
+.sessions-msg {
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--g-2);
+}
+
+.sessions-msg-meta {
+  color: var(--g-3);
+  font-size: var(--t-xs);
+  margin-bottom: 2px;
+}
+
+.sessions-msg-text {
+  color: var(--g-5);
+  font-size: var(--t-sm);
+  overflow-wrap: anywhere;
+}
+
+.sessions-msg-text pre,
+.sessions-msg-collapsed pre {
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--t-xs);
+  color: var(--g-4);
+}
+
+.sessions-msg-text img {
+  max-width: 100%;
+}
+
+.sessions-msg-collapsed summary {
+  cursor: pointer;
+  color: var(--g-4);
+  font-size: var(--t-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 
 #terminal-container,
 #preview-content,

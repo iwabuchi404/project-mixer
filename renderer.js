@@ -227,6 +227,7 @@ const sessionsPane = document.getElementById('sessions-pane');
 const sessionsList = document.getElementById('sessions-list');
 const sessionsStatus = document.getElementById('sessions-status');
 const sessionsRefreshBtn = document.getElementById('sessions-refresh');
+const sessionsDetailEl = document.getElementById('sessions-detail');
 const searchInput = document.getElementById('search-input');
 const searchResults = document.getElementById('search-results');
 const searchStatus = document.getElementById('search-status');
@@ -7811,7 +7812,9 @@ register('preview_open', async ({ path: filePath, reason, newTab, $session: sess
   // Without this the human returns to a replaced document with no hint about
   // what switched it — the "I opened X but Y is on screen" confusion.
   if (session && activate && result.shown) {
-    const agentTab = tabs.get(session.ptyId);
+    const agentTab = Number.isInteger(session.ptyId)
+      ? Array.from(tabs.values()).find((tab) => tab.ptyId === session.ptyId)
+      : null;
     const agentName = agentTab ? normalizeRendererCommand(agentTab.command) : 'agent';
     showToast({
       key: 'agent-preview',
@@ -8375,6 +8378,7 @@ async function refreshSessionHistory() {
 
 function renderSessionHistory(sessions, projectPath, projectId, failed = false) {
   if (!sessionsList) return;
+  closeSessionTranscript({ keepHidden: true });
   sessionsList.innerHTML = '';
   if (sessionsStatus) {
     sessionsStatus.textContent = failed
@@ -8406,15 +8410,23 @@ function renderSessionHistory(sessions, projectPath, projectId, failed = false) 
       const time = document.createElement('span');
       time.className = 'sessions-item-time';
       time.textContent = s.updatedAt ? new Date(s.updatedAt).toLocaleString() : '';
-      row.append(title, time);
-      row.title = 'Resume this session in a new terminal';
-      row.addEventListener('click', () => {
+      const resume = document.createElement('button');
+      resume.className = 'sessions-item-resume';
+      resume.textContent = 'Resume';
+      resume.title = 'Resume this session in a new terminal';
+      resume.addEventListener('click', (e) => {
+        e.stopPropagation();
         void dispatch('create_terminal', {
           command: s.provider,
           cwd: projectPath,
           projectId,
           resumeSessionId: s.sessionId,
         });
+      });
+      row.append(title, time, resume);
+      row.title = 'View transcript';
+      row.addEventListener('click', () => {
+        openSessionTranscript(s.provider, s.sessionId, s.title || s.sessionId);
       });
       sessionsList.appendChild(row);
     }
@@ -8424,6 +8436,113 @@ function renderSessionHistory(sessions, projectPath, projectId, failed = false) 
 sessionsRefreshBtn?.addEventListener('click', () => {
   void refreshSessionHistory();
 });
+
+// --- H2: transcript detail view (row click) -------------------------------
+
+function openSessionTranscript(provider, sessionId, title) {
+  if (!sessionsDetailEl || !sessionsList) return;
+  sessionsList.classList.add('hidden');
+  sessionsDetailEl.classList.remove('hidden');
+  void renderSessionTranscript(provider, sessionId, title);
+}
+
+function closeSessionTranscript({ keepHidden = false } = {}) {
+  if (!sessionsDetailEl) return;
+  sessionsDetailEl.classList.add('hidden');
+  sessionsDetailEl.innerHTML = '';
+  if (!keepHidden) sessionsList?.classList.remove('hidden');
+}
+
+// Agent/model output is untrusted input: markdown goes through
+// marked.parse + DOMPurify.sanitize, tool payloads render as text only.
+async function renderSessionTranscript(provider, sessionId, title) {
+  if (!sessionsDetailEl) return;
+  sessionsDetailEl.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'sessions-detail-header';
+  const back = document.createElement('button');
+  back.className = 'sessions-back';
+  back.textContent = '\u2190 Sessions';
+  back.addEventListener('click', () => closeSessionTranscript());
+  const titleEl = document.createElement('span');
+  titleEl.className = 'sessions-detail-title';
+  titleEl.textContent = title || sessionId;
+  header.append(back, titleEl);
+  sessionsDetailEl.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'sessions-detail-body';
+  const loading = document.createElement('div');
+  loading.className = 'sessions-empty';
+  loading.textContent = 'Loading transcript\u2026';
+  body.appendChild(loading);
+  sessionsDetailEl.appendChild(body);
+
+  const projectPath = projects.get(activeProjectId)?.path || '';
+  let messages = [];
+  let failed = false;
+  let truncated = false;
+  try {
+    const res = await window.api.sessionsTranscript(provider, sessionId, projectPath);
+    if (res?.ok) {
+      messages = res.messages || [];
+      truncated = !!res.truncated;
+    } else {
+      failed = true;
+    }
+  } catch {
+    failed = true;
+  }
+
+  body.innerHTML = '';
+  if (failed) {
+    const error = document.createElement('div');
+    error.className = 'sessions-empty';
+    error.textContent = 'Could not read the transcript.';
+    body.appendChild(error);
+    return;
+  }
+  if (!messages.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sessions-empty';
+    empty.textContent = 'No readable messages in this session.';
+    body.appendChild(empty);
+    return;
+  }
+  if (truncated) {
+    const note = document.createElement('div');
+    note.className = 'sessions-truncated';
+    note.textContent = `Showing the first ${messages.length} messages.`;
+    body.appendChild(note);
+  }
+  for (const m of messages) {
+    const row = document.createElement('div');
+    row.className = `sessions-msg sessions-msg-${m.kind}`;
+    const meta = document.createElement('div');
+    meta.className = 'sessions-msg-meta';
+    const roleLabel = m.kind === 'tool' ? 'Tool'
+      : m.kind === 'reasoning' ? 'Thinking'
+        : m.role === 'user' ? 'You' : 'Agent';
+    meta.textContent = roleLabel + (m.timestamp ? ` \u00b7 ${new Date(m.timestamp).toLocaleString()}` : '');
+    row.appendChild(meta);
+    const content = document.createElement('div');
+    if (m.kind === 'tool' || m.kind === 'reasoning') {
+      content.className = 'sessions-msg-collapsed';
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = m.text.split('\n')[0].slice(0, 140) || (m.kind === 'tool' ? 'tool call' : 'thinking');
+      const pre = document.createElement('pre');
+      pre.textContent = m.text;
+      details.append(summary, pre);
+      content.appendChild(details);
+    } else {
+      content.className = 'sessions-msg-text';
+      content.innerHTML = DOMPurify.sanitize(marked.parse(m.text));
+    }
+    row.appendChild(content);
+    body.appendChild(row);
+  }
+}
 
 // Register the search_text command.
 register('search_text', async ({ query, cwd, caseSensitive }) => {

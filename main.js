@@ -30,7 +30,7 @@ const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, validateSettings, ConfigParseError } = require('./src/main/config-service.cjs');
 const { normalizeAgentNotification, resolveNotificationTarget } = require('./src/main/agent-notification-service.cjs');
 const { DevinSessionMonitor } = require('./src/main/devin-session-monitor.cjs');
-const { listSessions } = require('./src/main/session-history.cjs');
+const { listSessions, readTranscript } = require('./src/main/session-history.cjs');
 const { assertPathString, resolveProjectPath, resolveProjectRoot } = require('./src/main/path-safety.cjs');
 
 function normalizeCommandName(command) {
@@ -954,6 +954,21 @@ ipcMain.handle('sessions:list', async (event, payload) => {
     return { ok: true, sessions };
   } catch (e) {
     return { ok: false, sessions: [], error: String(e.message || e).slice(0, 200) };
+  }
+});
+
+ipcMain.handle('sessions:transcript', async (event, payload) => {
+  assertTrustedMainIpcEvent(event);
+  if (!payload || typeof payload.provider !== 'string' || typeof payload.sessionId !== 'string'
+    || typeof payload.cwd !== 'string' || !isSafeCwd(payload.cwd)) {
+    throw new TypeError('sessions:transcript payload is invalid');
+  }
+  const cwd = resolveProjectRoot(loadProjectsConfig(), payload.cwd).target;
+  try {
+    const result = await readTranscript({ provider: payload.provider, sessionId: payload.sessionId, cwd });
+    return { ok: true, ...result };
+  } catch (e) {
+    return { ok: false, messages: [], truncated: false, error: String(e.message || e).slice(0, 200) };
   }
 });
 

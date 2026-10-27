@@ -11,6 +11,8 @@ const {
   scanDevin,
   listSessions,
   claudeSlug,
+  readTranscript,
+  safeSessionId,
 } = require('../src/main/session-history.cjs');
 
 test('claudeSlug converts cwd to slug', () => {
@@ -135,4 +137,113 @@ test('listSessions aggregates and sorts', async () => {
   fs.writeFileSync(path.join(dir, 's.jsonl'), JSON.stringify({ type: 'user', timestamp: '2026-01-01T00:00:00Z', message: { content: 'hi' } }));
   const r = await listSessions({ cwd: 'D:\\work\\proj', providers: ['claude'], home });
   assert.equal(r.length, 1);
+});
+
+// --- H2: transcript reading ---
+
+test('safeSessionId rejects path-shaped ids', () => {
+  assert.equal(safeSessionId('abc-123_DEF.1'), true);
+  assert.equal(safeSessionId(''), false);
+  assert.equal(safeSessionId('..'), false);
+  assert.equal(safeSessionId('a/b'), false);
+  assert.equal(safeSessionId('a\\b'), false);
+  assert.equal(safeSessionId('a:b'), false);
+  assert.equal(safeSessionId('x'.repeat(129)), false);
+});
+
+test('readTranscript rejects unknown providers and invalid ids', async () => {
+  assert.deepEqual(await readTranscript({ provider: 'nope', sessionId: 'abc' }), { messages: [], truncated: false, error: 'unknown provider' });
+  assert.equal((await readTranscript({ provider: 'claude', sessionId: '../etc' })).error, 'invalid session id');
+});
+
+test('readTranscript parses claude jsonl messages, blocks, and tools', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-'));
+  const dir = path.join(home, '.claude', 'projects', claudeSlug('D:\\work\\proj'));
+  fs.mkdirSync(dir, { recursive: true });
+  const lines = [
+    JSON.stringify({ type: 'system', timestamp: '2026-01-01T00:00:00Z' }),
+    JSON.stringify({ type: 'user', isSidechain: true, message: { content: 'hidden sidechain' } }),
+    JSON.stringify({ type: 'user', timestamp: '2026-01-01T00:01:00Z', message: { content: 'hello' } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-01-01T00:02:00Z', message: { content: [
+      { type: 'text', text: 'hi there' },
+      { type: 'tool_use', name: 'Bash', input: { command: 'ls' } },
+      { type: 'tool_result', content: 'file1\nfile2' },
+    ] } }),
+  ];
+  fs.writeFileSync(path.join(dir, 'sess-x.jsonl'), lines.join('\n'));
+  const { messages, truncated } = await readTranscript({ provider: 'claude', sessionId: 'sess-x', cwd: 'D:\\work\\proj', home });
+  assert.equal(truncated, false);
+  assert.equal(messages.length, 4);
+  assert.deepEqual(messages.map((m) => [m.role, m.kind]), [
+    ['user', 'text'], ['assistant', 'text'], ['tool', 'tool'], ['tool', 'tool'],
+  ]);
+  assert.equal(messages[0].text, 'hello');
+  assert.equal(messages[1].text, 'hi there');
+  assert.match(messages[2].text, /Bash/);
+  assert.equal(messages[3].text, 'file1\nfile2');
+});
+
+test('readTranscript parses codex response_item payloads', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-'));
+  const dir = path.join(home, '.codex', 'sessions', '2026', '10', '19');
+  fs.mkdirSync(dir, { recursive: true });
+  const lines = [
+    JSON.stringify({ type: 'session_meta', payload: { session_id: 'codex-1', cwd: 'D:\\work\\proj', timestamp: '2026-10-19T00:00:00Z' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', timestamp: '2026-10-19T00:01:00Z', content: [{ type: 'input_text', text: 'fix the bug' }] } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'reasoning', summary: [{ text: 'thinking about it' }] } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'function_call', name: 'apply_patch', arguments: '{}' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] } }),
+  ];
+  fs.writeFileSync(path.join(dir, 'rollout-1-codex-1.jsonl'), lines.join('\n'));
+  const { messages } = await readTranscript({ provider: 'codex', sessionId: 'codex-1', cwd: 'D:\\work\\proj', home });
+  assert.equal(messages.length, 4);
+  assert.deepEqual(messages.map((m) => [m.role, m.kind]), [
+    ['user', 'text'], ['assistant', 'reasoning'], ['tool', 'tool'], ['assistant', 'text'],
+  ]);
+  assert.equal(messages[3].text, 'done');
+});
+
+test('readTranscript parses opencode message+part trees', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-'));
+  const session = path.join(home, '.local', 'share', 'opencode', 'project', claudeSlug('D:\\work\\proj'), 'storage', 'session');
+  const msgDir = path.join(session, 'message', 'ses_1');
+  const partDir = path.join(session, 'part', 'ses_1');
+  fs.mkdirSync(msgDir, { recursive: true });
+  fs.mkdirSync(path.join(partDir, 'msg_1'), { recursive: true });
+  fs.mkdirSync(path.join(partDir, 'msg_2'), { recursive: true });
+  fs.writeFileSync(path.join(msgDir, 'msg_1.json'), JSON.stringify({ id: 'msg_1', role: 'user', time: { created: 1000 } }));
+  fs.writeFileSync(path.join(msgDir, 'msg_2.json'), JSON.stringify({ id: 'msg_2', role: 'assistant', time: { created: 2000 } }));
+  fs.writeFileSync(path.join(partDir, 'msg_1', 'prt_a.json'), JSON.stringify({ type: 'text', text: 'question' }));
+  fs.writeFileSync(path.join(partDir, 'msg_2', 'prt_b.json'), JSON.stringify({ type: 'tool', tool: 'read', state: { input: { file: 'a.js' } } }));
+  fs.writeFileSync(path.join(partDir, 'msg_2', 'prt_c.json'), JSON.stringify({ type: 'text', text: 'answer' }));
+  const { messages } = await readTranscript({ provider: 'opencode', sessionId: 'ses_1', cwd: 'D:\\work\\proj', home });
+  assert.equal(messages.length, 3);
+  assert.deepEqual(messages.map((m) => [m.role, m.kind]), [
+    ['user', 'text'], ['tool', 'tool'], ['assistant', 'text'],
+  ]);
+});
+
+test('readTranscript reads devin session messages via API', async () => {
+  const fetchImpl = async () => ({ ok: true, json: async () => ({ messages: [
+    { role: 'user', content: 'build it', time: 5 },
+    { role: 'assistant', content: [{ type: 'text', text: 'built' }], time: 6 },
+  ] }) });
+  const { messages } = await readTranscript({ provider: 'devin', sessionId: 'devin-1', fetchImpl, token: 'tok', orgId: 'org-1' });
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].role, 'user');
+  assert.equal(messages[1].text, 'built');
+});
+
+test('readTranscript truncates very long transcripts', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sh-'));
+  const dir = path.join(home, '.claude', 'projects', claudeSlug('D:\\work\\proj'));
+  fs.mkdirSync(dir, { recursive: true });
+  const lines = [];
+  for (let i = 0; i < 600; i++) {
+    lines.push(JSON.stringify({ type: 'user', timestamp: '2026-01-01T00:00:00Z', message: { content: `m${i}` } }));
+  }
+  fs.writeFileSync(path.join(dir, 'big.jsonl'), lines.join('\n'));
+  const { messages, truncated } = await readTranscript({ provider: 'claude', sessionId: 'big', cwd: 'D:\\work\\proj', home });
+  assert.equal(messages.length, 500);
+  assert.equal(truncated, true);
 });
