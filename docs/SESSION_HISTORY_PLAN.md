@@ -4,7 +4,7 @@
 **更新日**: 2026-10-19（H1実装、実装メモ追記）
 **位置づけ**: Phase 8（マルチペイン）完了後の新規機能。フェーズ番号は未採番
 **前提調査**: 4エージェントのセッション保存形式を実機で確認済み（下記「データソース実査」）
-**状態**: H1実装済み（スキャナ / IPC / コマンド / 一覧タブUI）。H2トランスクリプト未着手
+**状態**: H1・H2実装済み（スキャナ / IPC / コマンド / 一覧タブUI / トランスクリプト閲覧）
 
 ---
 
@@ -104,6 +104,7 @@
 - **codex旧形式はスキップ**: 2026-07頃のrolloutは先頭行が `{id, timestamp}` でcwdを持たない。帰属できないため表示しない（「cwdフィルタ必須」を優先し、他プロジェクトへの漏出を避ける）。現行形式は `{type:'session_meta', payload:{session_id, cwd, ...}}`
 - **claude/codexのupdatedAtはファイルmtime**: 一覧が「最新activity順」でソートされる。createdAtはjsonl内timestamp / session_metaから
 - **実装配置**: `src/main/session-history.cjs`（スキャナ）、`sessions:list` IPC（cwd検証は `devin:latest-session` と同様に `isSafeCwd` + `resolveProjectRoot`）、`session_history` コマンドでSessionsタブ（`nonTerminalTabs` type `sessions`、レイアウト保存・復元対応）。プロジェクト切替時はタブを閉じる（searchタブと同じ挙動）
+- **H2実装メモ**: 一覧の行クリックでトランスクリプト詳細ビュー（Resumeは行内ボタンに分離）。正規化メッセージ `{ role, timestamp, text, kind }`、kind は text/tool/reasoning。tool/reasoning は `<details>` 折りたたみ、text は `DOMPurify.sanitize(marked.parse())` 経由。`sessions:transcript` IPC は sessionId を `/^[A-Za-z0-9._-]+$/` かつ `..` 拒否で検証（パス组合み込み対策）。メッセージ数は先頭500件で打ち切り（`truncated`フラグ）。devinはGET詳細API（listと同一認証）
 
 ---
 
