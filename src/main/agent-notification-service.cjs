@@ -1,4 +1,5 @@
 const path = require('path');
+const { mapDevinHookPayload } = require('./agent-events/providers/devin.cjs');
 
 const EVENT_KINDS = new Map([
   ['userpromptsubmit', 'turn_started'],
@@ -52,6 +53,13 @@ function getPermissionDetails(data) {
 
 function normalizeAgentNotification(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+
+  // Devin rides the same receiver but has its own event semantics: its Stop
+  // hook must become turn_stop_requested, never turn_completed (only the OSC
+  // "Devin finished" notification completes a Devin turn).
+  if (data.provider === 'devin' || data.agent_source === 'devin') {
+    return mapDevinHookPayload(data);
+  }
 
   const eventType = String(
     data.hook_event_type || data.hook_event_name || data.event || data.type || '',
