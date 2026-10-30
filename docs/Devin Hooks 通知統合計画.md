@@ -2,7 +2,15 @@
 
 **作成日**: 2026-08-13
 
-**状態**: D0b反映・OSC Attention経路実装済み
+**状態**: D0b反映・OSC Attention経路実装済み ・ **D1–D4 実装済み (2026-10-30)**
+
+D1–D4実装メモ:
+
+- **D1** (`e49d486`): `src/main/agent-events/providers/devin.cjs` — Hook payload mapping (UserPromptSubmit→turn_started, Stop→turn_stop_requested+stopHookActive)、OSC通知 (needs_attention/turn_completed)、turn tracker (stale Stop判定+dedupe)。service側は `provider === 'devin' || agent_source === 'devin'` で迂回。
+- **D2** (`5a6fadf`): `src/main/hooks/hook-bridge-source.cjs` — 統合bridgeソース（allowlist転送・64KiB stdin cap・800ms timeout・常時exit 0・`--provider`判定・claude/codex後方互換）。ルーティング: `resolveNotificationTarget` に sessionId binding store (`createSessionBindingStore`) を追加し ptyId → session binding → cwd → unattributed のfallback chainを実装。PTY起動時の `PROJECT_MIXER_PORT_FILE` / `PROJECT_MIXER_PTY_ID` 注入は既存のまま。
+- **D3** (`3f0770e`): `src/notifications/state.mjs` — `turn_stop_requested` をno-op化（OSC finished のunread badgeを消さない・waitingをprotect）。UserPromptSubmit (turn_started) はDDLどおりwaitingをクリア。
+- **D4** (`bdac228`): runtime選定は**Electron Node-mode wrapper**（`ELECTRON_RUN_AS_NODE=1` + PM実行ファイル)、system Node不要。`src/main/hooks/devin-hook-config.cjs` — user-level `%APPDATA%\devin\config.json` の `hooks` merge (UserPromptSubmit/Stop・idempotent・backup + atomic replace・parse不可は拒否・不明field/既存hook保持)。`src/main/hooks/devin-bridge-install.cjs` — appData共通 integration directory (profile非依存) へ bridge+wrapper展開。UIは Helpメニュー (Status / Enable / Disable のダイアログ) ＋ IPC `devin-hook:status/enable/disable`、preloadに `devinHookStatus/Enable/Disable`。
+- 残タスク: D5 実CLI検証（実装結果.mdへ記録）、Setup statusの「last probe version」表示。
 
 **対象**: Project Mixer v2 / Devin CLI 通知統合
 
