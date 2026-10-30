@@ -1230,7 +1230,8 @@ function handleHookNotification(data) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const notification = normalizeAgentNotification(data);
   if (!notification) {
-    console.warn('[hook] Ignoring unsupported agent notification');
+    // Log only routing-relevant keys; never the payload body (計画 §15).
+    console.warn(`[hook] Ignoring unsupported agent notification: provider=${data.provider} agent_source=${data.agent_source} eventType=${data.eventType} event=${data.event} keys=[${Object.keys(data).sort().join(',')}]`);
     return;
   }
   // 計画 §6: the first valid hook that carries an explicit, live ptyId
