@@ -116,12 +116,47 @@ function normalizeAgentNotification(data) {
   };
 }
 
-function resolveNotificationTarget(notification, ptys) {
+// Runtime sessionId → ptyId bindings, registered when the first valid hook
+// carrying an explicit ptyId arrives (計画 §6). Bounded: long sessions must
+// not grow the map forever; oldest binding is evicted first.
+function createSessionBindingStore({ maxEntries = 200 } = {}) {
+  const map = new Map();
+  return {
+    bind(sessionId, ptyId) {
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return false;
+      if (!Number.isInteger(ptyId) || ptyId <= 0) return false;
+      const key = sessionId.trim();
+      if (map.has(key)) map.delete(key);
+      map.set(key, ptyId);
+      while (map.size > maxEntries) map.delete(map.keys().next().value);
+      return true;
+    },
+    lookup(sessionId) {
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return null;
+      return map.has(sessionId.trim()) ? map.get(sessionId.trim()) : null;
+    },
+    size() {
+      return map.size;
+    },
+  };
+}
+
+// Routing fallback chain (計画 §6): ptyId → sessionId binding → cwd →
+// unattributed. An explicit but unknown/exit-ed ptyId stays unattributed and
+// must NOT fall through to another terminal (計画 §D2 Gate).
+function resolveNotificationTarget(notification, ptys, bindings = null) {
   if (notification.ptyId !== null) {
     if (ptys.has(notification.ptyId)) {
       return { ptyId: notification.ptyId, ambiguous: false, unattributed: false };
     }
     return { ptyId: null, ambiguous: false, unattributed: true };
+  }
+
+  if (bindings && notification.sessionId) {
+    const bound = bindings.lookup(notification.sessionId);
+    if (bound !== null && ptys.has(bound)) {
+      return { ptyId: bound, ambiguous: false, unattributed: false, via: 'session' };
+    }
   }
 
   if (!notification.cwd) {
@@ -144,4 +179,4 @@ function resolveNotificationTarget(notification, ptys) {
   };
 }
 
-module.exports = { normalizeAgentNotification, resolveNotificationTarget };
+module.exports = { normalizeAgentNotification, resolveNotificationTarget, createSessionBindingStore };

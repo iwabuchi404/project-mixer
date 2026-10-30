@@ -28,7 +28,7 @@ const {
 const { buildPortRecord, writeJsonAtomic, writeTextAtomic } = require('./src/ports/state.cjs');
 const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, validateSettings, ConfigParseError } = require('./src/main/config-service.cjs');
-const { normalizeAgentNotification, resolveNotificationTarget } = require('./src/main/agent-notification-service.cjs');
+const { normalizeAgentNotification, resolveNotificationTarget, createSessionBindingStore } = require('./src/main/agent-notification-service.cjs');
 const { DevinSessionMonitor } = require('./src/main/devin-session-monitor.cjs');
 const { listSessions, readTranscript } = require('./src/main/session-history.cjs');
 const { assertPathString, resolveProjectPath, resolveProjectRoot } = require('./src/main/path-safety.cjs');
@@ -91,6 +91,8 @@ let mcpReadyResult = mcpReady;
 let hookReadyResult = hookReady;
 const pendingPtyCreates = new Set();
 const hookTokens = new Map();
+// sessionId → ptyId bindings learned from hooks (計画 §6 routing fallback).
+const sessionBindings = createSessionBindingStore();
 
 function resetServiceReadiness() {
   mcpReady = new Promise((resolve) => { resolveMcpReady = resolve; });
@@ -1126,7 +1128,13 @@ function handleHookNotification(data) {
     console.warn('[hook] Ignoring unsupported agent notification');
     return;
   }
-  const target = resolveNotificationTarget(notification, ptys);
+  // 計画 §6: the first valid hook that carries an explicit, live ptyId
+  // registers sessionId → ptyId, so later hooks without one (or from the
+  // user-level bridge) still route to the same terminal.
+  const target = resolveNotificationTarget(notification, ptys, sessionBindings);
+  if (notification.sessionId && target.ptyId !== null && ptys.has(target.ptyId)) {
+    sessionBindings.bind(notification.sessionId, target.ptyId);
+  }
 
   mainWindow.webContents.send('hook:notify', {
     type: notification.eventType,
