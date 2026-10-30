@@ -70,6 +70,9 @@ contextBridge.exposeInMainWorld('api', {
   sessionsList: (cwd, providers) => ipcRenderer.invoke('sessions:list', { cwd, providers }),
   sessionsTranscript: (provider, sessionId, cwd) => ipcRenderer.invoke('sessions:transcript', { provider, sessionId, cwd }),
   onDevinMonitorError: (callback) => ipcRenderer.on('devin:monitor-error', (_event, data) => callback(data)),
+  devinHookStatus: () => ipcRenderer.invoke('devin-hook:status'),
+  devinHookEnable: () => ipcRenderer.invoke('devin-hook:enable'),
+  devinHookDisable: () => ipcRenderer.invoke('devin-hook:disable'),
 
   // Command availability check
   commandCheck: (commands) => ipcRenderer.invoke('command:check', { commands }),

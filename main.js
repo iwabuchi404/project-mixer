@@ -29,6 +29,14 @@ const { buildPortRecord, writeJsonAtomic, writeTextAtomic } = require('./src/por
 const { isProbablyBinary } = require('./src/files/content.cjs');
 const { readConfig, writeConfig, validateProjects, validateLayout, validateSettings, ConfigParseError } = require('./src/main/config-service.cjs');
 const { normalizeAgentNotification, resolveNotificationTarget, createSessionBindingStore } = require('./src/main/agent-notification-service.cjs');
+const { buildHookBridgeScript } = require('./src/main/hooks/hook-bridge-source.cjs');
+const { deployDevinBridge, isDevinBridgeDeployed } = require('./src/main/hooks/devin-bridge-install.cjs');
+const {
+  getUserDevinConfigPath,
+  getSetupStatus,
+  enableDevinHooks,
+  disableDevinHooks,
+} = require('./src/main/hooks/devin-hook-config.cjs');
 const { DevinSessionMonitor } = require('./src/main/devin-session-monitor.cjs');
 const { listSessions, readTranscript } = require('./src/main/session-history.cjs');
 const { assertPathString, resolveProjectPath, resolveProjectRoot } = require('./src/main/path-safety.cjs');
@@ -80,6 +88,8 @@ let MCP_PORT = null;
 let hookServer = null;
 let mcpControl = null;
 let devinMonitor = null;
+// Deployed Devin hook bridge (計画 §7/D4): stable, profile-independent dir.
+let devinBridgeInfo = null;
 let runtimeStarted = false;
 let shutdownPromise = null;
 let resolveMcpReady;
@@ -447,6 +457,51 @@ function setupApplicationMenu() {
       label: 'Help',
       submenu: [
         {
+          label: 'Devin Integration Status…',
+          click: () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'Devin Integration',
+              message: 'Devin Integration',
+              detail: devinSetupSummaryText(),
+              buttons: ['OK'],
+            });
+          },
+        },
+        {
+          label: 'Enable Devin Hooks…',
+          click: async () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            ensureDevinBridgeDeployed();
+            const configPath = getUserDevinConfigPath();
+            const result = enableDevinHooks(configPath, devinBridgeInfo?.pmCommand || 'project-mixer-hook --provider devin');
+            dialog.showMessageBox(mainWindow, {
+              type: result.ok ? 'info' : 'warning',
+              title: 'Enable Devin Hooks',
+              message: result.ok ? 'Devin hooks enabled' : 'Could not enable Devin hooks',
+              detail: result.ok ? devinSetupSummaryText() : result.error,
+              buttons: ['OK'],
+            });
+          },
+        },
+        {
+          label: 'Disable Devin Hooks…',
+          click: () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            const configPath = getUserDevinConfigPath();
+            const result = disableDevinHooks(configPath);
+            dialog.showMessageBox(mainWindow, {
+              type: result.ok ? 'info' : 'warning',
+              title: 'Disable Devin Hooks',
+              message: result.ok ? 'Devin hooks disabled' : 'Could not disable Devin hooks',
+              detail: result.ok ? `Project Mixer entries removed from ${configPath}` : result.error,
+              buttons: ['OK'],
+            });
+          },
+        },
+        { type: 'separator' },
+        {
           label: 'About Project Mixer',
           click: () => {
             if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -536,6 +591,7 @@ app.whenReady().then(() => {
     throw e;
   }
   createWindow();
+  ensureDevinBridgeDeployed();
   devinMonitor = createDevinMonitor();
   startRuntimeServices();
 });
@@ -545,9 +601,58 @@ app.on('activate', async () => {
   if (shutdownPromise) await shutdownPromise;
   if (mainWindow && !mainWindow.isDestroyed()) return;
   createWindow();
+  ensureDevinBridgeDeployed();
   devinMonitor = createDevinMonitor();
   startRuntimeServices();
 });
+
+// --- Devin hook setup (計画 D4) ---
+
+// The integration directory is appData-based on purpose: both the normal and
+// dev profiles deploy the same bridge, and routing stays profile-independent
+// because the bridge reads PROJECT_MIXER_PORT_FILE from the inherited env.
+function getDevinIntegrationDir() {
+  return path.join(app.getPath('appData'), 'Project Mixer', 'hooks');
+}
+
+function ensureDevinBridgeDeployed() {
+  try {
+    const dir = getDevinIntegrationDir();
+    devinBridgeInfo = deployDevinBridge({
+      dir,
+      exePath: process.execPath,
+      bridgeScript: buildHookBridgeScript(),
+    });
+  } catch (e) {
+    devinBridgeInfo = null;
+    console.warn(`[devin-hooks] bridge deploy failed: ${e.message}`);
+  }
+}
+
+function devinSetupSummaryText() {
+  let configPath;
+  try {
+    configPath = getUserDevinConfigPath();
+  } catch (e) {
+    return `Devin user config not available: ${e.message}`;
+  }
+  const status = getSetupStatus(configPath);
+  const bridge = devinBridgeInfo
+    ? `bridge executable: ${devinBridgeInfo.wrapperPath}`
+    : `bridge executable: NOT DEPLOYED (deployed: ${isDevinBridgeDeployed(getDevinIntegrationDir())})`;
+  const lines = [
+    'Devin Integration',
+    '',
+    bridge,
+    `user config path: ${status.configPath}`,
+    `loaded: ${status.loaded ? 'yes' : `no (${status.parseError})`}`,
+    `hooks configured: ${status.hooksEnabled ? 'enabled' : 'disabled'}`,
+    `Stop notifications: ${status.stopEnabled ? 'enabled' : (status.stopDisabledByCompetingHook ? 'disabled by competing hook' : 'disabled')}`,
+    '',
+    'After enabling, verify with the /hooks command in Devin.',
+  ];
+  return lines.join('\n');
+}
 
 async function shutdownRuntimeServices() {
   if (shutdownPromise) return shutdownPromise;
@@ -1849,4 +1954,26 @@ ipcMain.handle('hook:setup', async (event, payload) => {
   }
 
   return results;
+});
+
+// User-level Devin hook setup (計画 §9/D4): separate from the project-scoped
+// hook:setup — this never touches project files.
+ipcMain.handle('devin-hook:status', async (event) => {
+  assertTrustedMainIpcEvent(event);
+  return { bridge: devinBridgeInfo, ...getSetupStatus(getUserDevinConfigPath()) };
+});
+
+ipcMain.handle('devin-hook:enable', async (event) => {
+  assertTrustedMainIpcEvent(event);
+  ensureDevinBridgeDeployed();
+  const configPath = getUserDevinConfigPath();
+  const result = enableDevinHooks(configPath, devinBridgeInfo?.pmCommand || 'project-mixer-hook --provider devin');
+  return { bridge: devinBridgeInfo, ...result };
+});
+
+ipcMain.handle('devin-hook:disable', async (event) => {
+  assertTrustedMainIpcEvent(event);
+  const configPath = getUserDevinConfigPath();
+  const result = disableDevinHooks(configPath);
+  return { bridge: devinBridgeInfo, ...result };
 });
