@@ -151,3 +151,87 @@ test('claude and codex Stop semantics are unchanged (regression)', () => {
     'turn_completed',
   );
 });
+
+// --- D3: attention integration (src/notifications/state.mjs) ---
+
+const loadState = async () => {
+  const { pathToFileURL } = require('node:url');
+  const path = require('node:path');
+  return import(pathToFileURL(path.join(__dirname, '..', 'src', 'notifications', 'state.mjs')).href);
+};
+
+test('D3: a Devin Stop hook must not erase an unread completed badge (late Stop after OSC finished)', async () => {
+  const { receiveAgentNotification } = await loadState();
+  const base = receiveAgentNotification({}, {
+    tabId: 1,
+    projectId: 'proj',
+    kind: 'turn_completed',
+    eventType: 'turn_finished',
+    source: 'devin',
+    unread: true,
+  });
+  assert.equal(base[1].unread, true, 'OSC finished leaves an unread completed badge');
+
+  const afterStop = receiveAgentNotification(base, {
+    tabId: 1,
+    projectId: 'proj',
+    kind: 'turn_stop_requested',
+    eventType: 'Stop',
+    source: 'devin',
+  });
+  assert.equal(afterStop, base, 'turn_stop_requested is a no-op at the attention layer');
+});
+
+test('D3: a Devin Stop hook must not clear an amber waiting (needs_attention ignored as always)', async () => {
+  const { receiveAgentNotification } = await loadState();
+  const waiting = receiveAgentNotification({}, {
+    tabId: 2,
+    projectId: 'proj',
+    kind: 'needs_attention',
+    eventType: 'Notification',
+    source: 'devin',
+    reason: 'input',
+  });
+  assert.equal(waiting[2].waiting, true);
+
+  const afterStop = receiveAgentNotification(waiting, {
+    tabId: 2,
+    projectId: 'proj',
+    kind: 'turn_stop_requested',
+    eventType: 'Stop',
+    source: 'devin',
+  });
+  assert.equal(afterStop[2].waiting, true, 'waiting is not cleared by a Stop hook');
+});
+
+test('D3: a Devin Stop hook must not create a new attention entry', async () => {
+  const { receiveAgentNotification } = await loadState();
+  const next = receiveAgentNotification({}, {
+    tabId: 3,
+    projectId: 'proj',
+    kind: 'turn_stop_requested',
+    eventType: 'Stop',
+    source: 'devin',
+  });
+  assert.deepEqual(next, {});
+});
+
+test('D3: a fresh Devin prompt (UserPromptSubmit) clears a stale waiting, like other agents', async () => {
+  const { receiveAgentNotification } = await loadState();
+  const waiting = receiveAgentNotification({}, {
+    tabId: 4,
+    projectId: 'proj',
+    kind: 'needs_attention',
+    eventType: 'Notification',
+    source: 'devin',
+    reason: 'input',
+  });
+  const cleared = receiveAgentNotification(waiting, {
+    tabId: 4,
+    projectId: 'proj',
+    kind: 'turn_started',
+    eventType: 'UserPromptSubmit',
+    source: 'devin',
+  });
+  assert.equal(cleared[4], undefined, 'new prompt is the acknowledgement');
+});

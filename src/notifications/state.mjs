@@ -17,6 +17,14 @@ export function receiveAgentNotification(attention, {
   const isExplicitUserInput = kind === 'turn_started'
     && String(eventType || '').toLowerCase() === 'userpromptsubmit';
 
+  // Devin Stop hook → turn_stop_requested (計画 §3/§4). It must never
+  // promote to turn_completed and never erase anything: a late Stop after
+  // the OSC "Devin finished" badge must not clear its unread state, and a
+  // waiting entry stays protected by the guard below anyway.
+  if (kind === 'turn_stop_requested') {
+    return attention;
+  }
+
   // Once input is required, keep the amber waiting state until there is
   // direct evidence of a user response. Generic lifecycle updates can arrive
   // late or out of order, so neither working nor completion may clear it.

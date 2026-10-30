@@ -117,7 +117,7 @@ test('R0/KEEP: COMMAND_TYPES declares every command the renderer dispatches', ()
 
 test('R1/FIXED: handleHookNotification detects ambiguous cwd and sends unattributed', () => {
   const main = read('main.js');
-  assert.match(main, /resolveNotificationTarget\(notification, ptys\)/);
+  assert.match(main, /resolveNotificationTarget\(notification, ptys(?:, sessionBindings)?\)/);
   const service = read('src/main/agent-notification-service.cjs');
   assert.match(service, /matches\.length === 1/);
   assert.match(service, /ambiguous: matches\.length > 1/);
