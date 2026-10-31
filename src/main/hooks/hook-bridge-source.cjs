@@ -64,14 +64,20 @@ function buildPayload(namedEvent, input) {
   const cwd = typeof input.cwd === 'string' && input.cwd.trim() ? input.cwd : process.cwd();
   const ptyId = Number(process.env.PROJECT_MIXER_PTY_ID) || undefined;
   if (provider === 'devin') {
-    const eventType = identityString(input.eventType) || identityString(namedEvent);
+    // Devin sends Claude-style snake_case payloads on stdin: the event name
+    // rides in hook_event_name (captured 2026-10-31:
+    // {"hook_event_name":"UserPromptSubmit","prompt":"...","session_id","prompt_id"}
+    // {"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message","session_id","prompt_id"}).
+    const eventType = identityString(input.eventType)
+      || identityString(input.hook_event_name)
+      || (namedEvent === 'devin' ? '' : namedEvent);
     if (!eventType) return null;
     return {
       provider: 'devin',
       eventType,
       sessionId: identityString(input.sessionId) || identityString(input.session_id),
       promptId: identityString(input.promptId) || identityString(input.prompt_id),
-      stopHookActive: input.stopHookActive === true,
+      stopHookActive: input.stopHookActive === true || input.stop_hook_active === true,
       cwd,
       pty_id: ptyId,
     };
@@ -114,9 +120,17 @@ function send(payload) {
 
 function main() {
   const argv = process.argv.slice(2);
-  const namedEvent = argv.find((a) => a && !a.startsWith('--') && !a.startsWith('{')) || '';
+  // Drop --provider (its value included) before treating the first
+  // positional as a named event, or the provider value "devin" would
+  // pose as the event name.
+  const stripped = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--provider') { i++; continue; }
+    stripped.push(argv[i]);
+  }
+  const namedEvent = stripped.find((a) => a && !a.startsWith('--') && !a.startsWith('{')) || '';
   let argPayload = null;
-  const jsonArg = argv.find((a) => a && a.startsWith('{'));
+  const jsonArg = stripped.find((a) => a && a.startsWith('{'));
   if (jsonArg) {
     try { argPayload = JSON.parse(jsonArg); } catch (e) { argPayload = null; }
   }

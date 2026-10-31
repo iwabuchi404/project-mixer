@@ -1242,6 +1242,9 @@ function handleHookNotification(data) {
     sessionBindings.bind(notification.sessionId, target.ptyId);
   }
 
+  if (notification.source === 'devin') {
+    console.log(`[hook] Routed devin ${notification.eventType}: kind=${notification.kind} ptyId=${target.ptyId} via=${target.via ?? 'n/a'} unattributed=${target.unattributed === true} sessionId=${notification.sessionId ?? 'none'}`);
+  }
   mainWindow.webContents.send('hook:notify', {
     type: notification.eventType,
     source: notification.source,

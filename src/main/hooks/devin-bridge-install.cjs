@@ -66,7 +66,11 @@ function deployDevinBridge({
   }
   // The shared entry is identified by bridge path + --provider devin (計画 §9);
   // the full command is written so the config never relies on PATH.
-  const pmCommand = `${quoteForCommand(wrapperPath)} --provider devin`;
+  // A quoted path with forward slashes survives Devin's bash -c hook
+  // execution (and cmd backgrounds too); a backslash-quoted path aborts
+  // there with a bash quoting error (captured against Devin CLI
+  // 3000.11.234, D5 verification 2026-10-31).
+  const pmCommand = `"${wrapperPath.split('\\').join('/')}" --provider devin`;
   return { bridgePath, wrapperPath, pmCommand };
 }
 

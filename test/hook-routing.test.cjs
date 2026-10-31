@@ -127,6 +127,42 @@ test('bridge forwards devin allowlist fields and drops prompt/tool bodies', asyn
   }
 });
 
+test('bridge maps the real devin stdin payload (hook_event_name, snake_case)', async () => {
+  const { server, received, port } = await startReceiver();
+  try {
+    // Captured from Devin CLI 3000.11.234 (UserPromptSubmit hook).
+    const realUserPromptSubmit = {
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'SECRET PROMPT TEXT',
+      session_id: 'frequent-tugboat',
+      prompt_id: '1a227566-d954-45c5-aa96-b2bf69f82dfd',
+    };
+    const { code } = await runBridge(['--provider', 'devin'], JSON.stringify(realUserPromptSubmit), {
+      PM_HOOK_URL: `http://127.0.0.1:${port}/hook`,
+      PM_HOOK_TOKEN: 'tok-3',
+      PROJECT_MIXER_PTY_ID: '9',
+    });
+    assert.equal(code, 0);
+    assert.equal(received.length, 1);
+    const payload = JSON.parse(received[0].body);
+    assert.equal(payload.provider, 'devin');
+    assert.equal(payload.eventType, 'UserPromptSubmit', 'event name rides in hook_event_name; the --provider value must not pose as the event');
+    assert.equal(payload.sessionId, 'frequent-tugboat');
+    assert.equal(payload.promptId, '1a227566-d954-45c5-aa96-b2bf69f82dfd');
+    assert.equal(payload.stopHookActive, false);
+    assert.equal(payload.pty_id, 9);
+    assert.equal(payload.prompt, undefined, 'prompt text must not be forwarded');
+    assert.equal(JSON.stringify(payload).includes('SECRET'), false, 'no secret leakage');
+    // And the receiver side normalizes it into turn_started.
+    const notification = normalizeAgentNotification(payload);
+    assert.equal(notification.kind, 'turn_started');
+    assert.equal(notification.provider, 'devin');
+    assert.equal(notification.ptyId, 9);
+  } finally {
+    server.close();
+  }
+});
+
 test('bridge keeps legacy claude/codex arg behaviour without secrets growth', async () => {
   const { server, received, port } = await startReceiver();
   try {

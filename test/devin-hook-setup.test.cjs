@@ -166,7 +166,7 @@ test('status reports parse errors and competing hooks without touching the file'
 
 // --- bridge deployment ---
 
-test('bridge deploy writes bridge, platform wrapper, and a quoted --provider devin command', () => {
+test('bridge deploy writes bridge, wrapper, and a bash-safe quoted command', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-devin-bridge-'));
   const bridgeScript = buildHookBridgeScript();
   const deployed = deployDevinBridge({ dir, exePath: 'C:\\Apps\\Project Mixer.exe', bridgeScript, platform: 'win32' });
@@ -175,7 +175,11 @@ test('bridge deploy writes bridge, platform wrapper, and a quoted --provider dev
   const wrapper = fs.readFileSync(deployed.wrapperPath, 'utf-8');
   assert.match(wrapper, /ELECTRON_RUN_AS_NODE=1/);
   assert.ok(wrapper.includes('"C:\\Apps\\Project Mixer.exe"'), 'exe path is quoted');
+  // Devin runs hook commands through bash -c, where a quoted BACKslash path
+  // fails to parse; forward slashes inside quotes survive every context.
   assert.ok(deployed.pmCommand.startsWith('"') && deployed.pmCommand.includes('--provider devin'));
+  assert.doesNotMatch(deployed.pmCommand.split('"')[1], /\\/, 'config command must not contain backslashes');
+  assert.ok(deployed.pmCommand.split('"')[1].startsWith('C:/'), 'drive separator uses a forward slash');
 });
 
 test('bridges wrapper stays profile-independent (dev never gets its own copy)', () => {
