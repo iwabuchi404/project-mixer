@@ -1449,6 +1449,18 @@ textarea:focus-visible,
   background: linear-gradient(to bottom, transparent 2px, var(--act) 2px, var(--act) 5px, transparent 5px);
 }
 
+.terminal-launch-state {
+  padding: var(--s-5);
+  color: var(--g-5);
+  white-space: pre-wrap;
+}
+
+.terminal-launch-state button {
+  margin-top: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  cursor: pointer;
+}
+
 .terminal-instance,
 .terminal-instance .xterm,
 .terminal-instance .xterm-viewport {

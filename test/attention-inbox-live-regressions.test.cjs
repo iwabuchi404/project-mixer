@@ -31,42 +31,65 @@ test('notification and completion paths both go through the committing writer', 
   assert.doesNotMatch(receive, /reconcileAttention\(/);
 });
 
-test('devin resume pool hands out distinct sessions per reopening tab', () => {
-  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf-8');
-  // takeDevinResumeCandidate must shift, not peek: two tabs restoring in the
-  // same project must not both resume the same session id.
-  const take = renderer.slice(
-    renderer.indexOf('function takeDevinResumeCandidate'),
-    renderer.indexOf('async function loadLayout'),
-  );
-  assert.match(take, /list\.shift\(\)/, 'must consume the entry');
-  assert.doesNotMatch(take, /list\[0\]\s*;/, 'must not peek and leave it');
+// Run the real restore function with boundary spies; no source-layout assumptions.
+async function runRestore(savedTabs) {
+  const vm = require('node:vm');
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+  const body = renderer.match(/async function loadLayout\(\) \{[\s\S]*?\n\}/)[0];
+  const calls = [];
+  const context = {
+    suppressLayoutSave: false, restoringTerminals: false,
+    projects: new Map([['p', { id: 'p', path: '/project' }]]), activeProjectId: 'p',
+    pushFocusCheckbox: {}, DEFAULT_TERMINAL_SEND_MODES: {},
+    window: { api: { layoutLoad: async () => ({ activeProjectId: 'p', tabs: savedTabs }) } },
+    dispatch: async (name) => { calls.push({ name }); },
+    createTerminal: async (...args) => {
+      assert.equal(context.restoringTerminals, true);
+      calls.push({ name: 'descriptor', args });
+      return calls.length;
+    },
+    applySavedPaneLayouts: async () => calls.push({ name: 'panes' }),
+    showProjectTabs: () => calls.push({ name: 'show' }),
+    requestVisibleTerminalStarts: () => {
+      assert.equal(context.restoringTerminals, false);
+      calls.push({ name: 'start-visible' });
+    },
+    saveLayout: async () => calls.push({ name: 'save' }),
+    console,
+  };
+  await vm.runInNewContext(`(${body})`, context)();
+  return calls;
+}
+
+test('restore creates unopened descriptors instead of launching CLI commands or a resume pool', async () => {
+  const calls = await runRestore(Array.from({ length: 20 }, (_, i) => ({ command: 'devin', label: `t${i}`, projectId: 'p' })));
+  const descriptors = calls.filter(x => x.name === 'descriptor');
+  assert.equal(descriptors.length, 20);
+  for (const { args } of descriptors) {
+    assert.equal(args[5].deferStart, true);
+    assert.equal(args[5].restored, true);
+  }
+  assert.deepEqual(calls.filter(x => !['descriptor', 'panes', 'show', 'start-visible', 'save'].includes(x.name)).map(x => x.name), ['select_project']);
 });
 
-test('devin lookup happens once per project, not once per tab', () => {
-  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf-8');
-  const pool = renderer.slice(
-    renderer.indexOf('async function buildDevinResumePool'),
-    renderer.indexOf('function takeDevinResumeCandidate'),
-  );
-  // Keyed by projectId in a Set, so N devin tabs in one project = 1 CLI call.
-  assert.match(pool, /needsLookup = new Set\(\)/);
-  assert.match(pool, /for \(const projectId of needsLookup\)|\[\.\.\.needsLookup\]/);
-  // The pool is built before the per-tab loop, not inside it.
-  assert.match(renderer, /const devinResumePool = await buildDevinResumePool\(layout\.tabs\)/);
+test('restore preserves per-tab IDs without silently assigning unknown IDs', async () => {
+  const calls = await runRestore([
+    { command: 'devin', label: 'one', projectId: 'p', resumeSessionId: 'session-one' },
+    { command: 'devin', label: 'two', projectId: 'p', resumeSessionId: 'session-two', devinSessionId: 'devin-cloud' },
+    { command: 'devin', label: 'legacy', projectId: 'p' },
+  ]);
+  const descriptors = calls.filter(x => x.name === 'descriptor');
+  assert.deepEqual(descriptors.map(x => x.args[4]), ['session-one', 'session-two', undefined]);
+  assert.equal(descriptors[1].args[5].devinSessionId, 'devin-cloud');
+  assert.equal(descriptors[0].args[1], '/project');
 });
 
-test('devin layout restore only fills in ids that are genuinely missing', () => {
-  const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf-8');
-  const block = renderer.slice(
-    renderer.indexOf('const tracked = !tab.devinSessionId'),
-    renderer.indexOf('const newId = await dispatch(\'create_terminal\', args)'),
-  );
-  // A tab that already has an id must never be overridden by the pool.
-  assert.match(block, /!tab\.resumeSessionId && !tab\.devinSessionId && !tracked/);
-  assert.match(block, /normalizeRendererCommand\(tab\.command\) === 'devin'/);
-  // Pooled ids rank below the explicit ones.
-  assert.match(block, /tab\.resumeSessionId \|\| tab\.devinSessionId \|\| tracked \|\| pooled\?\.id/);
+test('restore starts visible terminals only after final pane and tab selection', async () => {
+  const calls = await runRestore([{ command: 'cmd.exe', label: 'one', projectId: 'p' }]);
+  const names = calls.map(x => x.name);
+  assert.ok(names.indexOf('start-visible') > names.indexOf('panes'));
+  assert.ok(names.indexOf('start-visible') > names.indexOf('show'));
+  assert.equal(names.filter(x => x === 'start-visible').length, 1);
 });
 
 test('the devin index IPC is bounded and never returns a raw path', () => {

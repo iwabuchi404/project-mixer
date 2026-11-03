@@ -184,7 +184,7 @@ test('keeps waiting through non-input lifecycle events and clears it for explici
 
 test('does not treat xterm protocol data as user input', () => {
   const renderer = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-  const onData = renderer.match(/terminal\.onData\(\(data\) => \{([\s\S]*?)\n  \}\);/);
+  const onData = renderer.match(/terminal\.onData\(\(data\) => \{([\s\S]*?)\n\s*\}\);/);
   assert.ok(onData, 'terminal onData handler must exist');
   assert.doesNotMatch(onData[1], /terminal_set_waiting|clearTerminalWaitingForUserInput/);
   assert.match(renderer, /terminal\.onKey\([\s\S]*?clearTerminalWaitingForUserInput\(tabId\)/);

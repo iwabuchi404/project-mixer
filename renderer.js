@@ -21,6 +21,7 @@ import {
   describeAgentState,
 } from './src/attention/agent-state-reducer.mjs';
 import { classifyCertainty } from './src/attention/provenance.mjs';
+import { createTerminalLauncher } from './src/ui/terminal-launch.mjs';
 import { registerDevinTerminalNotifications } from './src/notifications/devin-terminal.mjs';
 import {
   clampLineRange,
@@ -557,6 +558,7 @@ function placeSurfaces() {
     });
   });
   layoutNonTerminalTabs();
+  requestVisibleTerminalStarts();
   markShownTabs();
   updatePaneFocusClasses();
   requestAnimationFrame(() => {
@@ -737,6 +739,7 @@ const PTY_OUTPUT_BATCH_MS = 16;
 const ptyOutputBuffers = new Map(); // ptyId -> { chunks: string[], timer: Timeout|null }
 
 window.api.onPtyData(({ id, data }) => {
+  if (!Array.from(tabs.values()).some((t) => Number.isInteger(t.ptyId) && t.ptyId === id)) return;
   let buffer = ptyOutputBuffers.get(id);
   if (!buffer) {
     buffer = { chunks: [], timer: null };
@@ -881,7 +884,7 @@ function scheduleTerminalScrollToBottom(t) {
   if (t.scrollRafId != null) return;
   t.scrollRafId = requestAnimationFrame(() => {
     t.scrollRafId = null;
-    if (t.pinnedToBottom) t.terminal.scrollToBottom();
+    if (tabs.get(t.id) === t && t.pinnedToBottom && t.terminal) t.terminal.scrollToBottom();
   });
 }
 
@@ -905,6 +908,7 @@ const webglRetryAfter = new Map(); // Terminal -> timestamp
 let webglUsedCounter = 0;
 
 function ensureWebglRenderer(terminal) {
+  if (!terminal) return;
   const entry = webglRenderers.get(terminal);
   if (entry) {
     entry.usedAt = ++webglUsedCounter;
@@ -963,7 +967,7 @@ function isTerminalVisible(t) {
 function syncWebglRenderers() {
   const visible = new Set();
   for (const t of tabs.values()) {
-    if (!isTerminalVisible(t)) continue;
+    if (!t.terminal || !isTerminalVisible(t)) continue;
     visible.add(t.terminal);
     ensureWebglRenderer(t.terminal);
   }
@@ -984,8 +988,9 @@ window.api.onPtyExit(({ id, exitCode }) => {
   flushPtyOutput(id);
   ptyOutputBuffers.delete(id);
   for (const [tabId, t] of tabs) {
-    if (t.ptyId === id) {
-      t.terminal.write(`\r\n\x1b[90m[process exited with code ${exitCode}]\x1b[0m\r\n`);
+    if (Number.isInteger(t.ptyId) && t.ptyId === id) {
+      t.launch?.markExited();
+      t.terminal?.write(`\r\n\x1b[90m[process exited with code ${exitCode}]\x1b[0m\r\n`);
       dispatch('terminal_set_waiting', { tabId, projectId: t.projectId, waiting: false, cause: 'exit' });
       dispatch('agent_session_unbound', { tabId });
       return;
@@ -1227,12 +1232,10 @@ async function removeProject(projectId) {
   }
   for (const tid of tabsToKill) {
     const t = tabs.get(tid);
-    void window.api.devinUnbind(t.ptyId);
+    void t.launch.close();
     dispatch('agent_session_unbound', { tabId: tid });
     dispatch('terminal_clear_attention', { tabId: tid });
-    window.api.ptyKill(t.ptyId);
-    dropWebglRenderer(t.terminal);
-    t.terminal.dispose();
+
     t.termEl.remove();
     t.tabElement.remove();
     tabs.delete(tid);
@@ -1834,19 +1837,23 @@ function createTreeItem(entry, depth) {
 function insertPathToTerminal(filePath) {
   if (activeTabId === null) return;
   const t = tabs.get(activeTabId);
-  if (t) {
+  if (t?.launchState === 'running') {
     window.api.ptyWrite(t.ptyId, filePath);
     clearTerminalWaitingForUserInput(activeTabId);
+  } else if (t) {
+    showToast({ key: 'terminal-path-not-ready', message: 'Wait for the terminal to start before inserting a path.' });
   }
 }
 
 function insertNameToTerminal(filePath) {
   if (activeTabId === null) return;
   const t = tabs.get(activeTabId);
-  if (t) {
+  if (t?.launchState === 'running') {
     const name = filePath.split(/[\\/]/).pop();
     window.api.ptyWrite(t.ptyId, name);
     clearTerminalWaitingForUserInput(activeTabId);
+  } else if (t) {
+    showToast({ key: 'terminal-name-not-ready', message: 'Wait for the terminal to start before inserting a name.' });
   }
 }
 
@@ -2037,7 +2044,7 @@ function isDevinCommand(command) {
 
 async function bindDevinSession(tabId) {
   const terminal = tabs.get(tabId);
-  if (!terminal) return;
+  if (!terminal || !Number.isInteger(terminal.ptyId)) return;
   const current = getTerminalAgentBinding(tabId);
   const sessionId = await showPrompt(
     'Connect Devin Notifications',
@@ -2057,6 +2064,8 @@ async function bindDevinSession(tabId) {
     return;
   }
   dispatch('agent_session_bound', { tabId, ...result.binding });
+  terminal.devinSessionId = result.binding.sessionId;
+  void saveLayout();
   showToast({
     key: `devin-bound-${tabId}`,
     message: 'Devin Cloud session connected',
@@ -2067,8 +2076,10 @@ async function bindDevinSession(tabId) {
 async function unbindDevinSession(tabId) {
   const terminal = tabs.get(tabId);
   if (!terminal) return;
-  await window.api.devinUnbind(terminal.ptyId);
+  terminal.devinSessionId = null;
+  if (Number.isInteger(terminal.ptyId)) await window.api.devinUnbind(terminal.ptyId);
   dispatch('agent_session_unbound', { tabId });
+  void saveLayout();
   showToast({ key: `devin-unbound-${tabId}`, message: 'Devin Cloud session disconnected' });
 }
 
@@ -2106,24 +2117,26 @@ function summarizeHookSetup(results) {
 // Ask which of several devin sessions to resume. Reuses the prompt modal
 // with a numbered list; the returned value is a session object so the
 // caller's ambiguity wording stays accurate.
-async function promptDevinSessionChoice(sessions) {
+async function promptDevinSessionChoice(sessions, label = 'Devin') {
   const lines = sessions.slice(0, 10).map((s, i) => {
     const title = s.title ? `"${s.title}"` : s.id;
     return `${i + 1}. ${title}\n   ${s.id}`;
   });
   const answer = await showPrompt(
-    'Resume Devin Session',
-    `Which session?\n\n${lines.join('\n')}\n\nEnter a number (or an exact session id):`,
+    `Resume ${label} Session`,
+    `Which session?\n\n${lines.join('\n')}\n\n0. Start a new session\nEnter a number (or an exact session id):`,
     '1',
   );
   if (!answer) return null;
   const trimmed = String(answer).trim();
-  const index = Number.parseInt(trimmed, 10);
+  if (trimmed === '0') return { id: null, fresh: true };
+  const exact = sessions.find((s) => s.id === trimmed);
+  if (exact) return exact;
+  const index = /^\d+$/.test(trimmed) ? Number(trimmed) : NaN;
   if (Number.isInteger(index) && index >= 1 && index <= Math.min(sessions.length, 10)) {
     return sessions[index - 1];
   }
-  const exact = sessions.find((s) => s.id === trimmed);
-  return exact || null;
+  return null;
 }
 
 async function reportHookSetup(projectPath) {
@@ -4356,6 +4369,10 @@ function sendToTerminal(text, tabId) {
   if (targetId === null) return;
   const t = tabs.get(targetId);
   if (!t) return;
+  if (t.launchState !== 'running') {
+    showToast({ key: 'terminal-not-running', message: 'This terminal is not ready. Open it and wait for startup before sending.' });
+    return;
+  }
 
   const hasExplicitText = typeof text === 'string';
   const focusState = getState();
@@ -4472,7 +4489,7 @@ function updateSendTarget() {
     if (t) {
       sendTarget.innerHTML = `${tabIcon('terminal')}<span>${escapeHtml(t.label)}</span>`;
       sendTarget.title = `Send destination: ${t.label}`;
-      sendBtn.disabled = false;
+      sendBtn.disabled = t.launchState !== 'running';
     }
   }
 }
@@ -4643,30 +4660,9 @@ async function revealInEditor(filePath, line, endLine) {
 }
 
 let suppressLayoutSave = false;
+let restoringTerminals = false;
 
-async function createTerminal(command, cwd, projectId, savedLabel, resumeSessionId) {
-  const terminal = new Terminal({
-    fontSize: 13,
-    fontFamily: PREVIEW_FONT,
-    theme: { background: '#1c1f24', foreground: '#c8ccd4', cursor: '#f0f2f5', selectionBackground: '#2e333b' },
-    cursorBlink: true,
-  });
-
-  const fitAddon = new FitAddon();
-  terminal.loadAddon(fitAddon);
-
-  // Web links addon: makes URLs in terminal output clickable.
-  // Custom handler routes localhost URLs to PM's browser tab and
-  // external URLs to the OS default browser.
-  terminal.loadAddon(new WebLinksAddon((event, uri) => {
-    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(uri);
-    if (isLocal) {
-      dispatch('open_browser', { url: uri });
-    } else {
-      window.api.openInOs(uri);
-    }
-  }));
-
+async function createTerminal(command, cwd, projectId, savedLabel, resumeSessionId, options = {}) {
   const termEl = document.createElement('div');
   termEl.className = 'terminal-instance';
   termEl.style.display = 'block';
@@ -4685,67 +4681,6 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     terminalParking.appendChild(termEl);
   }
 
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-  terminal.open(termEl);
-  // Skip GPU acquisition for terminals parked hidden for background
-  // projects — they get it from ensureWebglRenderer when first shown.
-  if (targetIsActive) ensureWebglRenderer(terminal);
-  fitAddon.fit();
-
-  // ターミナルのコピー機能（Electron は標準コンテキストメニューが出ないため自前で実装）
-  // - 右クリック: 選択範囲をコピー → 選択解除（Windows Terminal / PuTTY と同じ挙動）
-  // - Ctrl+Shift+C: 同上（VSCode / GNOME Terminal と同じ挙動）
-  function copyTerminalSelection() {
-    const selection = terminal.getSelection();
-    if (selection) {
-      window.api.clipboardWriteText(selection);
-      terminal.clearSelection();
-    }
-  }
-  termEl.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    copyTerminalSelection();
-  });
-
-  // Phase 5 S0: xterm key handling. PM only intercepts Ctrl+Shift+* keys
-  // in the terminal. All other keys (Ctrl+F, Ctrl+R, Ctrl+S, etc.) must
-  // reach the shell. The global document keydown handler dispatches the
-  // command; this handler just prevents xterm from consuming the key.
-  terminal.attachCustomKeyEventHandler((e) => {
-    if (e.ctrlKey && e.shiftKey) {
-      const ctx = new Set(['terminalFocus']);
-      const binding = matchBinding(e, ctx);
-      if (binding) return false; // don't pass to xterm/shell
-    }
-    return true; // pass to shell
-  });
-
-  const cols = terminal.cols;
-  const rows = terminal.rows;
-
-  let ptyId;
-  try {
-    ptyId = await window.api.ptyCreate({
-      command,
-      args: [],
-      cwd: cwd || undefined,
-      projectId: projectId || null,
-      cols,
-      rows,
-      resumeSessionId: resumeSessionId || undefined,
-    });
-  } catch (error) {
-    dropWebglRenderer(terminal);
-    terminal.dispose();
-    termEl.remove();
-    throw error;
-  }
-
-  terminal.onData((data) => {
-    window.api.ptyWrite(ptyId, data);
-  });
-
   const tabId = ++tabCounter;
   const label = savedLabel || command.replace('.exe', '');
   const tabEl = createMainTab({
@@ -4758,7 +4693,6 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
       onContext: (_v, x, y) => showTabContextMenu(x, y, { kind: 'terminal', tabId }),
     },
   });
-  tabEl.dataset.ptyId = String(ptyId);
 
   tabEl.draggable = true;
   tabEl.addEventListener('dragstart', (e) => {
@@ -4809,39 +4743,25 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
   if (ownerPaneEl?.tabBar) ownerPaneEl.tabBar.appendChild(tabEl);
   else tabBar.insertBefore(tabEl, newTabBtn);
 
-  tabs.set(tabId, {
-    id: tabId,
-    projectId,
-    terminal,
-    fitAddon,
-    ptyId,
-    termEl,
-    tabElement: tabEl,
-    command,
-    label,
-    cwd,
-    // Agent session this PTY was launched with. Persisted per tab so a
-    // restart resumes each tab on its own session. null until a hook /
-    // plugin payload reports one, or the resume prompt supplied one.
+  const t = {
+    id: tabId, projectId, command, cwd, label, termEl, tabElement: tabEl,
     resumeSessionId: resumeSessionId || null,
-    pinnedToBottom: true,
-    outputFollowRevision: 0,
-    userScrollActive: false,
+    devinSessionId: options.devinSessionId || null,
+    restored: Boolean(options.restored),
+    launchState: 'dormant', terminal: null, fitAddon: null, ptyId: null,
+    pinnedToBottom: true, outputFollowRevision: 0, userScrollActive: false,
+  };
+  t.launch = createTerminalLauncher({
+    start: (isCurrent) => startTerminalRuntime(t, isCurrent),
+    dispose: disposeTerminalRuntime,
+    onChange: (state, error) => {
+      t.launchState = state;
+      renderTerminalLaunchState(t, error);
+      updateSendTarget();
+    },
   });
-  try {
-    await window.api.ptyAttach(ptyId);
-  } catch (error) {
-    dispatch('agent_session_unbound', { tabId });
-    dispatch('terminal_clear_attention', { tabId });
-    tabs.delete(tabId);
-    window.api.ptyKill(ptyId);
-    dropWebglRenderer(terminal);
-    terminal.dispose();
-    termEl.remove();
-    tabEl.remove();
-    throw error;
-  }
-
+  tabs.set(tabId, t);
+  renderTerminalLaunchState(t);
   // B1: register the tab in a pane of its OWN project. For the active
   // project that is the currently focused pane; for background projects it
   // is the persisted pane state (so loadLayout restores stay per-project).
@@ -4867,88 +4787,298 @@ async function createTerminal(command, cwd, projectId, savedLabel, resumeSession
     registerBackgroundTabPane(projectId, tabId);
   }
 
-  // xterm onData also carries terminal-generated protocol replies such as
-  // focus-in (ESC [ I). Treat only actual keyboard, paste, and composition
-  // events as user input so opening a focused TUI tab cannot clear waiting.
-  terminal.onKey(({ key, domEvent }) => {
-    const isCopyShortcut = domEvent.ctrlKey && domEvent.shiftKey
-      && (domEvent.key === 'C' || domEvent.key === 'c');
-    if (key && !isCopyShortcut) clearTerminalWaitingForUserInput(tabId);
-  });
-  termEl.addEventListener('paste', () => clearTerminalWaitingForUserInput(tabId), true);
-  termEl.addEventListener('compositionend', (event) => {
-    if (event.data) clearTerminalWaitingForUserInput(tabId);
-  }, true);
+  if (options.deferStart) {
+    termEl.style.display = 'none';
+    tabEl.style.display = projectId === activeProjectId ? '' : 'none';
+  } else {
+    if (projectId === activeProjectId) switchTab(tabId);
+    else tabEl.style.display = 'none';
+    await ensureTerminalStarted(tabId);
+  }
+  if (!suppressLayoutSave) void saveLayout();
+  return tabId;
+}
 
-  // Devin 3000.4.16 emits the same semantic terminal notification as OSC 9
-  // and OSC 777. Register both and deduplicate them in the adapter.
-  registerDevinTerminalNotifications(terminal, command, (notification) => {
-    dispatch('agent_notification_received', {
-      tabId,
-      projectId,
-      ...notification,
+function renderTerminalLaunchState(t, error = null) {
+  t.tabElement.dataset.launchState = t.launchState;
+  if (!['dormant', 'starting', 'failed'].includes(t.launchState) || t.terminal) return;
+  const panel = document.createElement('div');
+  panel.className = 'terminal-launch-state';
+  panel.setAttribute('role', 'status');
+  const message = document.createElement('p');
+  message.textContent = t.launchState === 'failed'
+    ? `Could not start ${t.label}: ${error?.message || 'Unknown error'}`
+    : t.launchState === 'starting' ? `Starting ${t.label}…` : 'Open this tab to start its terminal.';
+  panel.appendChild(message);
+  if (t.launchState === 'failed') {
+    const retry = document.createElement('button');
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => { void ensureTerminalStarted(t.id, { retry: true }).catch(() => {}); });
+    panel.appendChild(retry);
+  }
+  t.termEl.replaceChildren(panel);
+}
+
+function disposeTerminalRuntime(resource) {
+  if (!resource) return;
+  resource.abort?.abort();
+  if (Number.isInteger(resource.ptyId)) {
+    const buffer = ptyOutputBuffers.get(resource.ptyId);
+    if (buffer?.timer) clearTimeout(buffer.timer);
+    ptyOutputBuffers.delete(resource.ptyId);
+    void window.api.devinUnbind(resource.ptyId).catch(() => {});
+    void window.api.ptyKill(resource.ptyId).catch(() => {});
+  }
+  if (resource.terminal) {
+    dropWebglRenderer(resource.terminal);
+    resource.terminal.dispose();
+  }
+}
+
+function ensureTerminalStarted(tabId, options) {
+  const t = tabs.get(tabId);
+  if (!t) return Promise.resolve(null);
+  return t.launch.ensure(options).then((resource) => {
+    if (resource && tabs.get(tabId) === t && isTerminalVisible(t)) {
+      resizeTerminalToContainer(t);
+      if (activeTabId === tabId) t.terminal?.focus();
+    }
+    return resource;
+  });
+}
+
+let visibleTerminalStartFrame = null;
+function requestVisibleTerminalStarts() {
+  if (restoringTerminals || visibleTerminalStartFrame !== null) return;
+  visibleTerminalStartFrame = requestAnimationFrame(() => {
+    visibleTerminalStartFrame = null;
+    if (restoringTerminals) return;
+    for (const t of tabs.values()) {
+      if (t.launchState === 'dormant' && isTerminalVisible(t)) {
+        void ensureTerminalStarted(t.id).catch(() => {});
+      }
+    }
+  });
+}
+
+// A missing per-tab ID is never silently replaced with another tab's latest
+// conversation. Legacy tabs resolve their identity only when first opened.
+async function resolveDeferredSession(t, isCurrent) {
+  if (!t.restored || t.resumeSessionId || t.devinSessionId) return;
+  const result = deferredSessionQueue.then(() => resolveDeferredSessionNow(t, isCurrent));
+  deferredSessionQueue = result.catch(() => {});
+  return result;
+}
+
+let deferredSessionQueue = Promise.resolve();
+async function resolveDeferredSessionNow(t, isCurrent) {
+  if (!isCurrent()) return;
+  const name = normalizeRendererCommand(t.command);
+  if (!RESUME_SUPPORTED.has(name)) return;
+  let candidates = [];
+  if (name === 'devin') {
+    const found = await window.api.devinLatestSession(t.cwd || projects.get(t.projectId)?.path);
+    candidates = found?.ok ? found.all || [] : [];
+  } else {
+    const found = await window.api.sessionsList(t.cwd || projects.get(t.projectId)?.path, [name]);
+    candidates = found?.ok ? found.sessions.map((s) => ({ id: s.sessionId, title: s.title })) : [];
+  }
+  if (!isCurrent()) return;
+  if (candidates.length) {
+    const chosen = await promptDevinSessionChoice(candidates, t.label);
+    if (!isCurrent()) return;
+    if (!chosen) throw new Error('Session selection cancelled. Retry to select a session.');
+    t.resumeSessionId = chosen.id;
+    t.restored = false;
+    void saveLayout();
+    return;
+  }
+  const fresh = await showConfirm('Session identity unavailable',
+    `No saved session ID is available for ${t.label}. Start a new session?`);
+  if (!isCurrent()) return;
+  if (!fresh) throw new Error('No session was started. Retry to select or start a session.');
+  t.restored = false;
+  void saveLayout();
+}
+
+async function startTerminalRuntime(t, isCurrent) {
+  await resolveDeferredSession(t, isCurrent);
+  if (!isCurrent()) return null;
+  const { id: tabId, command, cwd, projectId, termEl } = t;
+  const resource = { terminal: null, fitAddon: null, ptyId: null, abort: new AbortController() };
+  const { abort } = resource;
+  try {
+    const terminal = new Terminal({
+      fontSize: 13,
+      fontFamily: PREVIEW_FONT,
+      theme: { background: '#1c1f24', foreground: '#c8ccd4', cursor: '#f0f2f5', selectionBackground: '#2e333b' },
+      cursorBlink: true,
+      disableStdin: true,
     });
-  });
 
-  // File path link provider: detect file paths (absolute or relative) with
-  // optional line/column numbers in terminal output and make them clickable.
-  // Clicking opens the file in PM's editor or preview.
-  registerFilePathLinkProvider(terminal, { cwd, projectId });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
 
-  function finishUserScroll() {
-    requestAnimationFrame(() => {
+    // Web links addon: makes URLs in terminal output clickable.
+    // Custom handler routes localhost URLs to PM's browser tab and
+    // external URLs to the OS default browser.
+    terminal.loadAddon(new WebLinksAddon((event, uri) => {
+      const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(uri);
+      if (isLocal) {
+        dispatch('open_browser', { url: uri });
+      } else {
+        window.api.openInOs(uri);
+      }
+    }));
+
+    resource.terminal = terminal;
+    resource.fitAddon = fitAddon;
+    termEl.replaceChildren();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    if (!isCurrent()) return resource;
+    terminal.open(termEl);
+    // Skip GPU acquisition for terminals parked hidden for background
+    // projects — they get it from ensureWebglRenderer when first shown.
+    if (isTerminalVisible(t)) ensureWebglRenderer(terminal);
+    fitAddon.fit();
+
+    // ターミナルのコピー機能（Electron は標準コンテキストメニューが出ないため自前で実装）
+    // - 右クリック: 選択範囲をコピー → 選択解除（Windows Terminal / PuTTY と同じ挙動）
+    // - Ctrl+Shift+C: 同上（VSCode / GNOME Terminal と同じ挙動）
+    function copyTerminalSelection() {
+      const selection = terminal.getSelection();
+      if (selection) {
+        window.api.clipboardWriteText(selection);
+        terminal.clearSelection();
+      }
+    }
+    termEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      copyTerminalSelection();
+    }, { signal: abort.signal });
+
+    // Phase 5 S0: xterm key handling. PM only intercepts Ctrl+Shift+* keys
+    // in the terminal. All other keys (Ctrl+F, Ctrl+R, Ctrl+S, etc.) must
+    // reach the shell. The global document keydown handler dispatches the
+    // command; this handler just prevents xterm from consuming the key.
+    terminal.attachCustomKeyEventHandler((e) => {
+      if (e.ctrlKey && e.shiftKey) {
+        const ctx = new Set(['terminalFocus']);
+        const binding = matchBinding(e, ctx);
+        if (binding) return false; // don't pass to xterm/shell
+      }
+      return true; // pass to shell
+    });
+
+    const ptyId = await window.api.ptyCreate({
+      command, args: [], cwd: cwd || undefined, projectId: projectId || null,
+      cols: terminal.cols, rows: terminal.rows,
+      resumeSessionId: t.resumeSessionId || t.devinSessionId || undefined,
+    });
+    resource.ptyId = ptyId;
+    if (!isCurrent()) return resource;
+    Object.assign(t, { terminal, fitAddon, ptyId });
+    t.tabElement.dataset.ptyId = String(ptyId);
+    terminal.onData((data) => {
+      if (tabs.get(tabId) === t && t.ptyId === ptyId) window.api.ptyWrite(ptyId, data);
+    });
+    // xterm onData also carries terminal-generated protocol replies such as
+    // focus-in (ESC [ I). Treat only actual keyboard, paste, and composition
+    // events as user input so opening a focused TUI tab cannot clear waiting.
+    terminal.onKey(({ key, domEvent }) => {
+      const isCopyShortcut = domEvent.ctrlKey && domEvent.shiftKey
+        && (domEvent.key === 'C' || domEvent.key === 'c');
+      if (key && !isCopyShortcut) clearTerminalWaitingForUserInput(tabId);
+    });
+    termEl.addEventListener('paste', () => clearTerminalWaitingForUserInput(tabId), { capture: true, signal: abort.signal });
+    termEl.addEventListener('compositionend', (event) => {
+      if (event.data) clearTerminalWaitingForUserInput(tabId);
+    }, { capture: true, signal: abort.signal });
+
+    // Devin 3000.4.16 emits the same semantic terminal notification as OSC 9
+    // and OSC 777. Register both and deduplicate them in the adapter.
+    registerDevinTerminalNotifications(terminal, command, (notification) => {
+      dispatch('agent_notification_received', {
+        tabId,
+        projectId,
+        ...notification,
+      });
+    });
+
+    // File path link provider: detect file paths (absolute or relative) with
+    // optional line/column numbers in terminal output and make them clickable.
+    // Clicking opens the file in PM's editor or preview.
+    registerFilePathLinkProvider(terminal, { cwd, projectId });
+
+    function finishUserScroll() {
+      requestAnimationFrame(() => {
+        const current = tabs.get(tabId);
+        if (!current) return;
+        updateTerminalScrollPosition(current, terminal.buffer.active);
+        current.userScrollActive = false;
+      });
+    }
+
+    // xterm's scroll event also fires for content-driven movement. Only use it
+    // while a wheel or scrollbar interaction proves that the user is scrolling.
+    terminal.onScroll(() => {
+      const current = tabs.get(tabId);
+      if (current) updateTerminalScrollPosition(current, terminal.buffer.active);
+    });
+
+    // Invalidate already queued write callbacks before xterm processes a user
+    // scroll. Without this, an older callback can pull the viewport back down.
+    termEl.addEventListener('wheel', (event) => {
       const current = tabs.get(tabId);
       if (!current) return;
-      updateTerminalScrollPosition(current, terminal.buffer.active);
-      current.userScrollActive = false;
-    });
-  }
-
-  // xterm's scroll event also fires for content-driven movement. Only use it
-  // while a wheel or scrollbar interaction proves that the user is scrolling.
-  terminal.onScroll(() => {
-    const current = tabs.get(tabId);
-    if (current) updateTerminalScrollPosition(current, terminal.buffer.active);
-  });
-
-  // Invalidate already queued write callbacks before xterm processes a user
-  // scroll. Without this, an older callback can pull the viewport back down.
-  termEl.addEventListener('wheel', (event) => {
-    const current = tabs.get(tabId);
-    if (!current) return;
-    invalidateTerminalFollow(current);
-    current.userScrollActive = true;
-    if (event.deltaY < 0) current.pinnedToBottom = false;
-    finishUserScroll();
-  }, { capture: true, passive: true });
-
-  termEl.addEventListener('pointerdown', (event) => {
-    if (!(event.target instanceof Element) || !event.target.closest('.xterm-viewport')) return;
-    const current = tabs.get(tabId);
-    if (!current) return;
-    invalidateTerminalFollow(current);
-    current.userScrollActive = true;
-    current.pinnedToBottom = false;
-
-    const finishPointerScroll = (pointerEvent) => {
-      if (pointerEvent.pointerId !== event.pointerId) return;
-      window.removeEventListener('pointerup', finishPointerScroll, true);
-      window.removeEventListener('pointercancel', finishPointerScroll, true);
+      invalidateTerminalFollow(current);
+      current.userScrollActive = true;
+      if (event.deltaY < 0) current.pinnedToBottom = false;
       finishUserScroll();
-    };
-    window.addEventListener('pointerup', finishPointerScroll, true);
-    window.addEventListener('pointercancel', finishPointerScroll, true);
-  }, true);
+    }, { capture: true, passive: true, signal: abort.signal });
 
-  // Only switch to new tab if it belongs to the active project
-  if (projectId === activeProjectId) {
-    switchTab(tabId);
-  } else {
-    // Hide tab element since it's not in the active project
-    tabEl.style.display = 'none';
+    termEl.addEventListener('pointerdown', (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.xterm-viewport')) return;
+      const current = tabs.get(tabId);
+      if (!current) return;
+      invalidateTerminalFollow(current);
+      current.userScrollActive = true;
+      current.pinnedToBottom = false;
+
+      const finishPointerScroll = (pointerEvent) => {
+        if (pointerEvent.pointerId !== event.pointerId) return;
+        window.removeEventListener('pointerup', finishPointerScroll, { capture: true, signal: abort.signal });
+        window.removeEventListener('pointercancel', finishPointerScroll, { capture: true, signal: abort.signal });
+        finishUserScroll();
+      };
+      window.addEventListener('pointerup', finishPointerScroll, { capture: true, signal: abort.signal });
+      window.addEventListener('pointercancel', finishPointerScroll, { capture: true, signal: abort.signal });
+    }, { capture: true, signal: abort.signal });
+
+    terminal.options.disableStdin = false;
+    await window.api.ptyAttach(ptyId);
+    if (!isCurrent()) return resource;
+    if (t.devinSessionId) {
+      try {
+        const result = await window.api.devinBind(ptyId, t.devinSessionId);
+        if (result?.ok && isCurrent()) dispatch('agent_session_bound', { tabId, provider: 'devin', sessionId: t.devinSessionId });
+      } catch (error) {
+        console.warn('[terminal] Could not restore Devin monitoring:', error);
+      }
+    } else if (normalizeRendererCommand(command) === 'devin' && t.resumeSessionId) {
+      dispatch('agent_session_bound', { tabId, provider: 'devin', sessionId: t.resumeSessionId });
+    }
+    if (isCurrent()) void saveLayout();
+    return resource;
+  } catch (error) {
+    disposeTerminalRuntime(resource);
+    if (isCurrent()) {
+      t.terminal = null; t.fitAddon = null; t.ptyId = null;
+      delete t.tabElement.dataset.ptyId;
+    }
+    throw error;
   }
-  if (!suppressLayoutSave) saveLayout();
-  return tabId;
 }
 
 function showProjectTabs(projectId) {
@@ -5435,7 +5565,7 @@ function renderPanes() {
         const term = tabs.get(p.activeTabId);
         if (term && term.termEl.style.display !== 'none') {
           switchTab(p.activeTabId, { focus: false });
-          term.terminal.focus();
+          term.terminal?.focus();
         }
       }
     });
@@ -5886,6 +6016,7 @@ function switchTab(tabId, { focus = true } = {}) {
   // Wait until display/layout changes have settled before measuring.
   requestAnimationFrame(() => {
     if (activeTabId !== tabId || t.termEl.style.display === 'none') return;
+    requestVisibleTerminalStarts();
     const shouldFollow = t.pinnedToBottom;
     if (!resizeTerminalToContainer(t)) return;
     t.pinnedToBottom = shouldFollow;
@@ -5895,6 +6026,7 @@ function switchTab(tabId, { focus = true } = {}) {
 }
 
 function resizeTerminalToContainer(t) {
+  if (!t.terminal || !t.fitAddon || !Number.isInteger(t.ptyId)) return false;
   const rect = t.termEl.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
   ensureWebglRenderer(t.terminal);
@@ -5926,10 +6058,7 @@ function closeTerminal(tabId) {
   if (pendingOutput?.timer) clearTimeout(pendingOutput.timer);
   ptyOutputBuffers.delete(t.ptyId);
   if (t.scrollRafId != null) cancelAnimationFrame(t.scrollRafId);
-  void window.api.devinUnbind(t.ptyId);
-  window.api.ptyKill(t.ptyId);
-  dropWebglRenderer(t.terminal);
-  t.terminal.dispose();
+  void t.launch.close();
   t.termEl.remove();
   t.tabElement.remove();
 dispatch('agent_session_unbound', { tabId });
@@ -6564,11 +6693,15 @@ terminalContainer.addEventListener('drop', (e) => {
   e.stopPropagation();
   const paths = getDroppedFilePaths(e);
   if (paths.length === 0) return;
+  if (target.terminal.launchState !== 'running') {
+    showToast({ key: 'terminal-drop-not-ready', message: 'Wait for the terminal to start before dropping files.' });
+    return;
+  }
   switchTab(target.tabId, { focus: false });
   const quotedPaths = paths.map((filePath) => quotePathForCommand(filePath, target.terminal.command));
-  target.terminal.terminal.paste(quotedPaths.join(' '));
+  target.terminal.terminal?.paste(quotedPaths.join(' '));
   clearTerminalWaitingForUserInput(target.tabId);
-  target.terminal.terminal.focus();
+  target.terminal.terminal?.focus();
 });
 
 // File tree is explicitly a no-op drop target. Prevent Chromium's default file
@@ -6606,7 +6739,6 @@ async function saveLayout() {
   // Members are stored as indices into the saved `tabs` array (stable
   // across restarts — tabIds are regenerated on startup).
 const tabsOut = Array.from(tabs.values()).map(t => {
-    const binding = getTerminalAgentBinding(t.id);
     return {
       command: t.command,
       label: t.label,
@@ -6618,10 +6750,8 @@ const tabsOut = Array.from(tabs.values()).map(t => {
       // collided onto the same id. Devin's cloud id stays separate so
       // `devin -r` + silent re-bind keeps working.
       ...(t.resumeSessionId ? { resumeSessionId: t.resumeSessionId } : {}),
-      // Devin cloud session link ? restored with `devin -r` + silent re-bind.
-      ...(binding?.provider === 'devin' && binding.sessionId
-        ? { devinSessionId: binding.sessionId }
-        : {}),
+      // Keep the optional cloud-monitor binding even before the tab starts.
+      ...(t.devinSessionId ? { devinSessionId: t.devinSessionId } : {}),
     };
   });
   const tabIndex = new Map();
@@ -6713,57 +6843,11 @@ const tabsOut = Array.from(tabs.values()).map(t => {
   }
 }
 
-// Devin publishes no hook, so a devin tab can only learn its session id
-// from `devin list --format json` (see src/main/devin-session-index.cjs).
-// Layout restore needs one query per project, not per tab: the CLI is a
-// process launch and a 20-tab layout would otherwise spawn 20 of them.
-//
-// Returns Map<projectId, Array<{id,title}>> holding that project's
-// sessions, newest first. Each entry is handed out at most once by
-// takeDevinResumeCandidate, so two reopening devin tabs get two different
-// sessions rather than both attaching to the same one.
-//
-// Assigning by recency is a heuristic, not a guarantee: the index exposes
-// no per-tab identity. Newest-first is the best available ordering, and it
-// only ever applies to tabs that would otherwise start fresh.
-async function buildDevinResumePool(tabsToRestore) {
-  const pool = new Map();
-  const needsLookup = new Set();
-  for (const tab of tabsToRestore || []) {
-    if (tab.resumeSessionId || tab.devinSessionId) continue;
-    if (normalizeRendererCommand(tab.command) !== 'devin') continue;
-    const project = projects.get(tab.projectId);
-    if (project?.path) needsLookup.add(tab.projectId);
-  }
-  if (needsLookup.size === 0) return pool;
-  await Promise.all([...needsLookup].map(async (projectId) => {
-    const projectPath = projects.get(projectId)?.path;
-    if (!projectPath) return;
-    try {
-      const found = await window.api.devinLatestSession(projectPath);
-      if (found?.ok && Array.isArray(found.all) && found.all.length > 0) {
-        pool.set(projectId, found.all.map((s) => ({ id: s.id, title: s.title })));
-      }
-    } catch {
-      // CLI missing, unauthenticated, or slow: those tabs start fresh,
-      // which is the pre-existing behaviour.
-    }
-  }));
-  return pool;
-}
-
-// Hand out one pooled session per tab and remove it, so a second devin tab
-// in the same project cannot resume the session the first one just claimed.
-function takeDevinResumeCandidate(pool, projectId) {
-  const list = pool.get(projectId);
-  if (!Array.isArray(list) || list.length === 0) return null;
-  return list.shift();
-}
-
 async function loadLayout() {
   const layout = await window.api.layoutLoad();
   if (!layout) return;
   suppressLayoutSave = true;
+  restoringTerminals = true;
   try {
     // ユーザー設定で既知のツールの送信方式を上書き（未指定はデフォルトを使う）
     if (layout.terminalSendModes && typeof layout.terminalSendModes === 'object') {
@@ -6787,41 +6871,10 @@ async function loadLayout() {
     }
     const idMap = [];
     if (layout.tabs && layout.tabs.length > 0) {
-      const lastSessions = loadLastSessions();
-      // Devin tabs saved before per-tab resume existed carry no id, and
-      // devin has no hook to supply one later. Query the CLI index once
-      // per affected project and hand each reopening devin tab a distinct
-      // session instead of letting them all start fresh.
-      const devinResumePool = await buildDevinResumePool(layout.tabs);
       for (const tab of layout.tabs) {
         try {
-          // Per-tab id first (written by saveLayout), then devin's cloud id,
-          // then the project+command index as a fallback for tabs saved
-          // before per-tab persistence existed.
-          const tracked = !tab.devinSessionId && !tab.resumeSessionId && tab.projectId && tab.command
-            ? lastSessions[`${tab.projectId}:${normalizeRendererCommand(tab.command)}`]?.sessionId
-            : null;
-          // Consume a pooled devin session only when nothing better exists.
-          const pooled = (!tab.resumeSessionId && !tab.devinSessionId && !tracked
-            && normalizeRendererCommand(tab.command) === 'devin')
-            ? takeDevinResumeCandidate(devinResumePool, tab.projectId)
-            : null;
-          const resumeId = tab.resumeSessionId || tab.devinSessionId || tracked || pooled?.id || null;
-          const args = resumeId ? { ...tab, resumeSessionId: resumeId } : tab;
-          const newId = await dispatch('create_terminal', args);
-          idMap.push(newId);
-          if (tab.devinSessionId && newId !== null && tabs.has(newId)) {
-            try {
-              const result = await window.api.devinBind(tabs.get(newId).ptyId, tab.devinSessionId);
-              if (result?.ok) {
-                dispatch('agent_session_bound', {
-                  tabId: newId,
-                  provider: 'devin',
-                  sessionId: tab.devinSessionId,
-                });
-              }
-            } catch {}
-          }
+          idMap.push(await createTerminal(tab.command, tab.cwd || projects.get(tab.projectId)?.path, tab.projectId,
+            tab.label, tab.resumeSessionId, { deferStart: true, restored: true, devinSessionId: tab.devinSessionId }));
         } catch (error) {
           console.error('[layout] Failed to restore terminal tab:', error);
           idMap.push(null);
@@ -6834,6 +6887,8 @@ async function loadLayout() {
     }
   } finally {
     suppressLayoutSave = false;
+    restoringTerminals = false;
+    requestVisibleTerminalStarts();
     await saveLayout();
   }
 }
@@ -7183,6 +7238,7 @@ register('terminal_copy', () => {
   if (activeTabId === null) return;
   const t = tabs.get(activeTabId);
   if (!t) return;
+  if (!t.terminal) return;
   const selection = t.terminal.getSelection();
   if (selection) {
     window.api.clipboardWriteText(selection);
@@ -7194,7 +7250,7 @@ register('terminal_select_all', () => {
   if (activeTabId === null) return;
   const t = tabs.get(activeTabId);
   if (!t) return;
-  t.terminal.selectAll();
+  t.terminal?.selectAll();
 });
 
 register('terminal_paste_image', async () => {
@@ -7539,6 +7595,7 @@ function showOsNotification({ tabId, projectId, kind, source, reason, title: det
 }
 
 window.api.onDevinMonitorError(({ ptyId, sessionId, message }) => {
+  if (!Number.isInteger(ptyId)) return;
   const tab = Array.from(tabs.values()).find((candidate) => candidate.ptyId === ptyId);
   if (!tab) return;
   showToast({
@@ -7615,6 +7672,7 @@ register('agent_notification_received', ({ tabId, projectId, kind, eventType, so
 register('agent_request_attention', ({
   ptyId, projectId, kind, requestedPriority, title, summary, sessionId, agentDeclaredBlocking,
 }) => {
+  if (!Number.isInteger(ptyId)) return { ok: false, error: 'That terminal is not running.' };
   let tabId = null;
   for (const [candidate, terminal] of tabs) {
     if (terminal.ptyId === ptyId) { tabId = candidate; break; }

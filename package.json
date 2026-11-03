@@ -1,6 +1,6 @@
 {
   "name": "project-mixer",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "VSCode を 5〜8 枚開かなくて済むようにするデスクトップアプリ",
   "main": "main.js",
   "engines": {
@@ -14,7 +14,7 @@
     "build": "node build.cjs",
     "build:renderer": "node build.cjs",
     "build:renderer:watch": "node build.cjs --watch",
-    "test": "npm run test:phase0 && npm run test:phase1 && npm run test:phase2 && npm run test:phase2.5 && npm run test:phase3 && npm run test:phase4 && npm run test:phase5 && npm run test:codemirror && npm run test:agent-notifications && npm run test:codex-notify && npm run test:devin-notifications && npm run test:refactor-r0 && npm run test:refactor-r2 && npm run test:refactor-r4 && npm run test:phase8 && npm run test:terminal-webgl && npm run test:attention && npm run test:session-history && npm run test:preview-guard && npm run test:devin-lifecycle && npm run test:hook-routing && npm run test:devin-hook-setup",
+    "test": "npm run test:phase0 && npm run test:phase1 && npm run test:phase2 && npm run test:phase2.5 && npm run test:phase3 && npm run test:phase4 && npm run test:phase5 && npm run test:codemirror && npm run test:agent-notifications && npm run test:codex-notify && npm run test:devin-notifications && npm run test:refactor-r0 && npm run test:refactor-r2 && npm run test:refactor-r4 && npm run test:phase8 && npm run test:terminal-webgl && npm run test:attention && npm run test:session-history && npm run test:preview-guard && npm run test:terminal-launch && npm run test:devin-lifecycle && npm run test:hook-routing && npm run test:devin-hook-setup",
     "test:phase0": "node --test test/hook-settings.test.cjs",
     "test:phase1": "node --test test/phase1.test.cjs",
     "test:phase2": "node --test test/phase2.test.cjs",
@@ -25,6 +25,9 @@
     "test:codemirror": "node --test test/codemirror.test.cjs",
     "test:agent-notifications": "node --test test/agent-notifications.test.cjs",
     "test:devin-notifications": "node --test test/devin-session-monitor.test.cjs test/devin-terminal-notifications.test.cjs test/devin-terminal-signal-probe.test.cjs test/devin-session-index.test.cjs",
+    "test:devin-lifecycle": "node --test test/devin-lifecycle-mapper.test.cjs",
+    "test:hook-routing": "node --test test/hook-routing.test.cjs",
+    "test:devin-hook-setup": "node --test test/devin-hook-setup.test.cjs",
     "test:codex-notify": "node --test test/codex-notify.test.cjs test/integration-probe.test.cjs",
     "test:refactor-r0": "node --test test/refactor-r0.test.cjs",
     "test:refactor-r2": "node --test test/refactor-r2.test.cjs",
@@ -50,9 +53,7 @@
     "test:attention": "node --test test/attention-mapper.test.cjs test/attention-store.test.cjs test/attention-policy.test.cjs test/attention-provenance.test.cjs test/agent-state-reducer.test.cjs test/attention-request.test.cjs test/attention-wiring.test.cjs test/attention-single-writer.test.cjs test/attention-inbox-ui.test.cjs test/attention-surface-wiring.test.cjs test/attention-inbox-live-regressions.test.cjs",
     "test:session-history": "node --test test/session-history.test.cjs",
     "test:preview-guard": "node --test test/preview-agent-guard.test.cjs",
-    "test:devin-lifecycle": "node --test test/devin-lifecycle-mapper.test.cjs",
-    "test:hook-routing": "node --test test/hook-routing.test.cjs",
-    "test:devin-hook-setup": "node --test test/devin-hook-setup.test.cjs"
+    "test:terminal-launch": "node --test test/terminal-launch.test.cjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",

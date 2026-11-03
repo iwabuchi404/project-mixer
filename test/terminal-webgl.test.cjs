@@ -67,7 +67,7 @@ test('every path that changes terminal visibility re-syncs the pool', () => {
 test('terminal teardown drops pool bookkeeping before disposing', () => {
   const src = renderer();
   const disposals = [...src.matchAll(/([\s\S]{0,120}?)t?\.?terminal\.dispose\(\);/g)];
-  assert.ok(disposals.length >= 3, 'expected every terminal.dispose() call site');
+  assert.equal(disposals.length, 1, 'runtime disposal is centralized for close, remove, failed start and cancellation');
   for (const [match] of disposals) {
     assert.match(match, /dropWebglRenderer\(/, `dropWebglRenderer missing before: ${match.trim()}`);
   }
