@@ -212,6 +212,8 @@ const newTabBtn = document.getElementById('new-tab-btn');
 const paneLayoutBtn = document.getElementById('pane-layout-btn');
 const paneLayoutLabel = document.getElementById('pane-layout-label-text');
 const layoutMenu = document.getElementById('layout-menu');
+// (destination dropdown removed: quick-send footers made the pin chip and
+// its menu obsolete; #send-target is a passive follow-focus label now)
 const editorPane = document.getElementById('editor-pane');
 const scratchEditorMount = document.getElementById('scratch-editor-mount');
 const fileEditorPane = document.getElementById('file-editor-pane');
@@ -4361,7 +4363,7 @@ function sendTargetTabId() {
   return activeTabId;
 }
 
-function sendToTerminal(text, tabId) {
+function sendToTerminal(text, tabId, raw = false) {
   if (tabId !== undefined) {
     switchTab(tabId);
   }
@@ -4386,7 +4388,9 @@ function sendToTerminal(text, tabId) {
   if (!contentToSend) return;
 
   // 3.1 push: append focus context to the message
-  if (pushFocusCheckbox.checked) {
+  // raw=true (quick-send footer) sends EXACTLY what the user typed — the
+  // footer is a typing surface (shell `npm test` must not gain metadata).
+  if (!raw && pushFocusCheckbox.checked) {
     const attention = resolveAttentionFile(focusState, previewFiles);
     const ctx = buildPushFocusContext({
       project: projects.get(focusState.activeProjectId),
@@ -4399,12 +4403,14 @@ function sendToTerminal(text, tabId) {
       contentToSend = contentToSend + '\n' + ctx;
     }
   }
-  // B1 / D24: visible pane composition rides along on every send when the
-  // main area is split (independent of the context checkbox — it describes
-  // the layout, not the file focus).
-  const paneCtx = buildPaneContextSummary();
-  if (paneCtx) {
-    contentToSend = contentToSend + '\n' + paneCtx;
+  // B1 / D24: visible pane composition rides along on every scratch send
+  // when the main area is split (independent of the context checkbox — it
+  // describes the layout, not the file focus).
+  if (!raw) {
+    const paneCtx = buildPaneContextSummary();
+    if (paneCtx) {
+      contentToSend = contentToSend + '\n' + paneCtx;
+    }
   }
 
   const lineCount = contentToSend.split('\n').length;
@@ -4440,6 +4446,7 @@ function sendToTerminal(text, tabId) {
     window.api.ptyWrite(t.ptyId, '\r');
   }
   clearTerminalWaitingForUserInput(targetId);
+  flashScratchTargetPane(targetId);
 
   if (f?.isScratch && !hasExplicitText) {
     lastSentContent = f.content;
@@ -4447,9 +4454,10 @@ function sendToTerminal(text, tabId) {
     f.content = '';
     setScratchDoc('');
     setState({ scratchContent: '', cursorLine: null, selection: null });
+    const sentPaneNo = paneNumberOf(targetId);
     showToast({
       key: 'send-to-terminal',
-      message: `Sent to ${t.label}`,
+      message: sentPaneNo ? `Sent to ${t.label} (pane ${sentPaneNo})` : `Sent to ${t.label}`,
       detail: pushFocusCheckbox.checked ? 'context attached' : '',
       duration: 4000,
       actionLabel: 'Undo',
@@ -4479,19 +4487,110 @@ function undoLastSend() {
 sendBtn.addEventListener('click', () => dispatch('send_to_terminal', {}));
 pushFocusCheckbox.addEventListener('change', () => saveLayout());
 
+function paneNumberOf(tabId) {
+  if (panes.length <= 1) return null;
+  const pane = paneOfTab(tabId);
+  if (!pane) return null;
+  const index = panes.findIndex((p) => p.id === pane.id);
+  return index === -1 ? null : index + 1;
+}
+
 function updateSendTarget() {
   const targetId = sendTargetTabId();
-  if (targetId === null) {
-    sendTarget.innerHTML = `${tabIcon('terminal')}<span>no terminal</span>`;
+  const t = targetId !== null ? tabs.get(targetId) : null;
+  if (!t) {
+    sendTarget.textContent = 'no terminal';
+    sendTarget.title = 'Open a terminal to enable send';
     sendBtn.disabled = true;
   } else {
-    const t = tabs.get(targetId);
-    if (t) {
-      sendTarget.innerHTML = `${tabIcon('terminal')}<span>${escapeHtml(t.label)}</span>`;
-      sendTarget.title = `Send destination: ${t.label}`;
-      sendBtn.disabled = t.launchState !== 'running';
-    }
+    const paneNo = paneNumberOf(t.id);
+    sendTarget.textContent = paneNo ? `${t.label} · pane ${paneNo}` : t.label;
+    sendTarget.title = 'Send destination (follows pane focus)';
+    sendBtn.disabled = t.launchState !== 'running';
   }
+}
+
+// ---- Quick send (per-tab composer in each pane footer) --------------------
+// Each pane footer hosts the composer of its ACTIVE terminal tab. Drafts and
+// send history live per tab, so switching tabs swaps the input content and
+// the destination is spatially obvious: you type where you want to send.
+const quickSendStates = new Map(); // tabId -> { draft, history: string[], histIndex }
+function quickSendState(tabId) {
+  let s = quickSendStates.get(tabId);
+  if (!s) {
+    s = { draft: '', history: [], histIndex: -1 };
+    quickSendStates.set(tabId, s);
+  }
+  return s;
+}
+
+function autosizeQuickSend(textarea) {
+  const lineHeight = 18;
+  const maxHeight = lineHeight * 5 + 8;
+  textarea.style.height = 'auto';
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
+}
+
+function syncQuickSendBars() {
+  paneEls.forEach((els, paneId) => {
+    const pane = getPane(paneId);
+    const textarea = els.quickSend?.querySelector('textarea');
+    if (!pane || !textarea) return;
+    const tabId = pane.activeTabId;
+    const t = tabId !== null ? tabs.get(tabId) : null;
+    if (!t) {
+      textarea.value = '';
+      textarea.disabled = true;
+      textarea.placeholder = '';
+      return;
+    }
+    textarea.disabled = false;
+    textarea.dataset.tabId = tabId;
+    textarea.placeholder = `send to ${t.label}`;
+    const s = quickSendState(tabId);
+    if (textarea.value !== s.draft) {
+      textarea.value = s.draft;
+      autosizeQuickSend(textarea);
+    }
+  });
+}
+
+function sendQuickSend(textarea) {
+  const paneId = Number(textarea.closest('.terminal-pane-item')?.dataset.paneId);
+  const pane = getPane(paneId);
+  const tabId = pane ? pane.activeTabId : null;
+  const text = textarea.value.replace(/\s+$/, '');
+  if (!pane || tabId === null || !tabs.has(tabId) || !text) return;
+  // Unstarted terminal: let send_to_terminal surface its toast, but keep the
+  // draft — the user's text must not vanish into a dead session.
+  if (tabs.get(tabId).launchState !== 'running') {
+    void dispatch('send_to_terminal', { text, tabId, raw: true }).catch(() => {});
+    return;
+  }
+  const s = quickSendState(tabId);
+  if (s.history[s.history.length - 1] !== text) s.history.push(text);
+  if (s.history.length > 100) s.history.shift();
+  s.histIndex = -1;
+  s.draft = '';
+  textarea.value = '';
+  autosizeQuickSend(textarea);
+  void dispatch('send_to_terminal', { text, tabId, raw: true })
+    .then(() => textarea.focus())
+    .catch(() => textarea.focus());
+}
+
+// Send feedback: brief bottom-edge pulse on the receiving pane (the flash
+// replaces the old full-box outline work — footer composer made the
+// destination spatially obvious, so only momentary feedback remains).
+function flashScratchTargetPane(targetId) {
+  const pane = paneOfTab(targetId);
+  const root = pane ? paneEls.get(pane.id)?.root : null;
+  if (!root) return;
+  root.classList.remove('pane-sent-flash');
+  void root.offsetWidth;
+  root.classList.add('pane-sent-flash');
+  setTimeout(() => root.classList.remove('pane-sent-flash'), 900);
 }
 
 // ============================================================
@@ -5546,8 +5645,59 @@ function renderPanes() {
     const body = document.createElement('div');
     body.className = 'terminal-pane-body';
     root.appendChild(body);
+    // Per-tab quick-send footer: the composer of this pane's ACTIVE terminal.
+    const quickSend = document.createElement('div');
+    quickSend.className = 'quick-send';
+    const quickSendInput = document.createElement('textarea');
+    quickSendInput.rows = 1;
+    quickSendInput.spellcheck = false;
+    quickSendInput.setAttribute('aria-label', "Send to this pane's terminal");
+    // Pane mousedown focuses the terminal — typing surface must keep focus.
+    quickSendInput.addEventListener('mousedown', (e) => e.stopPropagation());
+    quickSendInput.addEventListener('focusin', () => setFocusedPane(pane.id));
+    quickSendInput.addEventListener('input', () => {
+      if (pane.activeTabId === null) return;
+      quickSendState(pane.activeTabId).draft = quickSendInput.value;
+      autosizeQuickSend(quickSendInput);
+    });
+    quickSendInput.addEventListener('keydown', (e) => {
+      if (pane.activeTabId === null) return;
+      const s = quickSendState(pane.activeTabId);
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        sendQuickSend(quickSendInput);
+        return;
+      }
+      if (e.key === 'ArrowUp' && !e.shiftKey && s.history.length > 0) {
+        const before = quickSendInput.value.slice(0, quickSendInput.selectionStart);
+        const onFirstLine = before.indexOf('\n') === -1;
+        if (onFirstLine && s.histIndex === -1) {
+          e.preventDefault();
+          s.histIndex = s.history.length - 1;
+          quickSendInput.value = s.history[s.histIndex];
+          s.draft = quickSendInput.value;
+          autosizeQuickSend(quickSendInput);
+          requestAnimationFrame(() => quickSendInput.setSelectionRange(0, 0));
+        }
+      } else if (e.key === 'ArrowDown' && !e.shiftKey && s.histIndex !== -1) {
+        e.preventDefault();
+        s.histIndex += 1;
+        if (s.histIndex >= s.history.length) {
+          s.histIndex = -1;
+          quickSendInput.value = s.draft;
+        } else {
+          quickSendInput.value = s.history[s.histIndex];
+        }
+        s.draft = quickSendInput.value;
+        autosizeQuickSend(quickSendInput);
+        const end = quickSendInput.value.length;
+        requestAnimationFrame(() => quickSendInput.setSelectionRange(end, end));
+      }
+    });
+    quickSend.appendChild(quickSendInput);
+    root.appendChild(quickSend);
     terminalContainer.appendChild(root);
-    paneEls.set(pane.id, { root, header, tabBar: paneTabBar, body });
+    paneEls.set(pane.id, { root, header, tabBar: paneTabBar, body, quickSend });
     if (i > 0 && paneLayoutMode !== 'grid') addPaneSplitter(panes[i - 1], pane);
     // Move member terminals into this pane's body (xterm tolerates DOM
     // moves; fit() is re-run by handleResize afterwards).
@@ -5592,6 +5742,15 @@ function renderPanes() {
   placeSurfaces();
   // B6: file/preview/browser/search tabs live in their member pane's tab bar.
   layoutNonTerminalTabs();
+  updateSendTarget();
+  syncQuickSendBars();
+  // Footer bar changed the body height — re-fit visible terminals.
+  requestAnimationFrame(() => {
+    panes.forEach((p) => {
+      const t = p.activeTabId !== null ? tabs.get(p.activeTabId) : null;
+      if (t && isTerminalVisible(t)) resizeTerminalToContainer(t);
+    });
+  });
 }
 
 // B1: mark tabs that are actually rendered in a pane (.shown-in-pane).
@@ -6010,6 +6169,7 @@ function switchTab(tabId, { focus = true } = {}) {
     dispatch('agent_notification_seen', { tabId });
   }
   updateSendTarget();
+  syncQuickSendBars();
   saveCurrentEditorState();
   void saveLayout();
 
@@ -6065,7 +6225,8 @@ dispatch('agent_session_unbound', { tabId });
      tabs.delete(tabId);
      forgetAgentState(tabId);
      dispatch('terminal_clear_attention', { tabId });
-  detachTabFromPanes(tabId);
+    detachTabFromPanes(tabId);
+  quickSendStates.delete(tabId);
 
   if (activeTabId === tabId && paneHadView) {
     const viewPane = panes.find((pane) => pane.view);
@@ -7938,9 +8099,9 @@ register('close_terminal', ({ tabId }) => {
   closeTerminal(tabId);
 });
 
-// send_to_terminal: send text to terminal
-register('send_to_terminal', ({ text, tabId }) => {
-  sendToTerminal(text, tabId);
+// send_to_terminal: send text to terminal (raw=true skips context attach)
+register('send_to_terminal', ({ text, tabId, raw }) => {
+  sendToTerminal(text, tabId, raw === true);
 });
 
 // get_focus: build the human's attention state from the store + live data

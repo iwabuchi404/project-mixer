@@ -37,7 +37,7 @@ export const COMMAND_SCHEMAS = {
   }),
   session_history: p({ cwd: optStr }),
   close_terminal: p({ tabId: z.number() }),
-  send_to_terminal: p({ text: optStr, tabId: optNum }),
+  send_to_terminal: p({ text: optStr, tabId: optNum, raw: optBool }),
   get_focus: p({}),
   add_project: p({}),
   new_file: p({}),
