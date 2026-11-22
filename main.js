@@ -790,21 +790,41 @@ ipcMain.handle('pty:create', async (event, payload) => {
     // (same -Command / & 'cmd' invocation syntax). cmd.exe is the last
     // resort so a shell tab still opens rather than failing with node-pty's
     // cryptic "File not found" error.
+    const winRoot = process.env.SystemRoot || 'C:\\Windows';
     const resolveWindowsShell = () => {
-      const root = process.env.SystemRoot || 'C:\\Windows';
       const candidates = [
         'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
         'C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe',
-        path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        path.join(winRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       ];
       for (const candidate of candidates) {
         try {
           if (fs.existsSync(candidate)) return candidate;
         } catch { /* ignore and try next */ }
       }
-      return path.join(root, 'System32', 'cmd.exe');
+      return path.join(winRoot, 'System32', 'cmd.exe');
     };
     const windowsShell = resolveWindowsShell();
+
+    // Native conpty resolves bare names (e.g. 'pwsh') against the packaged
+    // process's PATH, which can miss user-installed shells and then fails
+    // with a cryptic empty "File not found: ". Resolve to an absolute path
+    // with Node's view of PATH before spawning; fall back to the bare name.
+    const resolveWindowsCommandPath = (command) => {
+      if (path.isAbsolute(command)) return command;
+      const hasExtension = /\.(exe|cmd|bat)$/i.test(command);
+      const extensions = hasExtension ? [''] : ['.exe', '.cmd', '.bat', ''];
+      const dirs = (process.env.Path || process.env.PATH || '').split(';').filter(Boolean);
+      for (const dir of dirs) {
+        for (const ext of extensions) {
+          const candidate = path.join(dir, command + ext);
+          try {
+            if (fs.existsSync(candidate)) return candidate;
+          } catch { /* ignore unreadable entries */ }
+        }
+      }
+      return command;
+    };
 
     let shell;
     let shellArgs;
@@ -812,10 +832,18 @@ ipcMain.handle('pty:create', async (event, payload) => {
       shell = isWin ? windowsShell : 'bash';
       shellArgs = effectiveArgs;
     } else if ((isWin && winShells.includes(commandName)) || (!isWin && unixShells.includes(commandName))) {
-      if (isWin && commandName === 'pwsh' && !windowsShell.toLowerCase().endsWith('pwsh.exe')) {
-        // User picked pwsh but PowerShell 7 is not installed — degrade to the
-        // inbox PowerShell instead of dying with "File not found".
-        shell = windowsShell;
+      if (isWin) {
+        // Known Windows shells resolve to fixed system locations so the
+        // spawn never depends on the (packaged) process PATH.
+        if (commandName === 'pwsh') {
+          shell = windowsShell;
+        } else if (commandName === 'powershell') {
+          shell = path.join(winRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        } else if (commandName === 'cmd') {
+          shell = path.join(winRoot, 'System32', 'cmd.exe');
+        } else {
+          shell = resolveWindowsCommandPath(options.command);
+        }
       } else {
         shell = options.command;
       }
