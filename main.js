@@ -785,16 +785,43 @@ ipcMain.handle('pty:create', async (event, payload) => {
     const unixShells = ['bash', 'zsh', 'sh'];
     const commandName = options.command ? normalizeCommandName(options.command) : '';
 
+    // PowerShell 7 (pwsh.exe) is NOT preinstalled on Windows: on machines
+    // without it, PM must fall back to the inbox Windows PowerShell 5.1
+    // (same -Command / & 'cmd' invocation syntax). cmd.exe is the last
+    // resort so a shell tab still opens rather than failing with node-pty's
+    // cryptic "File not found" error.
+    const resolveWindowsShell = () => {
+      const root = process.env.SystemRoot || 'C:\\Windows';
+      const candidates = [
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+        'C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe',
+        path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ];
+      for (const candidate of candidates) {
+        try {
+          if (fs.existsSync(candidate)) return candidate;
+        } catch { /* ignore and try next */ }
+      }
+      return path.join(root, 'System32', 'cmd.exe');
+    };
+    const windowsShell = resolveWindowsShell();
+
     let shell;
     let shellArgs;
     if (!options.command) {
-      shell = isWin ? 'pwsh.exe' : 'bash';
+      shell = isWin ? windowsShell : 'bash';
       shellArgs = effectiveArgs;
     } else if ((isWin && winShells.includes(commandName)) || (!isWin && unixShells.includes(commandName))) {
-      shell = options.command;
+      if (isWin && commandName === 'pwsh' && !windowsShell.toLowerCase().endsWith('pwsh.exe')) {
+        // User picked pwsh but PowerShell 7 is not installed — degrade to the
+        // inbox PowerShell instead of dying with "File not found".
+        shell = windowsShell;
+      } else {
+        shell = options.command;
+      }
       shellArgs = effectiveArgs;
     } else if (isWin) {
-      shell = 'pwsh.exe';
+      shell = windowsShell;
       shellArgs = [
         '-NoExit',
         '-Command',
